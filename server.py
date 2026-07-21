@@ -6,6 +6,10 @@ from __future__ import annotations
 import json
 import os
 import threading
+import urllib.error
+import urllib.request
+import webbrowser
+from errno import EADDRINUSE
 from functools import partial
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -19,6 +23,7 @@ STORE_FILE = DATA_DIR / "project-store.json"
 MAX_BODY_BYTES = 64 * 1024 * 1024
 MAX_TEXT_PATCH_BYTES = 2 * 1024 * 1024
 STORE_LOCK = threading.Lock()
+APP_URL = "http://127.0.0.1:5173/"
 
 
 def empty_store() -> dict:
@@ -69,6 +74,13 @@ def write_store(payload: dict) -> None:
 
 
 class WriteThenPublishHandler(SimpleHTTPRequestHandler):
+    def end_headers(self) -> None:
+        if not urlparse(self.path).path.startswith("/api/"):
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
+        super().end_headers()
+
     def send_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
@@ -165,9 +177,27 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
         self.send_json({"ok": True, "id": project_id})
 
 
+def existing_app_is_healthy() -> bool:
+    try:
+        with urllib.request.urlopen(f"{APP_URL}api/project-store", timeout=2) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, dict) and isinstance(payload.get("projects"), list)
+
+
 if __name__ == "__main__":
     handler = partial(WriteThenPublishHandler, directory=str(ROOT))
-    server = ThreadingHTTPServer(("127.0.0.1", 5173), handler)
-    print("Write Then Publish: http://127.0.0.1:5173/", flush=True)
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", 5173), handler)
+    except OSError as error:
+        if error.errno == EADDRINUSE and existing_app_is_healthy():
+            print(f"写了就发已经在运行：{APP_URL}", flush=True)
+            print("正在打开浏览器……", flush=True)
+            webbrowser.open(APP_URL)
+            raise SystemExit(0)
+        raise
+    print(f"Write Then Publish: {APP_URL}", flush=True)
     print(f"共享草稿库: {STORE_FILE}", flush=True)
+    threading.Timer(0.4, webbrowser.open, args=(APP_URL,)).start()
     server.serve_forever()
