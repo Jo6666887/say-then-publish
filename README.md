@@ -126,7 +126,7 @@ cd /Users/junwenzheng/second-brain/03-delivery/write-then-publish
 npm start
 ```
 
-然后访问上面的固定地址。
+命令会自动打开浏览器。首次启动后请保持这个终端窗口运行；需要停止时按 `Control + C`。如果 5173 上的写了就发已经在运行，重复执行 `npm start` 不会再报端口占用，而是直接打开现有页面。
 
 这个项目是纯前端静态页面，可以直接打开 `index.html` 使用。
 
