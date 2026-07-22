@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>写了就发 | Write Then Publish</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2317202f'/%3E%3Cpath d='M18 17h28v7H18zm0 13h20v6H18zm0 12h28v6H18z' fill='%23fff'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="src/styles.css?v=20260722-save-feedback" />
+    <link rel="stylesheet" href="src/styles.css?v=20260723-ux-ai-layout" />
   </head>
   <body>
     <main class="workspace">
@@ -96,6 +96,14 @@
             <button type="button" class="tool-button" data-format="bold" title="加粗"><strong>B</strong></button>
             <button type="button" class="tool-button" data-format="italic" title="斜体"><em>I</em></button>
             <button type="button" class="tool-button" data-format="quote" title="重点引用"><i data-lucide="quote"></i></button>
+            <button id="aiOptimizeBtn" class="ai-toolbar-button" type="button" title="让 AI 自动识别重点并优化当前排版">
+              <i data-lucide="sparkles"></i>
+              <span>AI 优化排版</span>
+            </button>
+            <button id="aiUndoBtn" class="ai-toolbar-button ai-undo-button" type="button" title="撤回上一次 AI 优化" hidden>
+              <i data-lucide="undo-2"></i>
+              <span>撤回 AI</span>
+            </button>
             <label class="tool-button file-tool" title="插入图片" aria-label="插入图片">
               <i data-lucide="image-plus"></i>
               <input id="contentImageInput" type="file" accept="image/*" multiple />
@@ -286,31 +294,46 @@
 
       <section class="preview-panel" aria-label="图片预览">
         <div class="preview-topbar">
-          <div>
+          <div class="preview-heading">
             <h2>预览与下载</h2>
-            <span id="statusText">自动分页已开启</span>
+            <span id="statusText" class="render-status">自动分页已开启</span>
           </div>
-          <div class="topbar-actions">
-            <label class="export-scale-control" title="保持版式比例，按更高像素重新绘制下载图片">
-              <span>清晰度</span>
-              <select id="exportScaleSelect" aria-label="导出清晰度">
-                <option value="1">1× 标准</option>
-                <option value="2" selected>2× 高清</option>
-                <option value="3">3× 超清</option>
-              </select>
-            </label>
-            <button id="scrollModeBtn" class="secondary-button" type="button">
-              <i data-lucide="scroll-text"></i>
-              滑动截图
-            </button>
-            <button id="downloadZipBtn" class="primary-button" type="button">
-              <i data-lucide="download"></i>
-              批量下载
-            </button>
-            <button id="downloadArticleBtn" class="primary-button" type="button" hidden>
-              <i data-lucide="download"></i>
-              下载长图
-            </button>
+          <div class="preview-topbar-controls">
+            <div id="saveCheckpoint" class="save-checkpoint" data-state="checking">
+              <div class="save-checkpoint-icon" aria-hidden="true">
+                <i data-lucide="cloud-check"></i>
+              </div>
+              <div class="save-checkpoint-copy" role="status" aria-live="polite" aria-atomic="true">
+                <strong id="saveCheckpointLabel">正在确认保存状态</strong>
+                <small id="saveCheckpointMeta">正在读取本机与云端的最近记录…</small>
+              </div>
+              <button id="saveNowBtn" class="save-now-button" type="button" title="立即保存当前内容">
+                <i data-lucide="save"></i>
+                <span>立即保存</span>
+              </button>
+            </div>
+            <div class="topbar-actions">
+              <label class="export-scale-control" title="保持版式比例，按更高像素重新绘制下载图片">
+                <span>清晰度</span>
+                <select id="exportScaleSelect" aria-label="导出清晰度">
+                  <option value="1">1× 标准</option>
+                  <option value="2" selected>2× 高清</option>
+                  <option value="3">3× 超清</option>
+                </select>
+              </label>
+              <button id="scrollModeBtn" class="secondary-button" type="button">
+                <i data-lucide="scroll-text"></i>
+                滑动截图
+              </button>
+              <button id="downloadZipBtn" class="primary-button" type="button">
+                <i data-lucide="download"></i>
+                批量下载
+              </button>
+              <button id="downloadArticleBtn" class="primary-button" type="button" hidden>
+                <i data-lucide="download"></i>
+                下载长图
+              </button>
+            </div>
           </div>
         </div>
         <div class="preview-body">
@@ -356,6 +379,62 @@
         </div>
       </section>
     </main>
+
+    <div id="aiOptimizeModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="aiOptimizeTitle" aria-describedby="aiOptimizeDescription">
+      <div class="modal-card ai-optimize-card">
+        <div class="modal-head">
+          <div>
+            <h3 id="aiOptimizeTitle">AI 优化当前内容</h3>
+            <p id="aiOptimizeDescription">先查看优化前后差异，确认后才会替换正文；应用后仍可撤回。</p>
+          </div>
+          <button id="aiOptimizeCloseBtn" class="icon-button ghost" type="button" title="关闭 AI 优化" aria-label="关闭 AI 优化">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <div class="ai-optimize-body">
+          <div id="aiOptimizeStatus" class="ai-optimize-status" role="status" aria-live="polite">选择优化方式后开始生成建议。</div>
+          <div class="ai-mode-switch" role="group" aria-label="AI 优化方式">
+            <button id="aiModeLayout" class="ai-mode-button active" type="button" data-ai-mode="layout" aria-pressed="true">
+              <i data-lucide="wand-sparkles"></i>
+              <span><strong>只优化排版</strong><small>识别重点、增加层级与高亮，不改原意</small></span>
+            </button>
+            <button id="aiModePolish" class="ai-mode-button" type="button" data-ai-mode="polish" aria-pressed="false">
+              <i data-lucide="message-square-text"></i>
+              <span><strong>润色并排版</strong><small>同时优化表达、节奏与视觉重点</small></span>
+            </button>
+          </div>
+          <div class="ai-compare-grid">
+            <section class="ai-compare-pane" aria-labelledby="aiBeforeTitle">
+              <div class="ai-compare-heading">
+                <h4 id="aiBeforeTitle">优化前</h4>
+                <span>当前保存版本</span>
+              </div>
+              <pre id="aiBeforePreview" class="ai-copy-preview" tabindex="0">等待读取当前正文…</pre>
+            </section>
+            <section class="ai-compare-pane ai-after-pane" aria-labelledby="aiAfterTitle">
+              <div class="ai-compare-heading">
+                <h4 id="aiAfterTitle">优化后</h4>
+                <span>AI 建议版本</span>
+              </div>
+              <pre id="aiAfterPreview" class="ai-copy-preview" tabindex="0">生成完成后将在这里展示完整结果。</pre>
+            </section>
+          </div>
+          <section class="ai-change-summary" aria-labelledby="aiChangeTitle">
+            <h4 id="aiChangeTitle">本次调整</h4>
+            <ul id="aiChangeList">
+              <li>尚未生成优化建议。</li>
+            </ul>
+          </section>
+        </div>
+        <div class="ai-optimize-actions">
+          <button id="aiOptimizeCancelBtn" class="secondary-button" type="button">保留原文</button>
+          <button id="aiOptimizeApplyBtn" class="primary-button" type="button">
+            <i data-lucide="check"></i>
+            应用优化
+          </button>
+        </div>
+      </div>
+    </div>
 
     <div id="cropModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="cropTitle">
       <div class="modal-card">
@@ -466,6 +545,6 @@
     <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/lucide@1.8.0/dist/umd/lucide.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
-    <script src="src/app.js?v=20260722-save-feedback"></script>
+    <script src="src/app.js?v=20260723-ux-ai-layout"></script>
   </body>
 </html>

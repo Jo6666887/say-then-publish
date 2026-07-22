@@ -25,6 +25,8 @@ const SHARED_PROJECT_STORE_URL = "/api/project-store";
 const SHARED_PROJECT_TEXT_URL = "/api/project-store/current-text";
 const CLOUD_STATUS_URL = "/api/cloud-status";
 const CLOUD_SYNC_URL = "/api/cloud-sync";
+const AI_OPTIMIZE_STATUS_URL = "/api/ai/status";
+const AI_OPTIMIZE_URL = "/api/ai/optimize-layout";
 const ASSET_LIBRARY_URL = "/api/assets";
 const MAX_DECODED_IMAGE_CACHE = 64;
 const MAX_PROJECTS = 24;
@@ -44,6 +46,25 @@ let assetLibraryMode = "unknown";
 let localAssetDirectoryHandle = null;
 let assetLibraryReturnFocus = null;
 let localAssetPreviewUrls = [];
+let saveCheckpointPollGeneration = 0;
+let manualSaveGeneration = 0;
+let pendingAiOptimization = null;
+let aiOptimizeReturnFocus = null;
+let aiOptimizeRequestGeneration = 0;
+let imageReorderDrag = null;
+let imageReorderBusy = false;
+
+const saveCheckpoint = {
+  phase: "loading",
+  projectId: null,
+  targetUpdatedAt: 0,
+  localSavedAt: null,
+  serverSavedAt: null,
+  cloudSavedAt: null,
+  cloudUpdatedAt: 0,
+  destination: "正在确认保存位置",
+  error: "",
+};
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -54,6 +75,10 @@ const els = {
   pageCount: $("#pageCount"),
   projectTitle: $("#projectTitleInput"),
   status: $("#statusText"),
+  saveCheckpoint: $("#saveCheckpoint"),
+  saveCheckpointLabel: $("#saveCheckpointLabel"),
+  saveCheckpointMeta: $("#saveCheckpointMeta"),
+  saveNow: $("#saveNowBtn"),
   historySidebar: $("#historySidebar"),
   historyNote: $("#historyNote"),
   historyToggle: $("#historyToggleBtn"),
@@ -79,6 +104,18 @@ const els = {
   assetLibraryRefresh: $("#assetLibraryRefreshBtn"),
   assetLibraryStatus: $("#assetLibraryStatus"),
   assetLibraryGrid: $("#assetLibraryGrid"),
+  aiOptimize: $("#aiOptimizeBtn"),
+  aiUndo: $("#aiUndoBtn"),
+  aiOptimizeModal: $("#aiOptimizeModal"),
+  aiOptimizeClose: $("#aiOptimizeCloseBtn"),
+  aiOptimizeStatus: $("#aiOptimizeStatus"),
+  aiModeLayout: $("#aiModeLayout"),
+  aiModePolish: $("#aiModePolish"),
+  aiBeforePreview: $("#aiBeforePreview"),
+  aiAfterPreview: $("#aiAfterPreview"),
+  aiChangeList: $("#aiChangeList"),
+  aiOptimizeCancel: $("#aiOptimizeCancelBtn"),
+  aiOptimizeApply: $("#aiOptimizeApplyBtn"),
   projectHistory: $("#projectHistory"),
   historyFilterButtons: document.querySelectorAll("[data-history-filter]"),
   panelResizers: document.querySelectorAll("[data-panel-resize]"),
@@ -270,6 +307,7 @@ const state = {
   historyFilter: "all",
   exportScale: 2,
   localDatabaseHydrated: false,
+  lastAiRevision: null,
   panelLayout: {
     history: PANEL_LIMITS.history.fallback,
     editor: PANEL_LIMITS.editor.fallback,
@@ -335,6 +373,7 @@ function defaultFormState() {
     avatar: sampleAvatar,
     avatarCrop: null,
     images: defaultImages(),
+    lastAiRevision: null,
   };
 }
 
@@ -574,10 +613,12 @@ function readForm() {
     avatar: state.avatar,
     avatarCrop: state.avatarCrop,
     images: state.images,
+    lastAiRevision: state.lastAiRevision,
   };
 }
 
 function applyForm(data) {
+  manualSaveGeneration += 1;
   els.content.value = data.content ?? defaultText;
   els.displayName.value = data.displayName ?? "捏捏番茄（AI图文版）";
   els.handle.value = data.handle ?? "@heytomato";
@@ -602,11 +643,13 @@ function applyForm(data) {
   state.avatar = data.avatar || sampleAvatar;
   state.avatarCrop = data.avatarCrop || null;
   state.images = normalizeImagesForContent(data.content, data.images);
+  state.lastAiRevision = normalizeAiRevision(data.lastAiRevision);
   lastEditorImageReferenceSignature = imageReferenceSignature(els.content.value);
   updateAvatarPreview();
   document.documentElement.style.setProperty("--brush-color", els.inlineColor.value);
   document.documentElement.style.setProperty("--text-bg-brush-color", els.inlineBgColor.value);
   updateImageList();
+  syncAiUndoAvailability();
   const currentProject = findHistoryProject(state.currentProjectId);
   if (els.projectTitle) {
     els.projectTitle.value = isBuiltInProject(currentProject)
@@ -837,6 +880,107 @@ function debounce(fn, wait = 140) {
   };
 }
 
+function nextProjectTimestamp(project) {
+  return Math.max(Date.now(), Number(project?.updatedAt || 0) + 1);
+}
+
+function formatCheckpointVersion(value) {
+  const date = value ? new Date(Number(value)) : null;
+  if (!date || Number.isNaN(date.getTime())) return "当前版本";
+  const pad = (part) => String(part).padStart(2, "0");
+  return `当前版本 ${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function lastConfirmedCheckpointText() {
+  const confirmedAt = saveCheckpoint.cloudSavedAt || saveCheckpoint.serverSavedAt || saveCheckpoint.localSavedAt;
+  return confirmedAt ? `上次确认 ${formatSavedTime(confirmedAt)}` : "尚无已确认保存";
+}
+
+function renderSaveCheckpoint() {
+  if (!els.saveCheckpoint || !els.saveCheckpointLabel || !els.saveCheckpointMeta) return;
+  const phase = saveCheckpoint.phase || "loading";
+  const version = formatCheckpointVersion(saveCheckpoint.targetUpdatedAt);
+  let label = "正在确认保存位置";
+  let meta = "请稍候，正文不会因为状态检测而停止本地保存";
+
+  if (isBuiltInProjectId(state.currentProjectId)) {
+    label = "内置说明书 · 只读";
+    meta = "这里不会覆盖你的草稿；新建项目后会自动保存";
+  } else if (phase === "dirty") {
+    label = "有未保存修改";
+    meta = `${version} · ${lastConfirmedCheckpointText()}`;
+  } else if (phase === "saving-local") {
+    label = "正在保存当前版本…";
+    meta = `${version} · 浏览器副本与本机文件`;
+  } else if (phase === "saved-local") {
+    label = "当前版本已保存到本机";
+    meta = `${version} · ${formatSavedTime(saveCheckpoint.serverSavedAt || saveCheckpoint.localSavedAt)} · ${saveCheckpoint.destination}`;
+  } else if (phase === "syncing-cloud") {
+    label = "本机已保存，正在同步云端…";
+    meta = `${version} · ${saveCheckpoint.destination}`;
+  } else if (phase === "saved-cloud") {
+    label = "当前版本已保存到云端";
+    meta = `${version} · 确认于 ${formatSavedTime(saveCheckpoint.cloudSavedAt)} · ${saveCheckpoint.destination}`;
+  } else if (phase === "degraded") {
+    label = "当前版本已保存到本机";
+    meta = `${version} · 云端不可用 · ${saveCheckpoint.destination}${saveCheckpoint.error ? ` · ${saveCheckpoint.error}` : ""}`;
+  } else if (phase === "error") {
+    label = "本次保存尚未确认";
+    meta = `${lastConfirmedCheckpointText()}${saveCheckpoint.error ? ` · ${saveCheckpoint.error}` : ""}`;
+  }
+
+  els.saveCheckpoint.dataset.phase = isBuiltInProjectId(state.currentProjectId) ? "readonly" : phase;
+  const visualState = isBuiltInProjectId(state.currentProjectId)
+    ? "local"
+    : phase === "saved-cloud"
+      ? "synced"
+      : phase === "saved-local"
+        ? "saved"
+        : phase === "saving-local" || phase === "syncing-cloud"
+          ? "saving"
+          : phase === "degraded"
+            ? "warning"
+            : phase === "loading"
+              ? "checking"
+              : phase;
+  els.saveCheckpoint.dataset.state = visualState;
+  els.saveCheckpointLabel.textContent = label;
+  els.saveCheckpointMeta.textContent = meta;
+  els.saveCheckpoint.setAttribute("aria-label", `${label}。${meta}`);
+  const icon = els.saveCheckpoint.querySelector("[data-lucide]");
+  if (icon) {
+    const iconName = visualState === "synced" ? "cloud-check" : visualState === "saving" ? "loader-circle" : visualState === "dirty" ? "circle-dot-dashed" : visualState === "error" ? "triangle-alert" : visualState === "warning" ? "hard-drive-download" : "save";
+    if (icon.getAttribute("data-lucide") !== iconName) {
+      icon.setAttribute("data-lucide", iconName);
+      if (window.lucide) window.lucide.createIcons();
+    }
+  }
+  if (els.saveNow) {
+    const busy = phase === "saving-local" || phase === "syncing-cloud";
+    els.saveNow.disabled = busy || isBuiltInProjectId(state.currentProjectId);
+    els.saveNow.setAttribute("aria-busy", String(busy));
+  }
+}
+
+function setSaveCheckpoint(patch = {}) {
+  Object.assign(saveCheckpoint, patch);
+  renderSaveCheckpoint();
+}
+
+function markSaveDirty() {
+  manualSaveGeneration += 1;
+  if (persistenceMode === "cloud") setPrimarySaveButtonFeedback("保存", "save");
+  if (!state.localDatabaseHydrated || isBuiltInProjectId(state.currentProjectId)) return;
+  saveCheckpointPollGeneration += 1;
+  const current = state.projects.find((project) => project.id === state.currentProjectId);
+  setSaveCheckpoint({
+    phase: "dirty",
+    projectId: state.currentProjectId,
+    targetUpdatedAt: Number(current?.updatedAt || saveCheckpoint.targetUpdatedAt || Date.now()),
+    error: "",
+  });
+}
+
 function flushStateSave() {
   window.clearTimeout(localStateSaveTimer);
   window.clearTimeout(localStateSaveMaxTimer);
@@ -849,6 +993,7 @@ function scheduleStateSave() {
   // 首屏必须先让 IndexedDB 与 LocalStorage 完成合并。否则旧的 LocalStorage
   // 草稿会被首屏渲染误标成“刚刚更新”，反过来覆盖数据库里的新图片。
   if (!state.localDatabaseHydrated) return;
+  markSaveDirty();
   window.clearTimeout(localStateSaveTimer);
   localStateSaveTimer = window.setTimeout(flushStateSave, LOCAL_STATE_SAVE_DELAY);
   if (!localStateSaveMaxTimer) {
@@ -865,19 +1010,26 @@ function saveState() {
     const data = readForm();
     if (isBuiltInProjectId(state.currentProjectId)) {
       updateProjectHistory();
+      renderSaveCheckpoint();
       return;
     }
 
-    const now = Date.now();
     let current = state.projects.find((project) => project.id === state.currentProjectId);
     if (!current) {
       current = createProject(data);
       state.currentProjectId = current.id;
       state.projects.unshift(current);
     }
+    const now = nextProjectTimestamp(current);
     current.data = data;
     current.title = normalizeProjectTitle(els.projectTitle?.value) || current.title || projectTitleFromData(data);
     current.updatedAt = now;
+    setSaveCheckpoint({
+      phase: "saving-local",
+      projectId: current.id,
+      targetUpdatedAt: now,
+      error: "",
+    });
     state.projects = [
       current,
       ...state.projects.filter((project) => project.id !== current.id),
@@ -899,6 +1051,7 @@ function saveState() {
     }
   } catch (error) {
     console.error(error);
+    setSaveCheckpoint({ phase: "error", error: "请点击“立即保存”重试" });
     els.status.textContent = "本次内容未能自动保存，请立即导出草稿备份";
   }
 }
@@ -1062,7 +1215,6 @@ async function loadProjectStoreFromSharedServer() {
 }
 
 async function saveProjectStoreToSharedServer(snapshot) {
-  if (sharedProjectStoreAvailable === false) return false;
   try {
     const response = await fetch(SHARED_PROJECT_STORE_URL, {
       method: "PUT",
@@ -1070,12 +1222,26 @@ async function saveProjectStoreToSharedServer(snapshot) {
       body: JSON.stringify(snapshot),
     });
     if (!response.ok) throw new Error(`共享草稿库写入失败（${response.status}）`);
+    const payload = await response.json();
+    const responseStore = payload?.store && Array.isArray(payload.store.projects) ? payload.store : payload;
+    const targetProject = snapshot.projects.find((project) => project.id === snapshot.activeId);
+    const confirmedProject = responseStore?.projects?.find((project) => project.id === snapshot.activeId);
+    const targetUpdatedAt = Number(targetProject?.updatedAt || 0);
+    const confirmedUpdatedAt = Number(payload?.saveMeta?.savedUpdatedAt || payload?.save?.updatedAt || confirmedProject?.updatedAt || 0);
+    if (
+      payload?.saveMeta?.saved !== true
+      || payload.saveMeta.projectId !== snapshot.activeId
+      || !targetUpdatedAt
+      || confirmedUpdatedAt !== targetUpdatedAt
+    ) {
+      throw new Error("本机服务没有精确确认当前草稿版本");
+    }
     sharedProjectStoreAvailable = true;
-    return true;
+    return { saved: true, confirmedUpdatedAt, responseStore };
   } catch (error) {
     sharedProjectStoreAvailable = false;
     console.warn("共享草稿库写入失败，已保留浏览器本地副本", error);
-    return false;
+    return { saved: false, confirmedUpdatedAt: 0, error };
   }
 }
 
@@ -1086,16 +1252,22 @@ function imageReferenceSignature(content) {
 async function saveCurrentProjectTextToSharedServer({ keepalive = false } = {}) {
   window.clearTimeout(sharedTextSaveTimer);
   sharedTextSaveTimer = 0;
-  if (isBuiltInProjectId(state.currentProjectId) || sharedProjectStoreAvailable === false) return false;
+  if (isBuiltInProjectId(state.currentProjectId)) return false;
   const current = state.projects.find((project) => project.id === state.currentProjectId);
   if (!current) return false;
 
-  const updatedAt = Date.now();
+  const updatedAt = nextProjectTimestamp(current);
   const title = normalizeProjectTitle(els.projectTitle?.value) || current.title || projectTitleFromData(current.data);
   const content = els.content.value;
   current.title = title;
   current.updatedAt = updatedAt;
   current.data = { ...current.data, content };
+  setSaveCheckpoint({
+    phase: "saving-local",
+    projectId: current.id,
+    targetUpdatedAt: updatedAt,
+    error: "",
+  });
 
   try {
     const response = await fetch(SHARED_PROJECT_TEXT_URL, {
@@ -1105,8 +1277,31 @@ async function saveCurrentProjectTextToSharedServer({ keepalive = false } = {}) 
       keepalive,
     });
     if (!response.ok) throw new Error(`正文快速保存失败（${response.status}）`);
+    const payload = await response.json();
+    if (
+      payload?.saveMeta?.saved !== true
+      || payload.saveMeta.projectId !== current.id
+      || Number(payload.saveMeta.savedUpdatedAt || 0) !== updatedAt
+    ) {
+      throw new Error("本机服务没有精确确认当前正文版本");
+    }
     sharedProjectStoreAvailable = true;
     updateProjectHistory();
+    const stillCurrent = state.currentProjectId === current.id
+      && Number(current.updatedAt) === updatedAt
+      && els.content.value === content
+      && saveCheckpoint.phase !== "dirty";
+    if (stillCurrent) {
+      const savedAt = new Date().toISOString();
+      setSaveCheckpoint({
+        phase: persistenceMode === "cloud" ? "syncing-cloud" : "degraded",
+        projectId: current.id,
+        targetUpdatedAt: updatedAt,
+        serverSavedAt: savedAt,
+        destination: persistenceMode === "cloud" ? "Supabase + 私有 TOS" : "本机项目文件",
+      });
+      if (persistenceMode === "cloud") void confirmCloudCheckpoint(current.id, updatedAt);
+    }
     return true;
   } catch (error) {
     console.warn("正文快速保存失败，继续使用完整草稿保存", error);
@@ -1123,22 +1318,64 @@ function scheduleCurrentProjectTextSave() {
 }
 
 async function flushProjectStoreToIndexedDb() {
-  if (!state.localDatabaseHydrated) return false;
+  if (!state.localDatabaseHydrated) return { localSaved: false, sharedSaved: false, projectUpdatedAt: 0 };
   window.clearTimeout(localDatabaseSaveTimer);
   localDatabaseSaveTimer = 0;
   const queuedSave = localDatabaseSaveChain
     .catch(() => false)
     .then(async () => {
       const snapshot = projectStoreSnapshot();
+      const targetProject = snapshot.projects.find((project) => project.id === snapshot.activeId);
+      const projectId = targetProject?.id || snapshot.activeId;
+      const projectUpdatedAt = Number(targetProject?.updatedAt || 0);
+      let localSaved = false;
+      let sharedResult = { saved: false, confirmedUpdatedAt: 0 };
       try {
         // 在真正轮到本次事务时读取最新快照，避免旧的大图事务晚完成后覆盖新图。
-        const localSaved = await saveProjectStoreToIndexedDb(snapshot);
-        const sharedSaved = await saveProjectStoreToSharedServer(snapshot);
-        return localSaved || sharedSaved;
+        localSaved = await saveProjectStoreToIndexedDb(snapshot);
       } catch (error) {
         console.warn("IndexedDB 草稿写入失败", error);
-        return false;
       }
+      sharedResult = await saveProjectStoreToSharedServer(snapshot);
+      const result = {
+        localSaved,
+        sharedSaved: sharedResult.saved === true,
+        snapshot,
+        projectId,
+        projectUpdatedAt,
+        confirmedUpdatedAt: Number(sharedResult.confirmedUpdatedAt || 0),
+      };
+
+      const current = state.projects.find((project) => project.id === projectId);
+      const stillCurrent = state.currentProjectId === projectId
+        && Number(current?.updatedAt || 0) === projectUpdatedAt
+        && current?.data?.content === els.content.value
+        && saveCheckpoint.phase !== "dirty";
+      if (stillCurrent && result.sharedSaved) {
+        const savedAt = new Date().toISOString();
+        setSaveCheckpoint({
+          phase: persistenceMode === "cloud" ? "syncing-cloud" : "degraded",
+          projectId,
+          targetUpdatedAt: projectUpdatedAt,
+          localSavedAt: localSaved ? savedAt : saveCheckpoint.localSavedAt,
+          serverSavedAt: savedAt,
+          destination: persistenceMode === "cloud" ? "Supabase + 私有 TOS" : "本机项目文件",
+          error: "",
+        });
+        if (persistenceMode === "cloud") void confirmCloudCheckpoint(projectId, projectUpdatedAt);
+      } else if (stillCurrent && localSaved) {
+        setSaveCheckpoint({
+          phase: "degraded",
+          projectId,
+          targetUpdatedAt: projectUpdatedAt,
+          localSavedAt: new Date().toISOString(),
+          destination: "浏览器本地数据库",
+          error: "本机项目服务暂未确认，刷新前请勿关闭页面",
+        });
+      } else if (stillCurrent && !localSaved && !result.sharedSaved) {
+        setSaveCheckpoint({ phase: "error", error: "浏览器数据库与本机项目文件均未确认写入" });
+      }
+      return result;
     });
   localDatabaseSaveChain = queuedSave;
   return queuedSave;
@@ -1226,12 +1463,14 @@ async function hydrateProjectStoreFromIndexedDb() {
     }
     state.localDatabaseHydrated = true;
     saveProjectStore();
+    void refreshPersistenceMode();
     if (sharedProjectStoreAvailable) {
       els.status.textContent = "已连接共享草稿库，Codex 与 Chrome 刷新后会读取同一版本";
     }
   } catch (error) {
     console.warn("IndexedDB 草稿恢复失败", error);
     state.localDatabaseHydrated = true;
+    void refreshPersistenceMode();
   }
 }
 
@@ -1329,6 +1568,11 @@ async function exportProjectBackup() {
 function updatePersistenceControls(status = {}) {
   const cloudConnected = status.enabled === true && status.fallbackToLocal !== true;
   persistenceMode = cloudConnected ? "cloud" : "local";
+  saveCheckpoint.destination = cloudConnected
+    ? "Supabase + 私有 TOS"
+    : status.folderName
+      ? `本机文件夹 · ${status.folderName}`
+      : "本机项目文件";
 
   if (els.exportProjectsLabel) {
     els.exportProjectsLabel.textContent = cloudConnected ? "保存" : "导出 JSON";
@@ -1346,8 +1590,84 @@ function updatePersistenceControls(status = {}) {
       ? "自动保存到云端，点击恢复"
       : "自动保存到本机，点击恢复";
   }
+  renderSaveCheckpoint();
   if (window.lucide) window.lucide.createIcons();
   return persistenceMode;
+}
+
+function cloudCheckpointIdentity(status = {}) {
+  return {
+    projectId: status.projectId || status.syncedProjectId || status.lastProjectId || null,
+    updatedAt: Number(status.syncedUpdatedAt || status.projectUpdatedAt || 0),
+  };
+}
+
+function cloudCheckpointMatches(status, projectId, updatedAt) {
+  const checkpoint = cloudCheckpointIdentity(status);
+  return checkpoint.projectId === projectId && checkpoint.updatedAt === Number(updatedAt || 0);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function confirmCloudCheckpoint(projectId, updatedAt, { attempts = 7 } = {}) {
+  if (!projectId || !updatedAt || persistenceMode !== "cloud") return false;
+  const generation = ++saveCheckpointPollGeneration;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (generation !== saveCheckpointPollGeneration) return false;
+    if (attempt > 0) await delay(Math.min(1400, 450 + attempt * 180));
+    let status;
+    try {
+      const response = await fetch(CLOUD_STATUS_URL, { cache: "no-store" });
+      if (!response.ok) throw new Error(`保存状态读取失败（${response.status}）`);
+      status = await response.json();
+    } catch (error) {
+      if (attempt === attempts - 1 && generation === saveCheckpointPollGeneration) {
+        setSaveCheckpoint({
+          phase: "degraded",
+          destination: "本机项目文件",
+          error: "云端状态暂时无法确认",
+        });
+      }
+      continue;
+    }
+
+    updatePersistenceControls(status);
+    if (generation !== saveCheckpointPollGeneration) return false;
+    if (cloudCheckpointMatches(status, projectId, updatedAt)) {
+      setSaveCheckpoint({
+        phase: "saved-cloud",
+        projectId,
+        targetUpdatedAt: updatedAt,
+        cloudUpdatedAt: cloudCheckpointIdentity(status).updatedAt,
+        cloudSavedAt: status.lastSuccessAt || new Date().toISOString(),
+        destination: "Supabase + 私有 TOS",
+        error: "",
+      });
+      return true;
+    }
+    if (status.fallbackToLocal || status.enabled !== true) {
+      setSaveCheckpoint({
+        phase: "degraded",
+        projectId,
+        targetUpdatedAt: updatedAt,
+        destination: "本机项目文件",
+        error: status.lastError ? "云端不可用，已保留本机副本" : "云端未配置，已保留本机副本",
+      });
+      return false;
+    }
+    setSaveCheckpoint({ phase: "syncing-cloud", projectId, targetUpdatedAt: updatedAt, error: "" });
+  }
+  if (generation === saveCheckpointPollGeneration) {
+    setSaveCheckpoint({
+      phase: "saved-local",
+      projectId,
+      targetUpdatedAt: updatedAt,
+      error: "云端仍在后台同步，可点击“立即保存”确认",
+    });
+  }
+  return false;
 }
 
 async function refreshPersistenceMode({ quiet = true } = {}) {
@@ -1356,9 +1676,36 @@ async function refreshPersistenceMode({ quiet = true } = {}) {
     if (!response.ok) throw new Error(`保存状态读取失败（${response.status}）`);
     const status = await response.json();
     updatePersistenceControls(status);
+    const current = state.projects.find((project) => project.id === state.currentProjectId);
+    if (current && state.localDatabaseHydrated && saveCheckpoint.phase === "loading") {
+      const updatedAt = Number(current.updatedAt || 0);
+      if (cloudCheckpointMatches(status, current.id, updatedAt)) {
+        setSaveCheckpoint({
+          phase: "saved-cloud",
+          projectId: current.id,
+          targetUpdatedAt: updatedAt,
+          cloudUpdatedAt: cloudCheckpointIdentity(status).updatedAt,
+          cloudSavedAt: status.lastSuccessAt || updatedAt,
+          destination: "Supabase + 私有 TOS",
+          error: "",
+        });
+      } else {
+        setSaveCheckpoint({
+          phase: status.enabled === true && !status.fallbackToLocal ? "saved-local" : "degraded",
+          projectId: current.id,
+          targetUpdatedAt: updatedAt,
+          serverSavedAt: updatedAt,
+          destination: status.enabled === true && !status.fallbackToLocal ? "本机项目文件 · 云端待确认" : "本机项目文件",
+          error: status.fallbackToLocal ? "云端不可用，已使用本机副本" : "",
+        });
+      }
+    }
     return status;
   } catch (error) {
     updatePersistenceControls({ enabled: false, fallbackToLocal: true });
+    if (saveCheckpoint.phase !== "dirty" && saveCheckpoint.phase !== "saving-local") {
+      setSaveCheckpoint({ phase: "degraded", destination: "浏览器本地数据库", error: "无法连接本机保存服务" });
+    }
     if (!quiet) els.status.textContent = "无法连接云端，当前按本地模式保存";
     return { enabled: false, fallbackToLocal: true, lastError: error?.message || String(error) };
   }
@@ -1380,42 +1727,133 @@ function setPrimarySaveButtonFeedback(label, iconName, { busy = false } = {}) {
   if (window.lucide) window.lucide.createIcons();
 }
 
+function currentManualSaveTarget() {
+  const project = state.projects.find((item) => item.id === state.currentProjectId);
+  if (!project || isBuiltInProject(project)) return null;
+  return {
+    projectId: project.id,
+    projectUpdatedAt: Number(project.updatedAt || 0),
+    content: els.content.value,
+  };
+}
+
+function manualSaveTargetMatches(generation, target) {
+  if (generation !== manualSaveGeneration || !target?.projectId || !target.projectUpdatedAt) return false;
+  const current = state.projects.find((item) => item.id === target.projectId);
+  return Boolean(
+    state.currentProjectId === target.projectId
+      && Number(current?.updatedAt || 0) === Number(target.projectUpdatedAt)
+      && els.content.value === target.content
+      && current?.data?.content === target.content,
+  );
+}
+
+async function fetchCloudStatusSnapshot() {
+  const response = await fetch(CLOUD_STATUS_URL, { cache: "no-store" });
+  if (!response.ok) throw new Error(`保存状态读取失败（${response.status}）`);
+  return response.json();
+}
+
 async function saveProjectNow() {
   if (!els.exportProjects) return;
+  const generation = ++manualSaveGeneration;
   els.exportProjects.disabled = true;
+  if (els.saveNow) els.saveNow.disabled = true;
   setPrimarySaveButtonFeedback("保存中…", "loader-circle", { busy: true });
   let savedToCloud = false;
+  let persisted = null;
+  let target = null;
   try {
     saveState();
-    if (sharedTextSaveTimer) await saveCurrentProjectTextToSharedServer();
-    const persisted = state.localDatabaseHydrated
+    target = currentManualSaveTarget();
+    if (!target) return;
+    if (sharedTextSaveTimer) {
+      const textSavePromise = saveCurrentProjectTextToSharedServer();
+      target = currentManualSaveTarget();
+      await textSavePromise;
+      if (!manualSaveTargetMatches(generation, target)) return;
+    }
+    persisted = state.localDatabaseHydrated
       ? await flushProjectStoreToIndexedDb()
-      : saveProjectStore();
-    if (!persisted) throw new Error("本地数据库与共享草稿库均未确认保存");
+      : { localSaved: saveProjectStore(), sharedSaved: false, projectId: state.currentProjectId, projectUpdatedAt: 0 };
+    target = {
+      projectId: persisted.projectId,
+      projectUpdatedAt: Number(persisted.projectUpdatedAt || 0),
+      content: persisted.snapshot?.projects?.find((item) => item.id === persisted.projectId)?.data?.content ?? els.content.value,
+    };
+    if (!manualSaveTargetMatches(generation, target)) return;
+    if (!persisted.localSaved && !persisted.sharedSaved) throw new Error("浏览器数据库与本机项目文件均未确认保存");
+    if (!persisted.sharedSaved) throw new Error("本机项目文件尚未确认当前版本，暂不执行云同步");
 
     els.status.textContent = "已保存本机副本，正在同步云端…";
+    setSaveCheckpoint({
+      phase: "syncing-cloud",
+      projectId: persisted.projectId,
+      targetUpdatedAt: persisted.projectUpdatedAt,
+      destination: "Supabase + 私有 TOS",
+      error: "",
+    });
     const response = await fetch(CLOUD_SYNC_URL, { method: "POST" });
+    if (!manualSaveTargetMatches(generation, target)) return;
     const payload = await response.json().catch(() => ({}));
-    const status = payload.status || await refreshPersistenceMode();
+    if (!manualSaveTargetMatches(generation, target)) return;
+    const status = payload.status || await fetchCloudStatusSnapshot();
+    if (!manualSaveTargetMatches(generation, target)) return;
     updatePersistenceControls(status);
-    if (!response.ok || payload.ok !== true || status.fallbackToLocal) {
+    if (!response.ok || payload.ok !== true || status.fallbackToLocal || !cloudCheckpointMatches(status, persisted.projectId, persisted.projectUpdatedAt)) {
       throw new Error(status.lastError || payload.error || `云同步失败（${response.status}）`);
     }
+    setSaveCheckpoint({
+      phase: "saved-cloud",
+      projectId: persisted.projectId,
+      targetUpdatedAt: persisted.projectUpdatedAt,
+      cloudUpdatedAt: cloudCheckpointIdentity(status).updatedAt,
+      cloudSavedAt: status.lastSuccessAt || new Date().toISOString(),
+      destination: "Supabase + 私有 TOS",
+      error: "",
+    });
     els.status.textContent = `已保存到云端 · ${formatSavedTime(status.lastSuccessAt)}`;
     savedToCloud = true;
     setPrimarySaveButtonFeedback("已保存", "check");
   } catch (error) {
     console.warn("手动保存到云端失败", error);
-    const status = await refreshPersistenceMode();
+    if (!manualSaveTargetMatches(generation, target)) return;
+    let status;
+    try {
+      status = await fetchCloudStatusSnapshot();
+    } catch (statusError) {
+      status = {
+        enabled: false,
+        fallbackToLocal: true,
+        lastError: statusError?.message || String(statusError),
+      };
+    }
+    if (!manualSaveTargetMatches(generation, target)) return;
+    updatePersistenceControls(status);
     if (status.fallbackToLocal || status.enabled !== true) {
+      setSaveCheckpoint({
+        phase: persisted?.sharedSaved || persisted?.localSaved ? "degraded" : "error",
+        destination: persisted?.sharedSaved ? "本机项目文件" : "浏览器本地数据库",
+        error: "云端不可用，当前版本的本机副本已保留",
+      });
       els.status.textContent = `已自动保存到本机；云端不可用，可点击“导出 JSON”备份${status.lastError ? `（${status.lastError}）` : ""}`;
     } else {
+      setSaveCheckpoint({
+        phase: persisted?.sharedSaved || persisted?.localSaved ? "saved-local" : "error",
+        destination: persisted?.sharedSaved ? "本机项目文件" : "浏览器本地数据库",
+        error: error?.message || "云端保存未确认",
+      });
       els.status.textContent = `本机副本已保留，云端保存未确认：${error?.message || "请稍后重试"}`;
     }
   } finally {
     els.exportProjects.disabled = false;
-    if (savedToCloud) {
-      window.setTimeout(() => updatePersistenceControls({ enabled: true, fallbackToLocal: false }), 1800);
+    renderSaveCheckpoint();
+    if (savedToCloud && generation === manualSaveGeneration) {
+      window.setTimeout(() => {
+        if (generation === manualSaveGeneration) updatePersistenceControls({ enabled: true, fallbackToLocal: false });
+      }, 1800);
+    } else if (generation !== manualSaveGeneration) {
+      setPrimarySaveButtonFeedback(persistenceMode === "cloud" ? "保存" : "导出 JSON", persistenceMode === "cloud" ? "save" : "file-down");
     } else if (persistenceMode === "cloud") {
       updatePersistenceControls({ enabled: true, fallbackToLocal: false });
     }
@@ -1455,7 +1893,8 @@ async function importProjectBackupPayload(payload) {
   resetTextHistory();
   saveProjectStore();
   updateProjectHistory();
-  const databaseSaved = state.localDatabaseHydrated ? await flushProjectStoreToIndexedDb() : false;
+  const persistenceResult = state.localDatabaseHydrated ? await flushProjectStoreToIndexedDb() : null;
+  const databaseSaved = Boolean(persistenceResult?.localSaved || persistenceResult?.sharedSaved);
   await render();
   els.status.textContent = databaseSaved
     ? `已导入并写入本地数据库：${importedProjects.length} 篇（新增 ${addedCount}，恢复覆盖 ${updatedCount}）`
@@ -1816,6 +2255,8 @@ function restoreTextSnapshot(snapshot) {
   els.content.focus();
   els.content.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
   textHistory.restoring = false;
+  lastEditorImageReferenceSignature = imageReferenceSignature(snapshot.value);
+  syncAiUndoAvailability();
   requestRender();
 }
 
@@ -1831,6 +2272,223 @@ function redoTextChange() {
   if (textHistory.index >= textHistory.stack.length - 1) return;
   textHistory.index += 1;
   restoreTextSnapshot(textHistory.stack[textHistory.index]);
+}
+
+function normalizeAiRevision(value) {
+  if (!value || typeof value !== "object") return null;
+  if (typeof value.before !== "string" || typeof value.after !== "string" || !value.after) return null;
+  return {
+    before: value.before,
+    after: value.after,
+    appliedAt: typeof value.appliedAt === "string" ? value.appliedAt : new Date().toISOString(),
+    projectId: typeof value.projectId === "string" ? value.projectId : null,
+    mode: value.mode === "polish" ? "polish" : "layout",
+  };
+}
+
+function syncAiUndoAvailability() {
+  if (!els.aiUndo) return;
+  const revision = normalizeAiRevision(state.lastAiRevision);
+  const canUndo = Boolean(
+    revision
+      && revision.projectId === state.currentProjectId
+      && els.content
+      && els.content.value === revision.after,
+  );
+  els.aiUndo.hidden = !canUndo;
+  els.aiUndo.disabled = !canUndo;
+  els.aiUndo.setAttribute("aria-hidden", String(!canUndo));
+}
+
+function setAiOptimizeStatus(message, status = "loading") {
+  if (!els.aiOptimizeStatus) return;
+  els.aiOptimizeStatus.textContent = message;
+  els.aiOptimizeStatus.dataset.state = status;
+}
+
+function selectedAiOptimizeMode() {
+  return els.aiModePolish?.classList.contains("active") ? "polish" : "layout";
+}
+
+function setAiOptimizeMode(mode) {
+  const nextMode = mode === "polish" ? "polish" : "layout";
+  [els.aiModeLayout, els.aiModePolish].forEach((button) => {
+    if (!button) return;
+    const active = button.dataset.aiMode === nextMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  return nextMode;
+}
+
+function renderAiChangeList(changes = []) {
+  if (!els.aiChangeList) return;
+  const items = changes.length ? changes : ["AI 未提供额外说明，请直接对比前后正文。"];
+  els.aiChangeList.replaceChildren(
+    ...items.map((change) => {
+      const item = document.createElement("li");
+      item.textContent = change;
+      return item;
+    }),
+  );
+}
+
+async function runAiOptimization(mode = selectedAiOptimizeMode()) {
+  if (!els.aiOptimizeModal || els.aiOptimizeModal.classList.contains("hidden")) return;
+  const generation = ++aiOptimizeRequestGeneration;
+  const nextMode = setAiOptimizeMode(mode);
+  pendingAiOptimization = null;
+  els.aiOptimizeApply.disabled = true;
+  els.aiAfterPreview.textContent = "正在安全生成建议，原文不会被改动…";
+  renderAiChangeList(["正在识别层级、重点和适合高亮的内容…"]);
+  setAiOptimizeStatus("正在保存当前版本并连接 AI…", "loading");
+
+  try {
+    saveState();
+    const persisted = state.localDatabaseHydrated ? await flushProjectStoreToIndexedDb() : null;
+    if (generation !== aiOptimizeRequestGeneration || els.aiOptimizeModal.classList.contains("hidden")) return;
+    if (!persisted?.sharedSaved) throw new Error("当前版本尚未写入本机项目文件，请稍后重试");
+    const project = state.projects.find((item) => item.id === state.currentProjectId);
+    const before = els.content.value;
+    const baseUpdatedAt = Number(project?.updatedAt || 0);
+
+    const statusResponse = await fetch(AI_OPTIMIZE_STATUS_URL, { cache: "no-store" });
+    const aiStatus = await statusResponse.json().catch(() => ({}));
+    if (generation !== aiOptimizeRequestGeneration || els.aiOptimizeModal.classList.contains("hidden")) return;
+    if (!statusResponse.ok || aiStatus.enabled !== true) {
+      throw new Error(aiStatus.reason || "AI 排版服务尚未配置");
+    }
+
+    setAiOptimizeStatus(nextMode === "polish" ? "AI 正在润色并重排，原文仍保持不变…" : "AI 正在识别重点并优化排版，原文仍保持不变…", "loading");
+    const response = await fetch(AI_OPTIMIZE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: before,
+        mode: nextMode,
+        accentColor: els.accentColor.value,
+        projectId: state.currentProjectId,
+        baseUpdatedAt,
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `AI 优化失败（${response.status}）`);
+    if (generation !== aiOptimizeRequestGeneration) return;
+
+    const currentProject = state.projects.find((item) => item.id === state.currentProjectId);
+    if (els.content.value !== before || Number(currentProject?.updatedAt || 0) !== baseUpdatedAt) {
+      throw new Error("AI 生成期间正文已有新修改，结果未覆盖当前内容");
+    }
+    if (typeof payload.optimizedContent !== "string" || !payload.optimizedContent.trim()) {
+      throw new Error("AI 没有返回可用内容");
+    }
+
+    pendingAiOptimization = {
+      before,
+      after: payload.optimizedContent,
+      changes: Array.isArray(payload.changes) ? payload.changes : [],
+      mode: nextMode,
+      projectId: state.currentProjectId,
+      baseUpdatedAt,
+      requestId: payload.requestId || null,
+    };
+    els.aiBeforePreview.textContent = before;
+    els.aiAfterPreview.textContent = payload.optimizedContent;
+    renderAiChangeList(pendingAiOptimization.changes);
+    els.aiOptimizeApply.disabled = false;
+    setAiOptimizeStatus(`建议已生成 · ${payload.model || "Kimi"} · 确认后才会替换正文`, "success");
+  } catch (error) {
+    if (generation !== aiOptimizeRequestGeneration) return;
+    pendingAiOptimization = null;
+    els.aiAfterPreview.textContent = "本次没有改动正文。解决提示中的问题后，可以重新选择优化方式重试。";
+    renderAiChangeList([error?.message || "AI 优化暂时不可用"]);
+    setAiOptimizeStatus(error?.message || "AI 优化暂时不可用", "error");
+  }
+}
+
+function closeAiOptimizeModal() {
+  aiOptimizeRequestGeneration += 1;
+  pendingAiOptimization = null;
+  els.aiOptimizeModal?.classList.add("hidden");
+  aiOptimizeReturnFocus?.focus?.();
+  aiOptimizeReturnFocus = null;
+}
+
+function trapAiOptimizeModalFocus(event) {
+  if (event.key !== "Tab" || els.aiOptimizeModal?.classList.contains("hidden")) return;
+  const focusable = [...els.aiOptimizeModal.querySelectorAll(
+    'button:not([disabled]):not([hidden]), [href], input:not([disabled]):not([hidden]), select:not([disabled]):not([hidden]), textarea:not([disabled]):not([hidden]), [tabindex]:not([tabindex="-1"]):not([hidden])',
+  )].filter((element) => element.getClientRects().length > 0);
+  if (!focusable.length) {
+    event.preventDefault();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && (document.activeElement === first || !els.aiOptimizeModal.contains(document.activeElement))) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (document.activeElement === last || !els.aiOptimizeModal.contains(document.activeElement))) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+async function openAiOptimizeModal() {
+  if (isBuiltInProjectId(state.currentProjectId)) {
+    els.status.textContent = "内置说明书不可修改，请先新建图文";
+    return;
+  }
+  if (!els.content.value.trim()) {
+    els.status.textContent = "正文为空，暂时无法使用 AI 优化";
+    return;
+  }
+  aiOptimizeReturnFocus = document.activeElement;
+  els.aiBeforePreview.textContent = els.content.value;
+  els.aiAfterPreview.textContent = "生成完成后将在这里展示完整结果。";
+  renderAiChangeList(["正在准备当前保存版本…"]);
+  setAiOptimizeMode("layout");
+  els.aiOptimizeModal.classList.remove("hidden");
+  els.aiOptimizeClose?.focus();
+  await runAiOptimization("layout");
+}
+
+async function applyAiOptimization() {
+  const revision = pendingAiOptimization;
+  if (!revision || els.aiOptimizeApply.disabled) return;
+  const project = state.projects.find((item) => item.id === state.currentProjectId);
+  if (
+    state.currentProjectId !== revision.projectId
+    || els.content.value !== revision.before
+    || Number(project?.updatedAt || 0) !== revision.baseUpdatedAt
+  ) {
+    setAiOptimizeStatus("正文已有新修改，请重新生成；当前内容没有被覆盖", "error");
+    els.aiOptimizeApply.disabled = true;
+    return;
+  }
+  state.lastAiRevision = {
+    before: revision.before,
+    after: revision.after,
+    appliedAt: new Date().toISOString(),
+    projectId: revision.projectId,
+    mode: revision.mode,
+  };
+  els.aiOptimizeApply.disabled = true;
+  await applyProgrammaticContent(revision.after, revision.mode === "polish" ? "AI 润色与排版已应用" : "AI 排版已应用");
+  closeAiOptimizeModal();
+  syncAiUndoAvailability();
+}
+
+async function undoLastAiOptimization() {
+  const revision = normalizeAiRevision(state.lastAiRevision);
+  if (!revision || revision.projectId !== state.currentProjectId || els.content.value !== revision.after) {
+    syncAiUndoAvailability();
+    els.status.textContent = "正文已在 AI 优化后继续修改；为避免覆盖新内容，请使用 Command/Ctrl + Z";
+    return;
+  }
+  state.lastAiRevision = null;
+  await applyProgrammaticContent(revision.before, "已撤回本次 AI 优化");
+  syncAiUndoAvailability();
 }
 
 function handleTextShortcut(event) {
@@ -2893,7 +3551,8 @@ function setObsidianVaultStatus(message, connected = false) {
 async function persistCurrentDraftImmediately() {
   flushStateSave();
   if (!state.localDatabaseHydrated) return false;
-  return flushProjectStoreToIndexedDb();
+  const result = await flushProjectStoreToIndexedDb();
+  return Boolean(result.localSaved || result.sharedSaved);
 }
 
 function canUseDirectoryPickerSafely() {
@@ -3730,7 +4389,15 @@ function parseBlocks(content, images = {}) {
       const imageId = resolveMarkdownImageBlock(trimmed, imageLookup);
       if (isMarkdownImageBlock(trimmed)) {
         flushParagraph();
-        if (imageId) blocks.push({ type: "image", id: imageId });
+        if (imageId) {
+          blocks.push({
+            type: "image",
+            id: imageId,
+            sourceStart: lineOffsets[index],
+            sourceEnd: lineOffsets[index] + line.length,
+            occurrenceKey: `${imageId}:${lineOffsets[index]}`,
+          });
+        }
       } else if (isMarkdownTableHeader(trimmed, lines[index + 1])) {
         flushParagraph();
         const headerCells = splitMarkdownTableRow(trimmed);
@@ -4236,6 +4903,9 @@ async function buildPages(settings) {
       page.items.push({
         type: "image",
         imageId: block.id,
+        sourceStart: block.sourceStart,
+        sourceEnd: block.sourceEnd,
+        occurrenceKey: block.occurrenceKey,
         image: img,
         sourceRect,
         baseWidth: size.baseWidth,
@@ -4340,6 +5010,9 @@ async function buildScrollPage(settings) {
       page.items.push({
         type: "image",
         imageId: block.id,
+        sourceStart: block.sourceStart,
+        sourceEnd: block.sourceEnd,
+        occurrenceKey: block.occurrenceKey,
         image: img,
         sourceRect,
         baseWidth: size.baseWidth,
@@ -4403,6 +5076,9 @@ function pageRenderSignature(page, scrollPage = false) {
       return {
         type: item.type,
         imageId: item.imageId,
+        sourceStart: item.sourceStart,
+        sourceEnd: item.sourceEnd,
+        occurrenceKey: item.occurrenceKey,
         imageSource: imageSourceFingerprint(images?.[item.imageId]?.src),
         sourceRect: item.sourceRect,
         baseWidth: item.baseWidth,
@@ -4579,6 +5255,9 @@ function collectImageHits(page, scrollPage = false) {
       const bottom = scrollPage && bounds ? Math.min(y + item.height, bounds.bottom) : y + item.height;
       return {
         imageId: item.imageId,
+        sourceStart: item.sourceStart,
+        sourceEnd: item.sourceEnd,
+        occurrenceKey: item.occurrenceKey,
         x: item.x,
         y: top,
         width: item.width,
@@ -5030,10 +5709,40 @@ function createImageEditLayer(canvas) {
     const box = document.createElement("div");
     box.className = "preview-image-box";
     box.dataset.imageId = hit.imageId;
+    box.dataset.sourceStart = String(hit.sourceStart);
+    box.dataset.sourceEnd = String(hit.sourceEnd);
+    box.dataset.occurrenceKey = hit.occurrenceKey || `${hit.imageId}:${hit.sourceStart}`;
     box.dataset.baseWidth = String(hit.baseWidth || hit.width);
     box.dataset.maxWidth = String(hit.maxWidth || CARD_CONTENT_WIDTH);
-    box.title = "拖右下角调整图片大小；点击左/中/右按钮调整对齐";
+    box.tabIndex = 0;
+    box.setAttribute("role", "group");
+    box.setAttribute("aria-label", `图片 ${state.images[hit.imageId]?.name || hit.imageId}；可拖动调整顺序，Alt 加上下方向键也可移动`);
+    box.title = "拖左上角抓手调整上下顺序；右上角按钮逐项移动；拖右下角调整大小";
     applyImageBoxStyle(box, hit);
+
+    const dragHandle = document.createElement("button");
+    dragHandle.type = "button";
+    dragHandle.className = "preview-image-drag-handle";
+    dragHandle.title = "拖动调整图片上下顺序";
+    dragHandle.setAttribute("aria-label", "拖动调整图片上下顺序");
+    dragHandle.innerHTML = '<i data-lucide="grip-vertical"></i>';
+    dragHandle.addEventListener("pointerdown", startPreviewImageReorder);
+
+    const orderBar = document.createElement("div");
+    orderBar.className = "preview-image-order";
+    [
+      [-1, "arrow-up", "上移一项"],
+      [1, "arrow-down", "下移一项"],
+    ].forEach(([direction, icon, label]) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.direction = String(direction);
+      button.title = label;
+      button.setAttribute("aria-label", label);
+      button.innerHTML = `<i data-lucide="${icon}"></i>`;
+      button.addEventListener("click", movePreviewImageByStep);
+      orderBar.append(button);
+    });
 
     const alignBar = document.createElement("div");
     alignBar.className = "preview-image-align";
@@ -5057,7 +5766,8 @@ function createImageEditLayer(canvas) {
     resize.dataset.action = "resize";
     resize.addEventListener("pointerdown", startPreviewImageResize);
 
-    box.append(alignBar, resize);
+    box.addEventListener("keydown", handlePreviewImageOrderKeydown);
+    box.append(dragHandle, orderBar, alignBar, resize);
     layer.append(box);
   }
 
@@ -5142,6 +5852,256 @@ function scrollTextareaToRange(index) {
   els.content.scrollTop = targetTop;
 }
 
+function contentLineModel(content) {
+  const lines = String(content || "").replace(/\r\n/g, "\n").split("\n");
+  const offsets = [];
+  let offset = 0;
+  for (const line of lines) {
+    offsets.push(offset);
+    offset += line.length + 1;
+  }
+  return { lines, offsets };
+}
+
+function lineIndexForSourceOffset(offsets, sourceOffset) {
+  const target = Math.max(0, Number(sourceOffset) || 0);
+  let low = 0;
+  let high = offsets.length - 1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (offsets[middle] <= target) low = middle + 1;
+    else high = middle - 1;
+  }
+  return Math.max(0, Math.min(offsets.length - 1, high));
+}
+
+function reorderNonEmptyLine(content, sourceStart, targetStart, placeAfter) {
+  const { lines, offsets } = contentLineModel(content);
+  const sourceLineIndex = lineIndexForSourceOffset(offsets, sourceStart);
+  const targetLineIndex = lineIndexForSourceOffset(offsets, targetStart);
+  if (sourceLineIndex === targetLineIndex || !isMarkdownImageBlock(lines[sourceLineIndex]?.trim() || "")) return content;
+
+  const nonEmptyIndices = lines.map((line, index) => (line.trim() ? index : -1)).filter((index) => index >= 0);
+  const sourceSlot = nonEmptyIndices.indexOf(sourceLineIndex);
+  const targetSlot = nonEmptyIndices.indexOf(targetLineIndex);
+  if (sourceSlot < 0 || targetSlot < 0) return content;
+
+  const values = nonEmptyIndices.map((index) => lines[index]);
+  const [moving] = values.splice(sourceSlot, 1);
+  const targetAfterRemoval = targetSlot - (sourceSlot < targetSlot ? 1 : 0);
+  const insertionIndex = Math.max(0, Math.min(values.length, targetAfterRemoval + (placeAfter ? 1 : 0)));
+  values.splice(insertionIndex, 0, moving);
+  nonEmptyIndices.forEach((lineIndex, slot) => {
+    lines[lineIndex] = values[slot];
+  });
+  return lines.join("\n");
+}
+
+function adjacentNonEmptyTarget(content, sourceStart, direction) {
+  const { lines, offsets } = contentLineModel(content);
+  const sourceLineIndex = lineIndexForSourceOffset(offsets, sourceStart);
+  const nonEmptyIndices = lines.map((line, index) => (line.trim() ? index : -1)).filter((index) => index >= 0);
+  const sourceSlot = nonEmptyIndices.indexOf(sourceLineIndex);
+  const targetSlot = sourceSlot + direction;
+  if (sourceSlot < 0 || targetSlot < 0 || targetSlot >= nonEmptyIndices.length) return null;
+  const targetLineIndex = nonEmptyIndices[targetSlot];
+  return offsets[targetLineIndex];
+}
+
+async function applyProgrammaticContent(nextContent, message) {
+  if (nextContent === els.content.value || isBuiltInProjectId(state.currentProjectId)) return false;
+  commitTextHistory();
+  els.content.value = nextContent;
+  const selection = Math.min(nextContent.length, els.content.selectionStart || 0);
+  els.content.setSelectionRange(selection, selection);
+  commitTextHistory();
+  lastEditorImageReferenceSignature = imageReferenceSignature(nextContent);
+  syncAiUndoAvailability();
+  markSaveDirty();
+  await render({ persist: false });
+  const saved = await persistCurrentDraftImmediately();
+  els.status.textContent = saved ? `${message}，当前版本已保存` : `${message}；本机保存仍在重试`;
+  return true;
+}
+
+function setImageReorderBusy(busy) {
+  imageReorderBusy = Boolean(busy);
+  document.body.classList.toggle("preview-image-reorder-busy", imageReorderBusy);
+  els.pages?.setAttribute("aria-busy", String(imageReorderBusy));
+  document.querySelectorAll(".preview-image-drag-handle, .preview-image-order button").forEach((control) => {
+    control.disabled = imageReorderBusy;
+  });
+}
+
+async function applyPreviewImageReorder(nextContent, message) {
+  if (imageReorderBusy || nextContent === els.content.value) return false;
+  setImageReorderBusy(true);
+  try {
+    return await applyProgrammaticContent(nextContent, message);
+  } finally {
+    setImageReorderBusy(false);
+  }
+}
+
+function movePreviewImageByStep(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (imageReorderBusy) return;
+  const box = event.currentTarget.closest(".preview-image-box");
+  const sourceStart = Number(box?.dataset.sourceStart);
+  const direction = Number(event.currentTarget.dataset.direction);
+  if (!Number.isFinite(sourceStart) || ![-1, 1].includes(direction)) return;
+  const targetStart = adjacentNonEmptyTarget(els.content.value, sourceStart, direction);
+  if (targetStart === null) {
+    els.status.textContent = direction < 0 ? "这张图片已经在最前面" : "这张图片已经在最后面";
+    return;
+  }
+  const next = reorderNonEmptyLine(els.content.value, sourceStart, targetStart, direction > 0);
+  void applyPreviewImageReorder(next, direction < 0 ? "图片已上移一项" : "图片已下移一项");
+}
+
+function handlePreviewImageOrderKeydown(event) {
+  if (imageReorderBusy || !event.altKey || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+  event.preventDefault();
+  const sourceStart = Number(event.currentTarget.dataset.sourceStart);
+  const direction = event.key === "ArrowUp" ? -1 : 1;
+  const targetStart = adjacentNonEmptyTarget(els.content.value, sourceStart, direction);
+  if (targetStart === null) return;
+  const next = reorderNonEmptyLine(els.content.value, sourceStart, targetStart, direction > 0);
+  void applyPreviewImageReorder(next, direction < 0 ? "图片已上移一项" : "图片已下移一项");
+}
+
+function pageItemSourceStart(item) {
+  if (Number.isFinite(item.sourceStart)) return item.sourceStart;
+  if (item.type !== "text") return null;
+  const starts = (item.line || []).map((token) => token.sourceStart).filter(Number.isFinite);
+  return starts.length ? Math.min(...starts) : null;
+}
+
+function previewImageReorderTargets(sourceStart) {
+  const targets = [];
+  document.querySelectorAll(".page-frame canvas").forEach((canvas) => {
+    const frame = canvas.closest(".page-frame");
+    const rect = canvas.getBoundingClientRect();
+    const page = canvas._page;
+    if (!frame || !page || rect.width <= 0 || rect.height <= 0) return;
+    const scaleY = rect.height / CANVAS_HEIGHT;
+    for (const item of page.items || []) {
+      const targetStart = pageItemSourceStart(item);
+      if (!Number.isFinite(targetStart) || targetStart === sourceStart) continue;
+      const rawY = canvas._scrollPage ? (page.bounds?.top || 0) + item.y - page.scrollOffset : item.y;
+      const height = item.type === "image" ? item.height : item.lineHeight || 30;
+      const top = rect.top + rawY * scaleY;
+      const bottom = rect.top + (rawY + height) * scaleY;
+      if (bottom < rect.top || top > rect.bottom) continue;
+      targets.push({
+        frame,
+        rect,
+        sourceStart: targetStart,
+        top: Math.max(rect.top, top),
+        bottom: Math.min(rect.bottom, bottom),
+        center: (Math.max(rect.top, top) + Math.min(rect.bottom, bottom)) / 2,
+      });
+    }
+  });
+  return targets;
+}
+
+function closestPreviewImageReorderTarget(clientX, clientY, sourceStart) {
+  let best = null;
+  for (const target of previewImageReorderTargets(sourceStart)) {
+    const horizontalDistance = clientX < target.rect.left
+      ? target.rect.left - clientX
+      : clientX > target.rect.right
+        ? clientX - target.rect.right
+        : 0;
+    const distance = Math.abs(clientY - target.center) + horizontalDistance * 0.35;
+    if (!best || distance < best.distance) {
+      best = { ...target, distance, placeAfter: clientY >= target.center };
+    }
+  }
+  return best;
+}
+
+function showPreviewImageDropIndicator(target) {
+  document.querySelectorAll(".preview-image-drop-indicator").forEach((indicator) => indicator.remove());
+  if (!target?.frame) return;
+  const indicator = document.createElement("div");
+  indicator.className = "preview-image-drop-indicator";
+  const boundary = target.placeAfter ? target.bottom : target.top;
+  indicator.style.top = `${clamp(((boundary - target.rect.top) / target.rect.height) * 100, 0.5, 99.5)}%`;
+  target.frame.append(indicator);
+}
+
+function startPreviewImageReorder(event) {
+  if (imageReorderBusy || isBuiltInProjectId(state.currentProjectId) || event.button !== 0) return;
+  const box = event.currentTarget.closest(".preview-image-box");
+  const sourceStart = Number(box?.dataset.sourceStart);
+  const sourceEnd = Number(box?.dataset.sourceEnd);
+  if (!box || !Number.isFinite(sourceStart) || !Number.isFinite(sourceEnd)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  imageReorderDrag = {
+    pointerId: event.pointerId,
+    handle: event.currentTarget,
+    box,
+    sourceStart,
+    sourceEnd,
+    startX: event.clientX,
+    startY: event.clientY,
+    active: false,
+    target: null,
+  };
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+  document.addEventListener("pointermove", movePreviewImageReorder);
+  document.addEventListener("pointerup", stopPreviewImageReorder);
+  document.addEventListener("pointercancel", cancelPreviewImageReorder);
+}
+
+function movePreviewImageReorder(event) {
+  if (!imageReorderDrag || event.pointerId !== imageReorderDrag.pointerId) return;
+  event.preventDefault();
+  const distance = Math.hypot(event.clientX - imageReorderDrag.startX, event.clientY - imageReorderDrag.startY);
+  if (!imageReorderDrag.active && distance < 6) return;
+  if (!imageReorderDrag.active) {
+    imageReorderDrag.active = true;
+    imageReorderDrag.box.classList.add("is-dragging");
+    document.body.classList.add("preview-image-reordering");
+  }
+  imageReorderDrag.target = closestPreviewImageReorderTarget(event.clientX, event.clientY, imageReorderDrag.sourceStart);
+  showPreviewImageDropIndicator(imageReorderDrag.target);
+  if (event.clientY < 72) window.scrollBy({ top: -18, behavior: "auto" });
+  if (event.clientY > window.innerHeight - 72) window.scrollBy({ top: 18, behavior: "auto" });
+}
+
+function cleanupPreviewImageReorder() {
+  if (!imageReorderDrag) return null;
+  const drag = imageReorderDrag;
+  drag.handle.releasePointerCapture?.(drag.pointerId);
+  drag.box.classList.remove("is-dragging");
+  document.body.classList.remove("preview-image-reordering");
+  document.querySelectorAll(".preview-image-drop-indicator").forEach((indicator) => indicator.remove());
+  document.removeEventListener("pointermove", movePreviewImageReorder);
+  document.removeEventListener("pointerup", stopPreviewImageReorder);
+  document.removeEventListener("pointercancel", cancelPreviewImageReorder);
+  imageReorderDrag = null;
+  return drag;
+}
+
+function stopPreviewImageReorder(event) {
+  if (!imageReorderDrag || event.pointerId !== imageReorderDrag.pointerId) return;
+  const drag = cleanupPreviewImageReorder();
+  if (!drag?.active || !drag.target) return;
+  const next = reorderNonEmptyLine(els.content.value, drag.sourceStart, drag.target.sourceStart, drag.target.placeAfter);
+  void applyPreviewImageReorder(next, "图片顺序已调整");
+}
+
+function cancelPreviewImageReorder() {
+  if (!imageReorderDrag) return;
+  cleanupPreviewImageReorder();
+  els.status.textContent = "已取消图片顺序调整";
+}
+
 function setPreviewImageAlign(event) {
   event.preventDefault();
   event.stopPropagation();
@@ -5167,6 +6127,7 @@ function startPreviewImageResize(event) {
 
   event.preventDefault();
   event.stopPropagation();
+  markSaveDirty();
   const frameRect = frame.getBoundingClientRect();
   imageEditDrag = {
     imageId,
@@ -5525,6 +6486,7 @@ function bindEvents() {
 
   els.content.addEventListener("input", () => {
     scheduleTextHistoryCommit();
+    syncAiUndoAvailability();
     const nextImageReferenceSignature = imageReferenceSignature(els.content.value);
     const imageReferencesChanged = nextImageReferenceSignature !== lastEditorImageReferenceSignature;
     lastEditorImageReferenceSignature = nextImageReferenceSignature;
@@ -5607,6 +6569,8 @@ function bindEvents() {
     if (event.key === "Escape" && !els.cropModal.classList.contains("hidden")) closeCropper();
     if (event.key === "Escape" && !els.importPreviewModal?.classList.contains("hidden")) closeProjectImportPreview();
     if (event.key === "Escape" && !els.assetLibraryModal?.classList.contains("hidden")) closeAssetLibrary();
+    if (event.key === "Escape" && !els.aiOptimizeModal?.classList.contains("hidden")) closeAiOptimizeModal();
+    if (event.key === "Escape" && imageReorderDrag) cancelPreviewImageReorder();
     if (event.key === "Escape") clearPreviewEditorPin();
   });
   els.findNext.addEventListener("click", findNext);
@@ -5619,6 +6583,19 @@ function bindEvents() {
   });
   els.newProject.addEventListener("click", createNewProject);
   els.exportProjects?.addEventListener("click", handlePrimaryPersistenceAction);
+  els.saveNow?.addEventListener("click", handlePrimaryPersistenceAction);
+  els.aiOptimize?.addEventListener("click", openAiOptimizeModal);
+  els.aiUndo?.addEventListener("click", undoLastAiOptimization);
+  els.aiOptimizeClose?.addEventListener("click", closeAiOptimizeModal);
+  els.aiOptimizeCancel?.addEventListener("click", closeAiOptimizeModal);
+  els.aiOptimizeApply?.addEventListener("click", applyAiOptimization);
+  [els.aiModeLayout, els.aiModePolish].forEach((button) => {
+    button?.addEventListener("click", () => void runAiOptimization(button.dataset.aiMode));
+  });
+  els.aiOptimizeModal?.addEventListener("click", (event) => {
+    if (event.target === els.aiOptimizeModal) closeAiOptimizeModal();
+  });
+  els.aiOptimizeModal?.addEventListener("keydown", trapAiOptimizeModalFocus);
   els.importProjects?.addEventListener("click", () => els.projectBackupInput?.click());
   els.projectBackupInput?.addEventListener("change", handleProjectBackupImport);
   els.importPreviewClose?.addEventListener("click", closeProjectImportPreview);
@@ -5663,6 +6640,8 @@ syncGuideReadOnlyMode();
 resetTextHistory();
 updateProjectHistory();
 bindEvents();
+renderSaveCheckpoint();
+syncAiUndoAvailability();
 render({ persist: false })
   .then(hydrateProjectStoreFromIndexedDb)
   .then(restoreProjectBackupFromUrl);

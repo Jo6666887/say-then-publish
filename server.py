@@ -9,6 +9,7 @@ import logging
 import threading
 import urllib.error
 import urllib.request
+import uuid
 import webbrowser
 from errno import EADDRINUSE
 from functools import partial
@@ -19,6 +20,14 @@ from urllib.parse import unquote, urlparse
 
 from cloud_store import AssetInUseError, CloudStore, CloudStoreError
 from local_asset_store import LocalAssetStore, LocalAssetStoreError
+from ai_layout import (
+    AILayoutDisabledError,
+    AILayoutError,
+    AILayoutProviderError,
+    AILayoutResponseError,
+    AILayoutService,
+    AILayoutValidationError,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -30,20 +39,29 @@ DATA_DIR = DATA_DIR.resolve()
 STORE_FILE = DATA_DIR / "project-store.json"
 MAX_BODY_BYTES = 64 * 1024 * 1024
 MAX_TEXT_PATCH_BYTES = 2 * 1024 * 1024
+MAX_AI_TEXT_BYTES = 2 * 1024 * 1024
 STORE_LOCK = threading.Lock()
 APP_URL = "http://127.0.0.1:5173/"
 CLOUD = CloudStore.from_root(ROOT)
+AI_LAYOUT = AILayoutService.from_env()
 LOCAL_ASSETS = LocalAssetStore(ROOT, data_dir=DATA_DIR)
 CLOUD_SYNC_LOCK = threading.Lock()
 CLOUD_STATUS_LOCK = threading.Lock()
 CLOUD_SYNC_TIMER_LOCK = threading.Lock()
 CLOUD_SYNC_TIMER: threading.Timer | None = None
+CLOUD_SYNC_PENDING = False
+CLOUD_SYNC_WORKER_ACTIVE = False
+CLOUD_SYNC_WAIT_SECONDS = 30.0
 CLOUD_STATUS = {
     "enabled": CLOUD.enabled,
     "workspaceId": CLOUD.config.workspace_id,
     "backend": "supabase+tos" if CLOUD.enabled else None,
     "syncing": False,
+    "syncingProjectId": None,
+    "syncingUpdatedAt": None,
     "lastSuccessAt": None,
+    "projectId": None,
+    "syncedUpdatedAt": None,
     "lastError": CLOUD.disabled_reason or None,
     "fallbackToLocal": not CLOUD.enabled,
 }
@@ -76,6 +94,96 @@ def project_timestamp(project: dict) -> float:
         return 0
 
 
+def project_checkpoint(store: dict, project_id: str | None = None) -> dict:
+    """Return a public, content-free checkpoint for one saved project."""
+
+    projects = store.get("projects") if isinstance(store, dict) else None
+    if not isinstance(projects, list):
+        return {"projectId": None, "updatedAt": None}
+    requested_id = project_id or store.get("activeId")
+    project = next(
+        (
+            candidate
+            for candidate in projects
+            if isinstance(candidate, dict) and candidate.get("id") == requested_id
+        ),
+        None,
+    )
+    if project is None:
+        project = next((candidate for candidate in projects if isinstance(candidate, dict)), None)
+    if project is None or not isinstance(project.get("id"), str):
+        return {"projectId": None, "updatedAt": None}
+    return {
+        "projectId": project["id"],
+        "updatedAt": int(project_timestamp(project)),
+    }
+
+
+def find_project(store: dict, project_id: str | None) -> dict | None:
+    if not isinstance(project_id, str) or not project_id:
+        return None
+    projects = store.get("projects") if isinstance(store, dict) else None
+    if not isinstance(projects, list):
+        return None
+    return next(
+        (
+            project
+            for project in projects
+            if isinstance(project, dict) and project.get("id") == project_id
+        ),
+        None,
+    )
+
+
+def project_content(project: dict | None) -> str | None:
+    data = project.get("data") if isinstance(project, dict) else None
+    content = data.get("content") if isinstance(data, dict) else None
+    return content if isinstance(content, str) else None
+
+
+def parse_updated_at(value: object) -> int | None:
+    """Accept the millisecond integer used as the project revision token."""
+
+    if isinstance(value, bool):
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not numeric.is_integer() or numeric <= 0:
+        return None
+    try:
+        return int(numeric)
+    except (OverflowError, ValueError):
+        return None
+
+
+def project_revision_matches(
+    project: dict | None,
+    *,
+    project_id: str,
+    updated_at: int,
+    content: str,
+) -> bool:
+    return (
+        isinstance(project, dict)
+        and project.get("id") == project_id
+        and parse_updated_at(project.get("updatedAt")) == updated_at
+        and project_content(project) == content
+    )
+
+
+def save_conflict_payload(project: dict | None) -> dict:
+    return {
+        "error": "本机已有不同版本，请刷新后再保存",
+        "code": "DRAFT_VERSION_CONFLICT",
+        "current": {
+            "projectId": project.get("id") if isinstance(project, dict) else None,
+            "updatedAt": parse_updated_at(project.get("updatedAt")) if isinstance(project, dict) else None,
+        },
+    }
+
+
 def merge_store(current: dict, incoming: dict) -> dict:
     merged: dict[str, dict] = {}
     for project in [*(current.get("projects") or []), *(incoming.get("projects") or [])]:
@@ -105,9 +213,25 @@ def cloud_status() -> dict:
         return dict(CLOUD_STATUS)
 
 
+def safe_cloud_error(error: Exception) -> str:
+    """Keep operational errors useful without returning configured credentials."""
+
+    message = str(error)
+    config = getattr(CLOUD, "config", None)
+    secrets = (
+        getattr(config, "supabase_secret_key", ""),
+        getattr(config, "tos_access_key", ""),
+        getattr(config, "tos_secret_key", ""),
+    )
+    for secret in secrets:
+        if isinstance(secret, str) and secret:
+            message = message.replace(secret, "[REDACTED]")
+    return message[:1000]
+
+
 def record_cloud_failure(error: Exception) -> None:
     with CLOUD_STATUS_LOCK:
-        CLOUD_STATUS["lastError"] = str(error)
+        CLOUD_STATUS["lastError"] = safe_cloud_error(error)
         CLOUD_STATUS["fallbackToLocal"] = True
 
 
@@ -145,22 +269,82 @@ def local_asset_library_payload(*, reason: str | None = None) -> dict:
     }
 
 
-def sync_cloud_store() -> bool:
-    if not CLOUD.enabled or not CLOUD_SYNC_LOCK.acquire(blocking=False):
+def checkpoint_is_confirmed(status: dict, project_id: str | None, updated_at: int | None) -> bool:
+    if not project_id or updated_at is None:
         return False
-    local_store = empty_store()
-    with CLOUD_STATUS_LOCK:
-        CLOUD_STATUS["syncing"] = True
-        CLOUD_STATUS["lastError"] = None
     try:
+        synced_updated_at = int(status.get("syncedUpdatedAt"))
+    except (TypeError, ValueError):
+        return False
+    return (
+        status.get("projectId") == project_id
+        and synced_updated_at == int(updated_at)
+        and status.get("fallbackToLocal") is not True
+        and not status.get("lastError")
+    )
+
+
+def sync_cloud_store(
+    *,
+    wait_for_existing: bool = False,
+    target_project_id: str | None = None,
+    target_updated_at: int | None = None,
+    wait_timeout: float | None = CLOUD_SYNC_WAIT_SECONDS,
+) -> bool:
+    if not CLOUD.enabled:
+        return False
+    if wait_for_existing:
+        acquired = (
+            CLOUD_SYNC_LOCK.acquire()
+            if wait_timeout is None
+            else CLOUD_SYNC_LOCK.acquire(timeout=max(0.0, wait_timeout))
+        )
+    else:
+        acquired = CLOUD_SYNC_LOCK.acquire(blocking=False)
+    if not acquired:
+        return False
+
+    local_store = empty_store()
+    try:
+        # A manual save may arrive while the debounced background sync is still
+        # running. Reuse it only when it explicitly confirms this project version.
+        if wait_for_existing and checkpoint_is_confirmed(
+            cloud_status(),
+            target_project_id,
+            target_updated_at,
+        ):
+            return True
+
         with STORE_LOCK:
             local_store = json.loads(json.dumps(read_store(), ensure_ascii=False))
+        target = project_checkpoint(local_store, target_project_id)
+        if target_project_id and (
+            target["projectId"] != target_project_id
+            or target_updated_at is None
+            or target["updatedAt"] != int(target_updated_at)
+        ):
+            return False
+        with CLOUD_STATUS_LOCK:
+            CLOUD_STATUS["syncing"] = True
+            CLOUD_STATUS["syncingProjectId"] = target["projectId"]
+            CLOUD_STATUS["syncingUpdatedAt"] = target["updatedAt"]
+            CLOUD_STATUS["lastError"] = None
         merged = CLOUD.sync_store(local_store)
+        synced = project_checkpoint(merged, target_project_id or target["projectId"])
         with STORE_LOCK:
             write_store(merge_store(read_store(), merged))
         with CLOUD_STATUS_LOCK:
             CLOUD_STATUS["lastSuccessAt"] = datetime_now_iso()
+            CLOUD_STATUS["projectId"] = synced["projectId"]
+            CLOUD_STATUS["syncedUpdatedAt"] = synced["updatedAt"]
             CLOUD_STATUS["fallbackToLocal"] = False
+        if target_project_id and (
+            synced["projectId"] != target_project_id
+            or synced["updatedAt"] is None
+            or target_updated_at is None
+            or synced["updatedAt"] != int(target_updated_at)
+        ):
+            return False
         return True
     except Exception as error:
         LOGGER.exception("Cloud sync failed")
@@ -175,6 +359,8 @@ def sync_cloud_store() -> bool:
     finally:
         with CLOUD_STATUS_LOCK:
             CLOUD_STATUS["syncing"] = False
+            CLOUD_STATUS["syncingProjectId"] = None
+            CLOUD_STATUS["syncingUpdatedAt"] = None
         CLOUD_SYNC_LOCK.release()
 
 
@@ -205,16 +391,64 @@ def public_static_path(path: str) -> bool:
     )
 
 
-def schedule_cloud_sync(delay: float = 1.2) -> None:
+def _start_cloud_sync_timer_locked(delay: float) -> None:
     global CLOUD_SYNC_TIMER
+    if CLOUD_SYNC_TIMER:
+        CLOUD_SYNC_TIMER.cancel()
+    CLOUD_SYNC_TIMER = threading.Timer(max(0.0, delay), _run_scheduled_cloud_sync)
+    CLOUD_SYNC_TIMER.daemon = True
+    CLOUD_SYNC_TIMER.start()
+
+
+def _run_scheduled_cloud_sync() -> None:
+    """Drain one debounced save without dropping changes behind a busy sync."""
+
+    global CLOUD_SYNC_PENDING, CLOUD_SYNC_TIMER, CLOUD_SYNC_WORKER_ACTIVE
+    with CLOUD_SYNC_TIMER_LOCK:
+        if CLOUD_SYNC_TIMER is not threading.current_thread():
+            return
+        CLOUD_SYNC_TIMER = None
+        if CLOUD_SYNC_WORKER_ACTIVE:
+            CLOUD_SYNC_PENDING = True
+            return
+        if not CLOUD.enabled:
+            CLOUD_SYNC_PENDING = False
+            return
+        if not CLOUD_SYNC_PENDING:
+            return
+        CLOUD_SYNC_PENDING = False
+        CLOUD_SYNC_WORKER_ACTIVE = True
+
+    try:
+        # A scheduler worker may wait behind startup/manual sync. It then reads
+        # the latest disk snapshot, so the final edit is never discarded merely
+        # because CLOUD_SYNC_LOCK was busy when the debounce timer fired.
+        sync_cloud_store(wait_for_existing=True, wait_timeout=None)
+    finally:
+        with CLOUD_SYNC_TIMER_LOCK:
+            CLOUD_SYNC_WORKER_ACTIVE = False
+            if CLOUD_SYNC_PENDING and CLOUD.enabled:
+                _start_cloud_sync_timer_locked(0.15)
+
+
+def schedule_cloud_sync(delay: float = 1.2) -> None:
+    global CLOUD_SYNC_PENDING
     if not CLOUD.enabled:
         return
     with CLOUD_SYNC_TIMER_LOCK:
-        if CLOUD_SYNC_TIMER:
-            CLOUD_SYNC_TIMER.cancel()
-        CLOUD_SYNC_TIMER = threading.Timer(delay, sync_cloud_store)
-        CLOUD_SYNC_TIMER.daemon = True
-        CLOUD_SYNC_TIMER.start()
+        CLOUD_SYNC_PENDING = True
+        if not CLOUD_SYNC_WORKER_ACTIVE:
+            _start_cloud_sync_timer_locked(delay)
+
+
+def cancel_scheduled_cloud_sync() -> None:
+    global CLOUD_SYNC_PENDING, CLOUD_SYNC_TIMER
+    with CLOUD_SYNC_TIMER_LOCK:
+        timer = CLOUD_SYNC_TIMER
+        CLOUD_SYNC_TIMER = None
+        CLOUD_SYNC_PENDING = False
+    if timer:
+        timer.cancel()
 
 
 class WriteThenPublishHandler(SimpleHTTPRequestHandler):
@@ -284,6 +518,9 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
         if path == "/api/cloud-status":
             self.send_json(cloud_status())
             return
+        if path == "/api/ai/status":
+            self.send_json(AI_LAYOUT.status())
+            return
         if path == "/api/assets":
             if not CLOUD.enabled or cloud_status().get("fallbackToLocal"):
                 try:
@@ -299,7 +536,7 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
             except CloudStoreError as error:
                 record_cloud_failure(error)
                 try:
-                    self.send_json(local_asset_library_payload(reason=str(error)))
+                    self.send_json(local_asset_library_payload(reason=safe_cloud_error(error)))
                 except LocalAssetStoreError as local_error:
                     self.send_json({"error": str(local_error)}, HTTPStatus.BAD_GATEWAY)
                 return
@@ -328,7 +565,11 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
                     except LocalAssetStoreError:
                         LOGGER.exception("Local asset fallback sync failed")
                 self.send_json(
-                    {"error": str(error)},
+                    {
+                        "error": safe_cloud_error(error)
+                        if backend is CLOUD
+                        else str(error)
+                    },
                     HTTPStatus.NOT_FOUND if missing else HTTPStatus.BAD_GATEWAY,
                 )
                 return
@@ -365,8 +606,42 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
         if not isinstance(incoming, dict) or not isinstance(incoming.get("projects"), list):
             self.send_json({"error": "草稿结构无效"}, HTTPStatus.BAD_REQUEST)
             return
+
+        incoming_project_id = incoming.get("activeId")
+        incoming_project = find_project(incoming, incoming_project_id)
+        incoming_updated_at = (
+            parse_updated_at(incoming_project.get("updatedAt"))
+            if incoming_project is not None
+            else None
+        )
+        incoming_content = project_content(incoming_project)
+        if incoming_project is not None and (
+            incoming_updated_at is None or incoming_content is None
+        ):
+            self.send_json({"error": "当前草稿版本无效"}, HTTPStatus.BAD_REQUEST)
+            return
+
         with STORE_LOCK:
-            merged = merge_store(read_store(), incoming)
+            current_store = read_store()
+            current_project = find_project(current_store, incoming_project_id)
+            current_updated_at = (
+                parse_updated_at(current_project.get("updatedAt"))
+                if current_project is not None
+                else None
+            )
+            if incoming_project is not None and current_project is not None and (
+                current_updated_at is not None
+                and (
+                    incoming_updated_at < current_updated_at
+                    or (
+                        incoming_updated_at == current_updated_at
+                        and project_content(current_project) != incoming_content
+                    )
+                )
+            ):
+                self.send_json(save_conflict_payload(current_project), HTTPStatus.CONFLICT)
+                return
+            merged = merge_store(current_store, incoming)
             write_store(merged)
 
         response_store = merged
@@ -380,8 +655,37 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
             except LocalAssetStoreError:
                 # A missing/unwritable asset folder must never block draft persistence.
                 LOGGER.exception("Local asset fallback sync failed after draft save")
+
+        with STORE_LOCK:
+            response_store = json.loads(json.dumps(read_store(), ensure_ascii=False))
+        confirmed_project = find_project(response_store, incoming_project_id)
+        revision_confirmed = bool(
+            incoming_project is not None
+            and incoming_updated_at is not None
+            and incoming_content is not None
+            and project_revision_matches(
+                confirmed_project,
+                project_id=incoming_project_id,
+                updated_at=incoming_updated_at,
+                content=incoming_content,
+            )
+        )
+        if incoming_project is not None and not revision_confirmed:
+            schedule_cloud_sync()
+            self.send_json(save_conflict_payload(confirmed_project), HTTPStatus.CONFLICT)
+            return
+
         schedule_cloud_sync()
-        self.send_json(response_store)
+        response_payload = dict(response_store)
+        response_payload["saveMeta"] = {
+            "saved": revision_confirmed,
+            "destination": "local-server",
+            "savedAt": datetime_now_iso(),
+            "projectId": incoming_project_id if revision_confirmed else None,
+            "savedUpdatedAt": incoming_updated_at if revision_confirmed else None,
+            "cloudSyncScheduled": CLOUD.enabled,
+        }
+        self.send_json(response_payload)
 
     def do_PATCH(self) -> None:  # noqa: N802 - stdlib handler API
         if self.reject_cross_origin_mutation():
@@ -404,7 +708,16 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
 
         project_id = incoming.get("id") if isinstance(incoming, dict) else None
         content = incoming.get("content") if isinstance(incoming, dict) else None
-        if not isinstance(project_id, str) or not isinstance(content, str):
+        incoming_updated_at = (
+            parse_updated_at(incoming.get("updatedAt"))
+            if isinstance(incoming, dict)
+            else None
+        )
+        if (
+            not isinstance(project_id, str)
+            or not isinstance(content, str)
+            or incoming_updated_at is None
+        ):
             self.send_json({"error": "正文草稿结构无效"}, HTTPStatus.BAD_REQUEST)
             return
 
@@ -415,19 +728,23 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
             for index, project in enumerate(projects):
                 if not isinstance(project, dict) or project.get("id") != project_id:
                     continue
-                patched = dict(project)
-                patched_data = dict(project.get("data") or {})
-                patched_data["content"] = content
-                patched["data"] = patched_data
-                title = incoming.get("title")
-                if isinstance(title, str) and title.strip():
-                    patched["title"] = title.strip()[:40]
-                try:
-                    incoming_updated_at = float(incoming.get("updatedAt") or 0)
-                except (TypeError, ValueError):
-                    incoming_updated_at = 0
-                patched["updatedAt"] = max(project_timestamp(project), incoming_updated_at)
-                projects[index] = patched
+                current_updated_at = parse_updated_at(project.get("updatedAt")) or 0
+                if incoming_updated_at < current_updated_at or (
+                    incoming_updated_at == current_updated_at
+                    and project_content(project) != content
+                ):
+                    self.send_json(save_conflict_payload(project), HTTPStatus.CONFLICT)
+                    return
+                if incoming_updated_at > current_updated_at:
+                    patched = dict(project)
+                    patched_data = dict(project.get("data") or {})
+                    patched_data["content"] = content
+                    patched["data"] = patched_data
+                    title = incoming.get("title")
+                    if isinstance(title, str) and title.strip():
+                        patched["title"] = title.strip()[:40]
+                    patched["updatedAt"] = incoming_updated_at
+                    projects[index] = patched
                 matched = True
                 break
 
@@ -438,13 +755,108 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
             projects = sorted(projects, key=project_timestamp, reverse=True)[:24]
             store = {"activeId": project_id, "projects": projects}
             write_store(store)
+
+        confirmed_project = find_project(store, project_id)
+        if not project_revision_matches(
+            confirmed_project,
+            project_id=project_id,
+            updated_at=incoming_updated_at,
+            content=content,
+        ):
+            self.send_json(save_conflict_payload(confirmed_project), HTTPStatus.CONFLICT)
+            return
         schedule_cloud_sync()
-        self.send_json({"ok": True, "id": project_id})
+        self.send_json(
+            {
+                "ok": True,
+                "id": project_id,
+                "saveMeta": {
+                    "saved": True,
+                    "destination": "local-server",
+                    "savedAt": datetime_now_iso(),
+                    "projectId": project_id,
+                    "savedUpdatedAt": incoming_updated_at,
+                    "cloudSyncScheduled": CLOUD.enabled,
+                },
+            }
+        )
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
         if self.reject_cross_origin_mutation():
             return
         path = urlparse(self.path).path
+        if path == "/api/ai/optimize-layout":
+            payload = self.read_json_body(maximum=MAX_AI_TEXT_BYTES)
+            if not payload:
+                self.send_json({"error": "AI 优化请求无效", "code": "INVALID_REQUEST"}, HTTPStatus.BAD_REQUEST)
+                return
+            content = payload.get("content")
+            project_id = payload.get("projectId")
+            mode = payload.get("mode", "layout")
+            accent_color = payload.get("accentColor", "#5B5FEF")
+            try:
+                base_updated_at = int(payload.get("baseUpdatedAt"))
+            except (TypeError, ValueError):
+                base_updated_at = 0
+            if not isinstance(content, str) or not isinstance(project_id, str) or not project_id or base_updated_at <= 0:
+                self.send_json({"error": "请先保存当前草稿，再使用 AI 优化", "code": "UNSAVED_DRAFT"}, HTTPStatus.CONFLICT)
+                return
+            if not isinstance(mode, str):
+                self.send_json({"error": "不支持的 AI 优化模式", "code": "INVALID_MODE"}, HTTPStatus.BAD_REQUEST)
+                return
+            if not isinstance(accent_color, str):
+                self.send_json({"error": "主题色格式无效", "code": "INVALID_ACCENT_COLOR"}, HTTPStatus.BAD_REQUEST)
+                return
+
+            with STORE_LOCK:
+                before_store = read_store()
+                before_project = next(
+                    (item for item in before_store.get("projects", []) if isinstance(item, dict) and item.get("id") == project_id),
+                    None,
+                )
+            before_content = (before_project.get("data") or {}).get("content") if before_project else None
+            if (
+                before_project is None
+                or int(project_timestamp(before_project)) != base_updated_at
+                or before_content != content
+            ):
+                self.send_json({"error": "正文已有新修改，请保存后重新优化", "code": "DRAFT_VERSION_CONFLICT"}, HTTPStatus.CONFLICT)
+                return
+
+            try:
+                result = AI_LAYOUT.optimize(content, mode=mode, accent_color=accent_color)
+            except AILayoutDisabledError as error:
+                self.send_json({"error": str(error), "code": error.code}, HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            except AILayoutValidationError as error:
+                self.send_json({"error": str(error), "code": error.code}, HTTPStatus.BAD_REQUEST)
+                return
+            except (AILayoutProviderError, AILayoutResponseError) as error:
+                self.send_json({"error": str(error), "code": error.code}, HTTPStatus.BAD_GATEWAY)
+                return
+            except AILayoutError as error:
+                self.send_json({"error": str(error), "code": error.code}, HTTPStatus.BAD_GATEWAY)
+                return
+
+            with STORE_LOCK:
+                after_store = read_store()
+                after_project = next(
+                    (item for item in after_store.get("projects", []) if isinstance(item, dict) and item.get("id") == project_id),
+                    None,
+                )
+            after_content = (after_project.get("data") or {}).get("content") if after_project else None
+            if (
+                after_project is None
+                or int(project_timestamp(after_project)) != base_updated_at
+                or after_content != content
+            ):
+                self.send_json({"error": "AI 生成期间正文已更新，结果未应用", "code": "DRAFT_VERSION_CONFLICT"}, HTTPStatus.CONFLICT)
+                return
+            response = result.as_dict()
+            response["requestId"] = uuid.uuid4().hex
+            response["baseUpdatedAt"] = base_updated_at
+            self.send_json(response)
+            return
         if path == "/api/local-assets/select-directory":
             try:
                 result = LOCAL_ASSETS.select_asset_directory()
@@ -463,9 +875,31 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
         if not CLOUD.enabled:
             self.send_json({"error": CLOUD.disabled_reason}, HTTPStatus.SERVICE_UNAVAILABLE)
             return
-        success = sync_cloud_store()
+        with STORE_LOCK:
+            target = project_checkpoint(read_store())
+        cancel_scheduled_cloud_sync()
+        success = sync_cloud_store(
+            wait_for_existing=True,
+            target_project_id=target["projectId"],
+            target_updated_at=target["updatedAt"],
+        )
         status = cloud_status()
-        self.send_json({"ok": success, "status": status}, HTTPStatus.OK if success else HTTPStatus.BAD_GATEWAY)
+        self.send_json(
+            {
+                "ok": success,
+                "status": status,
+                "checkpoint": {
+                    "projectId": target["projectId"],
+                    "requestedUpdatedAt": target["updatedAt"],
+                    "confirmed": checkpoint_is_confirmed(
+                        status,
+                        target["projectId"],
+                        target["updatedAt"],
+                    ),
+                },
+            },
+            HTTPStatus.OK if success else HTTPStatus.BAD_GATEWAY,
+        )
 
     def do_DELETE(self) -> None:  # noqa: N802 - stdlib handler API
         if self.reject_cross_origin_mutation():
@@ -493,7 +927,14 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
         except CloudStoreError as error:
             if backend is CLOUD:
                 record_cloud_failure(error)
-            self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
+            self.send_json(
+                {
+                    "error": safe_cloud_error(error)
+                    if backend is CLOUD
+                    else str(error)
+                },
+                HTTPStatus.BAD_GATEWAY,
+            )
             return
         self.send_json({"ok": True})
 
