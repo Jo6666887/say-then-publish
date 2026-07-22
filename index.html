@@ -5,15 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>写了就发 | Write Then Publish</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2317202f'/%3E%3Cpath d='M18 17h28v7H18zm0 13h20v6H18zm0 12h28v6H18z' fill='%23fff'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="src/styles.css?v=20260723-ux-ai-layout" />
+    <link rel="stylesheet" href="src/styles.css?v=20260723-page-themes" />
   </head>
   <body>
     <main class="workspace">
       <aside id="historySidebar" class="history-sidebar" aria-label="历史记录">
-        <button id="historyToggleBtn" class="history-tab" type="button" title="打开历史记录" aria-label="打开历史记录">
+        <button id="historyToggleBtn" class="history-tab" type="button" title="打开历史记录" aria-label="打开历史记录" aria-controls="historyDrawer" aria-expanded="false">
           <i data-lucide="panel-left-open"></i>
         </button>
-        <div class="history-drawer">
+        <div id="historyDrawer" class="history-drawer" aria-hidden="true" inert>
           <div class="history-head">
             <span>历史记录</span>
             <button id="historyCloseBtn" class="icon-button ghost" type="button" title="收起历史记录" aria-label="收起历史记录">
@@ -33,15 +33,14 @@
 
       <aside class="editor-panel" aria-label="编辑器">
         <div class="brand-row">
-          <div class="brand-title">
-            <h1>写了就发</h1>
-            <span class="brand-english">Write Then Publish</span>
-            <p id="pageCount">0 张图片</p>
+          <h1 class="visually-hidden">写了就发</h1>
+          <div class="project-heading">
+            <label class="project-title-control">
+              <span>当前项目</span>
+              <input id="projectTitleInput" type="text" maxlength="40" placeholder="例如：千问 Token Plan 优化版" aria-label="项目标题" />
+            </label>
+            <p id="pageCount" class="project-page-count" aria-live="polite">0 张图片</p>
           </div>
-          <label class="project-title-control">
-            <span>项目标题</span>
-            <input id="projectTitleInput" type="text" maxlength="40" placeholder="例如：千问 Token Plan 优化版" aria-label="项目标题" />
-          </label>
           <div class="mode-switch" aria-label="切换工作区">
             <button type="button" class="active" data-app-mode="cards">图文卡片</button>
             <button type="button" data-app-mode="article">长文</button>
@@ -54,26 +53,32 @@
               <i data-lucide="save"></i>
               <span id="exportProjectsLabel">保存</span>
             </button>
-            <button class="secondary-button" id="importProjectsBtn" type="button" title="从本地 JSON 合并导入草稿、图片和排版设置">
-              <i data-lucide="folder-up"></i>
-              导入 JSON
-            </button>
             <button class="secondary-button" id="assetLibraryBtn" type="button" title="查看和管理图片资源">
               <i data-lucide="images"></i>
               资源库
             </button>
-            <input id="projectBackupInput" class="backup-file-input" type="file" accept=".json,application/json" />
-            <button class="secondary-button convert-mode-button" id="convertModeBtn" type="button">
-              <i data-lucide="repeat-2"></i>
-              <span>转长文</span>
-            </button>
-            <button class="secondary-button header-mode-button" id="headerModeToggleBtn" type="button">
-              <i data-lucide="user-round"></i>
-              每页头像
-            </button>
-            <button class="icon-button" id="themeToggleBtn" type="button" title="切换黑白主题" aria-label="切换黑白主题">
-              <i data-lucide="palette"></i>
-            </button>
+            <details class="tool-menu project-actions-menu">
+              <summary class="secondary-button" title="更多项目与界面设置">更多</summary>
+              <div class="tool-popover project-actions-popover">
+                <button class="secondary-button" id="importProjectsBtn" type="button" title="从本地 JSON 合并导入草稿、图片和排版设置">
+                  <i data-lucide="folder-up"></i>
+                  导入 JSON
+                </button>
+                <button class="secondary-button convert-mode-button" id="convertModeBtn" type="button">
+                  <i data-lucide="repeat-2"></i>
+                  <span>转长文</span>
+                </button>
+                <button class="secondary-button header-mode-button" id="headerModeToggleBtn" type="button">
+                  <i data-lucide="user-round"></i>
+                  每页头像
+                </button>
+                <button class="secondary-button" id="themeToggleBtn" type="button" title="切换软件界面明暗" aria-label="切换软件界面明暗">
+                  <i data-lucide="palette"></i>
+                  <span>界面明暗</span>
+                </button>
+              </div>
+            </details>
+            <input id="projectBackupInput" class="backup-file-input" type="file" accept=".json,application/json" tabindex="-1" />
           </div>
         </div>
 
@@ -81,7 +86,7 @@
           <div class="profile-inline">
             <label class="avatar-picker" title="修改头像">
               <img id="avatarPreview" alt="头像预览" />
-              <input id="avatarInput" type="file" accept="image/*" />
+              <input id="avatarInput" type="file" accept="image/*" tabindex="-1" />
             </label>
             <input id="displayNameInput" class="compact-input name-input" type="text" aria-label="名称" />
             <input id="handleInput" class="compact-input handle-input" type="text" aria-label="英文昵称" />
@@ -106,7 +111,7 @@
             </button>
             <label class="tool-button file-tool" title="插入图片" aria-label="插入图片">
               <i data-lucide="image-plus"></i>
-              <input id="contentImageInput" type="file" accept="image/*" multiple />
+              <input id="contentImageInput" type="file" accept="image/*" multiple tabindex="-1" />
             </label>
             <details id="obsidianImportMenu" class="tool-menu obsidian-import-menu">
               <summary class="tool-button" title="从 Obsidian 导入图文" aria-label="从 Obsidian 导入图文">
@@ -235,11 +240,38 @@
             </details>
 
             <details class="tool-menu settings-menu">
-              <summary class="tool-button" title="设计设置" aria-label="设计设置">
+              <summary class="tool-button settings-tool-button" title="页面配色与排版设置" aria-label="页面配色与排版设置">
                 <i data-lucide="sliders-horizontal"></i>
+                <span>页面样式</span>
               </summary>
               <div class="tool-popover settings-popover">
                 <div class="settings-grid">
+                  <section class="card-appearance-settings wide" aria-labelledby="cardAppearanceTitle">
+                    <div class="settings-section-heading">
+                      <strong id="cardAppearanceTitle">页面配色</strong>
+                      <span>点预设会同步背景、文字和强调色；也可在下方单独微调。</span>
+                    </div>
+                    <div class="card-palette-grid" role="group" aria-label="页面配色预设">
+                      <button type="button" class="card-palette-button" data-card-palette="paper" style="--palette-bg:#ffffff;--palette-accent:#5b5fef" aria-label="纯白页面配色">
+                        <span aria-hidden="true"></span>纯白
+                      </button>
+                      <button type="button" class="card-palette-button" data-card-palette="warm" style="--palette-bg:#fff8ed;--palette-accent:#b45309" aria-label="暖纸页面配色">
+                        <span aria-hidden="true"></span>暖纸
+                      </button>
+                      <button type="button" class="card-palette-button" data-card-palette="mist" style="--palette-bg:#f2f5ff;--palette-accent:#4f46e5" aria-label="雾蓝页面配色">
+                        <span aria-hidden="true"></span>雾蓝
+                      </button>
+                      <button type="button" class="card-palette-button" data-card-palette="sage" style="--palette-bg:#f1f7f1;--palette-accent:#15803d" aria-label="青苔页面配色">
+                        <span aria-hidden="true"></span>青苔
+                      </button>
+                      <button type="button" class="card-palette-button" data-card-palette="blush" style="--palette-bg:#fff3f6;--palette-accent:#be185d" aria-label="淡粉页面配色">
+                        <span aria-hidden="true"></span>淡粉
+                      </button>
+                      <button type="button" class="card-palette-button" data-card-palette="night" style="--palette-bg:#111827;--palette-accent:#a5b4fc" aria-label="深夜页面配色">
+                        <span aria-hidden="true"></span>深夜
+                      </button>
+                    </div>
+                  </section>
                   <label>
                     文字色
                     <input id="textColorInput" type="color" value="#202938" />
@@ -249,7 +281,7 @@
                     <input id="accentColorInput" type="color" value="#2563eb" />
                   </label>
                   <label>
-                    背景色
+                    自定义背景
                     <input id="bgColorInput" type="color" value="#ffffff" />
                   </label>
                   <label>
@@ -288,7 +320,7 @@
           </div>
         </section>
 
-        <textarea id="contentInput" class="editor-textarea" spellcheck="false"></textarea>
+        <textarea id="contentInput" class="editor-textarea" spellcheck="false" aria-label="正文内容"></textarea>
       </aside>
       <button class="panel-resizer" data-panel-resize="editor" type="button" aria-label="拖动调整编辑区宽度"></button>
 
@@ -296,7 +328,7 @@
         <div class="preview-topbar">
           <div class="preview-heading">
             <h2>预览与下载</h2>
-            <span id="statusText" class="render-status">自动分页已开启</span>
+            <span id="statusText" class="render-status" role="status" aria-live="polite">自动分页已开启</span>
           </div>
           <div class="preview-topbar-controls">
             <div id="saveCheckpoint" class="save-checkpoint" data-state="checking">
@@ -545,6 +577,6 @@
     <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/lucide@1.8.0/dist/umd/lucide.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
-    <script src="src/app.js?v=20260723-ux-ai-layout"></script>
+    <script src="src/app.js?v=20260723-page-themes"></script>
   </body>
 </html>

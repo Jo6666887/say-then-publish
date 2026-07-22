@@ -12,6 +12,7 @@ const STORAGE_KEY = "graphicTextLayoutState.v1";
 const PROJECTS_STORAGE_KEY = "graphicTextLayoutProjects.v1";
 const PANEL_LAYOUT_STORAGE_KEY = "writeThenPublishPanelLayout.v1";
 const EXPORT_SCALE_STORAGE_KEY = "writeThenPublishExportScale.v1";
+const UI_THEME_STORAGE_KEY = "writeThenPublishUiTheme.v1";
 const PROJECT_BACKUP_SCHEMA = "write-then-publish-projects";
 const PROJECT_BACKUP_VERSION = 1;
 const LOCAL_DATABASE_NAME = "writeThenPublishLocal.v1";
@@ -70,6 +71,7 @@ const $ = (selector) => document.querySelector(selector);
 
 const els = {
   workspace: $(".workspace"),
+  editorPanel: $(".editor-panel"),
   content: $("#contentInput"),
   pages: $("#pages"),
   pageCount: $("#pageCount"),
@@ -80,6 +82,7 @@ const els = {
   saveCheckpointMeta: $("#saveCheckpointMeta"),
   saveNow: $("#saveNowBtn"),
   historySidebar: $("#historySidebar"),
+  historyDrawer: $(".history-drawer"),
   historyNote: $("#historyNote"),
   historyToggle: $("#historyToggleBtn"),
   historyClose: $("#historyCloseBtn"),
@@ -167,6 +170,7 @@ const els = {
   textColor: $("#textColorInput"),
   accentColor: $("#accentColorInput"),
   bgColor: $("#bgColorInput"),
+  cardPaletteButtons: document.querySelectorAll("[data-card-palette]"),
   fontSize: $("#fontSizeInput"),
   lineHeight: $("#lineHeightInput"),
   zhFont: $("#zhFontInput"),
@@ -256,16 +260,42 @@ const UI_THEME_LABELS = {
   dark: "黑色",
 };
 
-const CARD_THEME_COLORS = {
-  light: {
+const CARD_PALETTES = {
+  paper: {
+    label: "纯白",
     textColor: "#202938",
-    accentColor: "#17202f",
+    accentColor: "#2563eb",
     bgColor: "#ffffff",
   },
-  dark: {
-    textColor: "#ffffff",
-    accentColor: "#ffffff",
-    bgColor: "#050505",
+  warm: {
+    label: "暖纸",
+    textColor: "#302820",
+    accentColor: "#b45309",
+    bgColor: "#fff8ed",
+  },
+  mist: {
+    label: "雾蓝",
+    textColor: "#202938",
+    accentColor: "#4f46e5",
+    bgColor: "#f2f5ff",
+  },
+  sage: {
+    label: "青苔",
+    textColor: "#243229",
+    accentColor: "#15803d",
+    bgColor: "#f1f7f1",
+  },
+  blush: {
+    label: "淡粉",
+    textColor: "#35252b",
+    accentColor: "#be185d",
+    bgColor: "#fff3f6",
+  },
+  night: {
+    label: "深夜",
+    textColor: "#f8fafc",
+    accentColor: "#a5b4fc",
+    bgColor: "#111827",
   },
 };
 
@@ -595,9 +625,9 @@ function readForm() {
     content: els.content.value,
     displayName: els.displayName.value.trim() || "未命名作者",
     handle: normalizeHandle(els.handle.value),
-    textColor: els.textColor.value,
-    accentColor: els.accentColor.value,
-    bgColor: els.bgColor.value,
+    textColor: normalizeHexColor(els.textColor.value, "#202938"),
+    accentColor: normalizeHexColor(els.accentColor.value, "#2563eb"),
+    bgColor: normalizeHexColor(els.bgColor.value, "#ffffff"),
     fontSize: clamp(Number(els.fontSize.value) || 31, 24, 40),
     lineHeight: clamp(Number(els.lineHeight.value) || 1.65, 1, 2.4),
     zhFont: FONT_STACKS[els.zhFont.value] ? els.zhFont.value : "zh-system",
@@ -609,7 +639,6 @@ function readForm() {
     articleFont: normalizeArticleFont(state.articleFont),
     articleSize: normalizeArticleSize(state.articleSize),
     articleColor: normalizeArticleColor(state.articleColor),
-    uiTheme: state.uiTheme,
     avatar: state.avatar,
     avatarCrop: state.avatarCrop,
     images: state.images,
@@ -622,9 +651,9 @@ function applyForm(data) {
   els.content.value = data.content ?? defaultText;
   els.displayName.value = data.displayName ?? "捏捏番茄（AI图文版）";
   els.handle.value = data.handle ?? "@heytomato";
-  els.textColor.value = data.textColor ?? "#202938";
-  els.accentColor.value = data.accentColor ?? "#2563eb";
-  els.bgColor.value = data.bgColor ?? "#ffffff";
+  els.textColor.value = normalizeHexColor(data.textColor, "#202938");
+  els.accentColor.value = normalizeHexColor(data.accentColor, "#2563eb");
+  els.bgColor.value = normalizeHexColor(data.bgColor, "#ffffff");
   els.fontSize.value = data.fontSize ?? "31";
   els.lineHeight.value = data.lineHeight ?? "1.65";
   els.zhFont.value = FONT_STACKS[data.zhFont] ? data.zhFont : "zh-system";
@@ -639,7 +668,6 @@ function applyForm(data) {
   updateAppMode();
   updateHeaderModeButton();
   updateArticleControls();
-  setUiTheme(data.uiTheme || "light", false, true);
   state.avatar = data.avatar || sampleAvatar;
   state.avatarCrop = data.avatarCrop || null;
   state.images = normalizeImagesForContent(data.content, data.images);
@@ -649,6 +677,7 @@ function applyForm(data) {
   document.documentElement.style.setProperty("--brush-color", els.inlineColor.value);
   document.documentElement.style.setProperty("--text-bg-brush-color", els.inlineBgColor.value);
   updateImageList();
+  syncCardPaletteControls();
   syncAiUndoAvailability();
   const currentProject = findHistoryProject(state.currentProjectId);
   if (els.projectTitle) {
@@ -658,35 +687,143 @@ function applyForm(data) {
   }
 }
 
-function setUiTheme(theme, announce = false, syncCard = false) {
+function normalizeHexColor(value, fallback = "#000000") {
+  const match = String(value || "").trim().match(/^#?([0-9a-f]{6})$/i);
+  if (match) return `#${match[1].toLowerCase()}`;
+  const fallbackMatch = String(fallback || "").trim().match(/^#?([0-9a-f]{6})$/i);
+  return fallbackMatch ? `#${fallbackMatch[1].toLowerCase()}` : "#000000";
+}
+
+function loadUiTheme(fallback = "light") {
+  try {
+    const stored = localStorage.getItem(UI_THEME_STORAGE_KEY);
+    if (UI_THEMES.includes(stored)) return stored;
+  } catch {
+    // 界面偏好读取失败不影响项目内容。
+  }
+  return UI_THEMES.includes(fallback) ? fallback : "light";
+}
+
+function setUiTheme(theme, announce = false, persist = true) {
   const normalizedTheme = theme === "ink" ? "dark" : theme === "paper" ? "light" : theme;
   const nextTheme = UI_THEMES.includes(normalizedTheme) ? normalizedTheme : "light";
   state.uiTheme = nextTheme;
   document.documentElement.dataset.uiTheme = nextTheme;
-  if (syncCard) syncCardColorsToTheme(nextTheme);
+  if (persist) {
+    try {
+      localStorage.setItem(UI_THEME_STORAGE_KEY, nextTheme);
+    } catch {
+      // 界面偏好写入失败不影响当前会话。
+    }
+  }
   if (els.themeToggle) {
     const label = UI_THEME_LABELS[nextTheme];
-    els.themeToggle.title = `切换黑白主题：当前 ${label}`;
-    els.themeToggle.setAttribute("aria-label", `切换黑白主题，当前 ${label}`);
+    els.themeToggle.title = `切换软件界面明暗：当前${label}界面`;
+    els.themeToggle.setAttribute("aria-label", `切换软件界面明暗，当前${label}界面`);
   }
   if (announce) {
-    els.status.textContent = `已切换为${UI_THEME_LABELS[nextTheme]}主题`;
+    els.status.textContent = `软件界面已切换为${UI_THEME_LABELS[nextTheme]}，卡片成品颜色保持不变`;
   }
 }
 
-function syncCardColorsToTheme(theme) {
-  const colors = CARD_THEME_COLORS[theme] || CARD_THEME_COLORS.light;
-  els.textColor.value = colors.textColor;
-  els.accentColor.value = colors.accentColor;
-  els.bgColor.value = colors.bgColor;
+function colorChannels(hex) {
+  const normalized = normalizeHexColor(hex);
+  return [1, 3, 5].map((start) => Number.parseInt(normalized.slice(start, start + 2), 16) / 255);
 }
 
-async function toggleUiTheme() {
+function relativeLuminance(hex) {
+  const channels = colorChannels(hex).map((channel) =>
+    channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4,
+  );
+  return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+}
+
+function colorContrast(first, second) {
+  const firstLuminance = relativeLuminance(first);
+  const secondLuminance = relativeLuminance(second);
+  const lighter = Math.max(firstLuminance, secondLuminance);
+  const darker = Math.min(firstLuminance, secondLuminance);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function highestContrastColor(background, candidates) {
+  return candidates.reduce(
+    (best, color) => {
+      const contrast = colorContrast(background, color);
+      return contrast > best.contrast ? { color, contrast } : best;
+    },
+    { color: candidates[0], contrast: -1 },
+  ).color;
+}
+
+function syncCardPaletteControls() {
+  const current = {
+    textColor: normalizeHexColor(els.textColor?.value, "#202938"),
+    accentColor: normalizeHexColor(els.accentColor?.value, "#2563eb"),
+    bgColor: normalizeHexColor(els.bgColor?.value, "#ffffff"),
+  };
+  els.cardPaletteButtons.forEach((button) => {
+    const palette = CARD_PALETTES[button.dataset.cardPalette];
+    const active = Boolean(
+      palette
+        && current.textColor === palette.textColor
+        && current.accentColor === palette.accentColor
+        && current.bgColor === palette.bgColor,
+    );
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
+function flushAppearanceSaveIfHydrated() {
+  if (state.localDatabaseHydrated) flushStateSave();
+}
+
+function applyCardPalette(event) {
+  const palette = CARD_PALETTES[event.currentTarget.dataset.cardPalette];
+  if (!palette) return;
+  els.textColor.value = palette.textColor;
+  els.accentColor.value = palette.accentColor;
+  els.bgColor.value = palette.bgColor;
+  syncCardPaletteControls();
+  requestRender();
+  flushAppearanceSaveIfHydrated();
+  els.status.textContent = `页面配色已切换为「${palette.label}」，将随当前项目自动保存`;
+}
+
+function ensureCardColorContrast(source = "background") {
+  const background = normalizeHexColor(els.bgColor.value, "#ffffff");
+  els.bgColor.value = background;
+  const adjusted = [];
+  if (colorContrast(background, els.textColor.value) < 4.5) {
+    els.textColor.value = highestContrastColor(background, ["#000000", "#ffffff"]);
+    adjusted.push("文字色");
+  }
+  if (colorContrast(background, els.accentColor.value) < 3) {
+    els.accentColor.value = highestContrastColor(background, ["#1d4ed8", "#312e81", "#fde68a", "#ffffff", "#000000"]);
+    adjusted.push("强调色");
+  }
+  syncCardPaletteControls();
+  requestRender();
+  flushAppearanceSaveIfHydrated();
+  if (adjusted.length) {
+    els.status.textContent = `已自动修正${adjusted.join("和")}，避免页面配色影响阅读`;
+  } else {
+    els.status.textContent = source === "background"
+      ? "已使用自定义页面背景，将随当前项目自动保存"
+      : "页面文字配色已更新，将随当前项目自动保存";
+  }
+}
+
+function closeProjectActionsMenu() {
+  document.querySelector(".project-actions-menu")?.removeAttribute("open");
+}
+
+function toggleUiTheme() {
   const index = UI_THEMES.indexOf(state.uiTheme);
   const nextTheme = UI_THEMES[(index + 1) % UI_THEMES.length];
-  setUiTheme(nextTheme, false, true);
-  await render();
-  els.status.textContent = `已切换为${UI_THEME_LABELS[nextTheme]}主题`;
+  setUiTheme(nextTheme, true, true);
+  closeProjectActionsMenu();
 }
 
 function updateHeaderModeButton() {
@@ -700,6 +837,7 @@ function updateHeaderModeButton() {
 }
 
 async function toggleHeaderMode() {
+  closeProjectActionsMenu();
   state.headerMode = state.headerMode === "first" ? "every" : "first";
   updateHeaderModeButton();
   await render();
@@ -711,6 +849,7 @@ function updateAppMode() {
   els.modeButtons.forEach((button) => {
     const active = button.dataset.appMode === state.appMode;
     button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
   });
   const targetMode = state.appMode === "article" ? "cards" : "article";
   const targetLabel = targetMode === "article" ? "转长文" : "转图文";
@@ -735,6 +874,7 @@ async function setAppMode(mode) {
 }
 
 async function convertCurrentMode() {
+  closeProjectActionsMenu();
   const nextMode = state.appMode === "article" ? "cards" : "article";
   await setAppMode(nextMode);
   els.status.textContent = nextMode === "article" ? "已转为长文" : "已转为图文卡片，并自动分页排版";
@@ -826,12 +966,39 @@ function savePanelLayout() {
 function applyPanelLayout() {
   els.workspace?.style.setProperty("--history-width", `${Math.round(state.panelLayout.history)}px`);
   els.workspace?.style.setProperty("--editor-width", `${Math.round(state.panelLayout.editor)}px`);
+  els.panelResizers.forEach((resizer) => {
+    const target = resizer.dataset.panelResize;
+    const limits = PANEL_LIMITS[target];
+    if (!limits) return;
+    resizer.setAttribute("role", "separator");
+    resizer.setAttribute("aria-orientation", "vertical");
+    resizer.setAttribute("aria-valuemin", String(limits.min));
+    resizer.setAttribute("aria-valuemax", String(limits.max));
+    resizer.setAttribute("aria-valuenow", String(Math.round(state.panelLayout[target])));
+  });
+}
+
+function resizePanelWithKeyboard(event) {
+  const target = event.currentTarget.dataset.panelResize;
+  const limits = PANEL_LIMITS[target];
+  if (!limits || window.matchMedia("(max-width: 900px)").matches) return;
+  const keys = ["ArrowLeft", "ArrowRight", "Home", "End"];
+  if (!keys.includes(event.key)) return;
+  event.preventDefault();
+  if (target === "history" && !els.historySidebar?.classList.contains("open")) setHistoryOpen(true);
+  if (event.key === "Home") state.panelLayout[target] = limits.min;
+  if (event.key === "End") state.panelLayout[target] = limits.max;
+  if (event.key === "ArrowLeft") state.panelLayout[target] = clamp(state.panelLayout[target] - 16, limits.min, limits.max);
+  if (event.key === "ArrowRight") state.panelLayout[target] = clamp(state.panelLayout[target] + 16, limits.min, limits.max);
+  applyPanelLayout();
+  savePanelLayout();
+  els.status.textContent = `${target === "history" ? "历史栏" : "编辑区"}宽度 ${Math.round(state.panelLayout[target])} 像素`;
 }
 
 function startPanelResize(event) {
   const target = event.currentTarget.dataset.panelResize;
   if (!["history", "editor"].includes(target)) return;
-  if (window.matchMedia("(max-width: 980px)").matches) return;
+  if (window.matchMedia("(max-width: 900px)").matches) return;
 
   event.preventDefault();
   if (target === "history" && !els.historySidebar?.classList.contains("open")) {
@@ -1417,6 +1584,23 @@ function mergeProjectLists(existingProjects, incomingProjects) {
     .slice(0, MAX_PROJECTS);
 }
 
+function projectRevisionMatches(first, second) {
+  if (!first || !second) return false;
+  if (
+    first.id !== second.id
+    || Number(first.updatedAt) !== Number(second.updatedAt)
+    || first.title !== second.title
+  ) {
+    return false;
+  }
+  if (first.data === second.data) return true;
+  try {
+    return JSON.stringify(first.data) === JSON.stringify(second.data);
+  } catch {
+    return false;
+  }
+}
+
 function restoreImportedProjects(existingProjects, incomingProjects) {
   const normalizedIncoming = (incomingProjects || []).map(normalizeProject).filter(Boolean);
   const importedIds = new Set(normalizedIncoming.map((project) => project.id));
@@ -1444,13 +1628,13 @@ async function hydrateProjectStoreFromIndexedDb() {
     const merged = mergeProjectLists(mergeProjectLists(state.projects, storedProjects), sharedProjects);
     const changed =
       merged.length !== state.projects.length ||
-      merged.some((project, index) => project.id !== state.projects[index]?.id || project.updatedAt !== state.projects[index]?.updatedAt);
+      merged.some((project, index) => !projectRevisionMatches(project, state.projects[index]));
     if (changed) {
       state.projects = merged;
       const mergedActive = state.projects.find((project) => project.id === state.currentProjectId);
       const preferredActiveId = shared?.activeId || stored?.activeId;
       const storedActive = state.projects.find((project) => project.id === preferredActiveId);
-      const activeWasReplaced = mergedActive && (!activeBeforeHydration || mergedActive.updatedAt !== activeBeforeHydration.updatedAt);
+      const activeWasReplaced = mergedActive && !projectRevisionMatches(mergedActive, activeBeforeHydration);
       const projectToApply = activeWasReplaced ? mergedActive : !mergedActive ? storedActive : null;
       if (projectToApply) {
         state.currentProjectId = projectToApply.id;
@@ -2056,7 +2240,9 @@ function updateProjectHistory() {
   if (!els.projectHistory) return;
   els.projectHistory.innerHTML = "";
   els.historyFilterButtons.forEach((button) => {
-    button.classList.toggle("active", button.dataset.historyFilter === state.historyFilter);
+    const active = button.dataset.historyFilter === state.historyFilter;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
   });
 
   const visibleProjects = allHistoryProjects().filter((project) => {
@@ -2106,16 +2292,24 @@ function setHistoryFilter(filter) {
   updateProjectHistory();
 }
 
-function setHistoryOpen(open) {
+function setHistoryOpen(open, moveFocus = false) {
   if (!els.historySidebar) return;
   els.historySidebar.classList.toggle("open", open);
   els.workspace?.classList.toggle("history-open", open);
+  if (els.historyDrawer) {
+    els.historyDrawer.inert = !open;
+    els.historyDrawer.setAttribute("aria-hidden", String(!open));
+  }
+  els.historyToggle?.setAttribute("aria-expanded", String(open));
   els.historyToggle?.setAttribute("aria-label", open ? "收起历史记录" : "打开历史记录");
   els.historyToggle?.setAttribute("title", open ? "收起历史记录" : "打开历史记录");
+  if (moveFocus) {
+    requestAnimationFrame(() => (open ? els.historyClose : els.historyToggle)?.focus());
+  }
 }
 
 function toggleHistory() {
-  setHistoryOpen(!els.historySidebar?.classList.contains("open"));
+  setHistoryOpen(!els.historySidebar?.classList.contains("open"), true);
 }
 
 async function openProject(projectId) {
@@ -6398,7 +6592,7 @@ async function downloadAll() {
   }
 }
 
-const debouncedRender = debounce(render, 180);
+const debouncedRender = debounce(() => render({ persist: false }), 180);
 
 function requestRender() {
   scheduleStateSave();
@@ -6409,23 +6603,37 @@ function positionToolPopover(menu) {
   const popover = menu.querySelector(".tool-popover");
   if (!popover) return;
 
-  popover.style.left = "";
-  popover.style.right = "";
-
-  if (window.matchMedia("(max-width: 620px)").matches) return;
+  if (window.matchMedia("(max-width: 620px)").matches) {
+    ["position", "top", "left", "right", "max-height", "overflow-y"].forEach((property) => popover.style.removeProperty(property));
+    return;
+  }
 
   const margin = 12;
   const menuRect = menu.getBoundingClientRect();
   const popoverRect = popover.getBoundingClientRect();
-  let left = 0;
+  const panelRect = menu.closest(".editor-panel")?.getBoundingClientRect();
+  const fitsInsidePanel = panelRect && popoverRect.width <= panelRect.width - margin * 2;
+  const leftBoundary = fitsInsidePanel ? panelRect.left + margin : margin;
+  const rightBoundary = fitsInsidePanel ? panelRect.right - margin : window.innerWidth - margin;
+  const preferredLeft = menu.classList.contains("project-actions-menu")
+    ? menuRect.right - popoverRect.width
+    : menuRect.left;
+  const left = clamp(preferredLeft, leftBoundary, Math.max(leftBoundary, rightBoundary - popoverRect.width));
+  const naturalHeight = popover.scrollHeight || popoverRect.height;
+  const belowTop = menuRect.bottom + 8;
+  const availableBelow = Math.max(0, window.innerHeight - margin - belowTop);
+  const availableAbove = Math.max(0, menuRect.top - margin - 8);
+  const placeBelow = availableBelow >= Math.min(naturalHeight, 240) || availableBelow >= availableAbove;
+  const availableHeight = placeBelow ? availableBelow : availableAbove;
+  const maxHeight = Math.max(120, Math.min(naturalHeight, availableHeight));
+  const top = placeBelow ? belowTop : Math.max(margin, menuRect.top - maxHeight - 8);
 
-  const overflowRight = menuRect.left + popoverRect.width - (window.innerWidth - margin);
-  if (overflowRight > 0) left -= overflowRight;
-
-  const overflowLeft = menuRect.left + left - margin;
-  if (overflowLeft < 0) left -= overflowLeft;
-
+  popover.style.position = "fixed";
+  popover.style.top = `${Math.round(top)}px`;
   popover.style.left = `${Math.round(left)}px`;
+  popover.style.right = "auto";
+  popover.style.maxHeight = `${Math.round(maxHeight)}px`;
+  popover.style.overflowY = "auto";
 }
 
 function positionOpenToolPopovers() {
@@ -6456,11 +6664,23 @@ function bindEvents() {
     }
   });
 
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    const openMenus = [...document.querySelectorAll(".tool-menu[open]")];
+    if (!openMenus.length) return;
+    event.preventDefault();
+    openMenus.forEach((menu) => menu.removeAttribute("open"));
+    openMenus.at(-1)?.querySelector("summary")?.focus();
+  });
+
   window.addEventListener("resize", positionOpenToolPopovers);
+  window.addEventListener("scroll", positionOpenToolPopovers, { passive: true });
+  els.editorPanel?.addEventListener("scroll", positionOpenToolPopovers, { passive: true });
   window.addEventListener("resize", applyPanelLayout);
 
   els.panelResizers.forEach((resizer) => {
     resizer.addEventListener("pointerdown", startPanelResize);
+    resizer.addEventListener("keydown", resizePanelWithKeyboard);
   });
 
   document.querySelectorAll("[data-format]").forEach((button) => {
@@ -6513,16 +6733,31 @@ function bindEvents() {
     els.handle,
     els.textColor,
     els.accentColor,
-    els.bgColor,
     els.fontSize,
     els.lineHeight,
     els.zhFont,
     els.enFont,
     els.imageHeight,
   ].forEach((input) => {
-    input.addEventListener("input", requestRender);
-    input.addEventListener("change", requestRender);
+    input.addEventListener("input", () => {
+      if (input === els.textColor || input === els.accentColor) syncCardPaletteControls();
+      requestRender();
+    });
+    input.addEventListener("change", () => {
+      if (input === els.textColor || input === els.accentColor) {
+        ensureCardColorContrast("foreground");
+      } else {
+        requestRender();
+      }
+    });
   });
+
+  els.bgColor.addEventListener("input", () => {
+    syncCardPaletteControls();
+    requestRender();
+  });
+  els.bgColor.addEventListener("change", () => ensureCardColorContrast("background"));
+  els.cardPaletteButtons.forEach((button) => button.addEventListener("click", applyCardPalette));
 
   els.inlineColor.addEventListener("input", () => {
     document.documentElement.style.setProperty("--brush-color", els.inlineColor.value);
@@ -6577,7 +6812,7 @@ function bindEvents() {
   els.replaceOne.addEventListener("click", replaceCurrent);
   els.replaceAll.addEventListener("click", replaceAll);
   els.historyToggle.addEventListener("click", toggleHistory);
-  els.historyClose.addEventListener("click", () => setHistoryOpen(false));
+  els.historyClose.addEventListener("click", () => setHistoryOpen(false, true));
   els.historyFilterButtons.forEach((button) => {
     button.addEventListener("click", () => setHistoryFilter(button.dataset.historyFilter));
   });
@@ -6596,7 +6831,10 @@ function bindEvents() {
     if (event.target === els.aiOptimizeModal) closeAiOptimizeModal();
   });
   els.aiOptimizeModal?.addEventListener("keydown", trapAiOptimizeModalFocus);
-  els.importProjects?.addEventListener("click", () => els.projectBackupInput?.click());
+  els.importProjects?.addEventListener("click", () => {
+    closeProjectActionsMenu();
+    els.projectBackupInput?.click();
+  });
   els.projectBackupInput?.addEventListener("change", handleProjectBackupImport);
   els.importPreviewClose?.addEventListener("click", closeProjectImportPreview);
   els.importPreviewCancel?.addEventListener("click", closeProjectImportPreview);
@@ -6635,6 +6873,7 @@ loadPanelLayout();
 applyPanelLayout();
 setExportScale(loadExportScale(), false);
 const initialFormState = loadState();
+setUiTheme(loadUiTheme(initialFormState.uiTheme), false, true);
 applyForm(initialFormState);
 syncGuideReadOnlyMode();
 resetTextHistory();
