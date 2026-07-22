@@ -25,7 +25,7 @@ if ! /usr/bin/curl -fsS --max-time 2 "${URL}api/project-store" >/dev/null 2>&1; 
     fi
   fi
 
-  nohup /usr/bin/env python3 server.py > runtime-data/write-then-publish.log 2>&1 &
+  nohup /bin/zsh scripts/start-server.zsh > runtime-data/write-then-publish.log 2>&1 &
 
   for _ in {1..30}; do
     if /usr/bin/curl -fsS --max-time 2 "${URL}api/project-store" >/dev/null 2>&1; then

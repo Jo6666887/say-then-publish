@@ -5,6 +5,6 @@
   "private": true,
   "scripts": {
     "open": "open index.html",
-    "start": "python3 server.py"
+    "start": "zsh scripts/start-server.zsh"
   }
 }

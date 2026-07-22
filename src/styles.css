@@ -223,7 +223,7 @@ body.resizing-panels textarea {
 }
 
 body[data-guide-readonly="true"] .mode-switch,
-body[data-guide-readonly="true"] .brand-actions button:not(#newProjectBtn):not(#exportProjectsBtn):not(#importProjectsBtn),
+body[data-guide-readonly="true"] .brand-actions button:not(#newProjectBtn):not(#exportProjectsBtn):not(#importProjectsBtn):not(#assetLibraryBtn),
 body[data-guide-readonly="true"] .editor-controls {
   pointer-events: none;
   opacity: 0.52;
@@ -407,9 +407,209 @@ body[data-guide-readonly="true"] .editor-textarea:focus {
   padding: 18px 22px 22px;
 }
 
+.asset-library-card {
+  width: min(920px, calc(100vw - 32px));
+}
+
+.asset-library-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.asset-library-head-actions [hidden] {
+  display: none;
+}
+
+.asset-library-body {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  gap: 14px;
+  padding: 18px 20px 22px;
+}
+
+.asset-library-status {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--control-bg);
+  font-size: 13px;
+  font-weight: 720;
+}
+
+.asset-library-status[data-kind="success"] {
+  border-color: color-mix(in srgb, var(--green) 38%, var(--line));
+  color: var(--green);
+}
+
+.asset-library-status[data-kind="warning"] {
+  color: #a16207;
+}
+
+.asset-library-status[data-kind="error"] {
+  border-color: color-mix(in srgb, var(--coral) 44%, var(--line));
+  color: var(--coral);
+}
+
+.asset-library-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  align-content: start;
+  gap: 14px;
+  min-height: 180px;
+  overflow: auto;
+  transition: opacity 120ms ease;
+}
+
+.asset-library-grid[aria-busy="true"] {
+  opacity: 0.55;
+}
+
+.asset-library-item {
+  display: grid;
+  grid-template-rows: 142px auto auto;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--paper);
+  box-shadow: var(--shadow-soft);
+}
+
+.asset-library-preview {
+  position: relative;
+  overflow: hidden;
+  background: var(--thumb-bg);
+}
+
+.asset-library-preview img {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.asset-library-preview-fallback {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.asset-library-preview-fallback.hidden {
+  display: none;
+}
+
+.asset-library-preview-fallback svg,
+.asset-library-empty svg {
+  width: 30px;
+  height: 30px;
+}
+
+.asset-library-meta {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 11px 12px 8px;
+}
+
+.asset-library-meta strong,
+.asset-library-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.asset-library-meta strong {
+  color: var(--control-text);
+  font-size: 13px;
+}
+
+.asset-library-meta span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.asset-library-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  gap: 7px;
+  padding: 0 12px 12px;
+}
+
+.asset-library-actions .secondary-button {
+  width: 100%;
+}
+
+.asset-delete-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border: 1px solid color-mix(in srgb, var(--coral) 36%, var(--line));
+  border-radius: 8px;
+  color: var(--coral);
+  background: var(--control-bg);
+}
+
+.asset-delete-button:hover {
+  color: #ffffff;
+  background: var(--coral);
+}
+
+.asset-delete-button svg {
+  width: 17px;
+  height: 17px;
+}
+
+.asset-library-empty {
+  grid-column: 1 / -1;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  min-height: 240px;
+  gap: 8px;
+  border: 1px dashed var(--line);
+  border-radius: 9px;
+  color: var(--muted);
+  background: var(--soft);
+  text-align: center;
+}
+
+.asset-library-empty strong {
+  color: var(--control-text);
+  font-size: 14px;
+}
+
+.asset-library-empty span {
+  font-size: 12px;
+  font-weight: 650;
+}
+
 @media (max-width: 640px) {
   .import-preview-meta {
     grid-template-columns: 1fr;
+  }
+
+  .asset-library-card .modal-head {
+    align-items: flex-start;
+  }
+
+  .asset-library-head-actions .secondary-button {
+    width: 38px;
+    padding: 0;
+    font-size: 0;
+  }
+
+  .asset-library-grid {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   }
 }
 
@@ -1725,7 +1925,8 @@ body[data-app-mode="article"] .profile-inline {
 .modal {
   position: fixed;
   inset: 0;
-  z-index: 20;
+  /* Keep modal backdrops above the sticky preview toolbar. */
+  z-index: 1000;
   display: grid;
   place-items: center;
   padding: 24px;

@@ -17,11 +17,13 @@ const PROJECT_BACKUP_VERSION = 1;
 const LOCAL_DATABASE_NAME = "writeThenPublishLocal.v1";
 const LOCAL_DATABASE_STORE = "snapshots";
 const LOCAL_DATABASE_PROJECTS_KEY = "projects";
+const LOCAL_ASSET_DIRECTORY_KEY = "assetLibraryDirectoryHandle";
 const LOCAL_STATE_SAVE_DELAY = 450;
 const LOCAL_STATE_SAVE_MAX_WAIT = 5000;
 const LOCAL_DATABASE_SAVE_DELAY = 1200;
 const SHARED_PROJECT_STORE_URL = "/api/project-store";
 const SHARED_PROJECT_TEXT_URL = "/api/project-store/current-text";
+const ASSET_LIBRARY_URL = "/api/assets";
 const MAX_DECODED_IMAGE_CACHE = 64;
 const MAX_PROJECTS = 24;
 const BUILT_IN_PROJECT_PREFIX = "guide_";
@@ -35,6 +37,10 @@ const PANEL_LIMITS = {
 let previewEditorPin = null;
 let lastEditorImageReferenceSignature = "";
 let sharedTextSaveTimer = 0;
+let assetLibraryMode = "unknown";
+let localAssetDirectoryHandle = null;
+let assetLibraryReturnFocus = null;
+let localAssetPreviewUrls = [];
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -60,6 +66,14 @@ const els = {
   importPreviewSource: $("#importPreviewSource"),
   importPreviewSummary: $("#importPreviewSummary"),
   importPreviewList: $("#importPreviewList"),
+  assetLibrary: $("#assetLibraryBtn"),
+  assetLibraryModal: $("#assetLibraryModal"),
+  assetLibraryDescription: $("#assetLibraryDescription"),
+  assetLibraryClose: $("#assetLibraryCloseBtn"),
+  assetLibraryFolder: $("#assetLibraryFolderBtn"),
+  assetLibraryRefresh: $("#assetLibraryRefreshBtn"),
+  assetLibraryStatus: $("#assetLibraryStatus"),
+  assetLibraryGrid: $("#assetLibraryGrid"),
   projectHistory: $("#projectHistory"),
   historyFilterButtons: document.querySelectorAll("[data-history-filter]"),
   panelResizers: document.querySelectorAll("[data-panel-resize]"),
@@ -959,6 +973,53 @@ function openLocalDatabase() {
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error || new Error("无法打开本地草稿数据库"));
+  });
+}
+
+async function saveLocalAssetDirectoryHandle(handle) {
+  const database = await openLocalDatabase();
+  if (!database) return false;
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(LOCAL_DATABASE_STORE, "readwrite");
+    try {
+      transaction.objectStore(LOCAL_DATABASE_STORE).put(handle, LOCAL_ASSET_DIRECTORY_KEY);
+    } catch (error) {
+      database.close();
+      reject(error);
+      return;
+    }
+    transaction.oncomplete = () => {
+      database.close();
+      resolve(true);
+    };
+    transaction.onerror = () => {
+      const error = transaction.error || new Error("本地资源文件夹授权保存失败");
+      database.close();
+      reject(error);
+    };
+  });
+}
+
+async function readLocalAssetDirectoryHandle() {
+  const database = await openLocalDatabase();
+  if (!database) return null;
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(LOCAL_DATABASE_STORE, "readonly");
+    const request = transaction.objectStore(LOCAL_DATABASE_STORE).get(LOCAL_ASSET_DIRECTORY_KEY);
+    let handle = null;
+    request.onsuccess = () => {
+      handle = request.result || null;
+    };
+    request.onerror = () => reject(request.error || new Error("本地资源文件夹授权读取失败"));
+    transaction.oncomplete = () => {
+      database.close();
+      resolve(handle);
+    };
+    transaction.onerror = () => {
+      const error = transaction.error || new Error("本地资源文件夹授权读取失败");
+      database.close();
+      reject(error);
+    };
   });
 }
 
@@ -1932,13 +1993,24 @@ async function addImageFiles(files, sourcePaths = null) {
   for (const [index, file] of imageFiles.entries()) {
     const src = await readFileAsDataURL(file);
     const id = createImportedImageId(index);
-    state.images[id] = {
+    const image = {
       src,
       name: file.name || "图片",
       sourcePath: sourcePaths?.get(file) || sourcePathForFile(file),
       crop: null,
       layout: defaultNewImageLayout(),
     };
+    const browserLocalMode = assetLibraryMode === "local"
+      || (assetLibraryMode === "unknown" && localAssetDirectoryHandle);
+    if (browserLocalMode && localAssetDirectoryHandle) {
+      try {
+        image.localAssetName = await writeDataUrlToLocalAssetDirectory(src, image.name);
+      } catch (error) {
+        console.warn("图片已保留在草稿，但未能写入本地资源文件夹", error);
+        els.status.textContent = "图片已保留在草稿，但本地资源文件夹写入失败";
+      }
+    }
+    state.images[id] = image;
     ids.push(id);
     tags.push(`[[image:${id}]]`);
   }
@@ -1958,6 +2030,636 @@ async function handleContentImage(event) {
   if (!result.tags.length) return;
   insertImageTagsAtCursor(result.tags);
   els.status.textContent = `已插入 ${result.tags.length} 张图片`;
+}
+
+function canUseLocalAssetDirectoryPicker() {
+  return Boolean(window.showDirectoryPicker && window.isSecureContext);
+}
+
+async function loadLocalAssetDirectoryConnection() {
+  if (!canUseLocalAssetDirectoryPicker()) return;
+  try {
+    const handle = await readLocalAssetDirectoryHandle();
+    if (handle?.kind === "directory") localAssetDirectoryHandle = handle;
+  } catch (error) {
+    console.info("没有可恢复的本地资源文件夹授权", error);
+  }
+}
+
+async function ensureLocalAssetDirectoryPermission({ request = false } = {}) {
+  const handle = localAssetDirectoryHandle;
+  if (!handle) return false;
+  const options = { mode: "readwrite" };
+  try {
+    if (await handle.queryPermission(options) === "granted") return true;
+    return request && await handle.requestPermission(options) === "granted";
+  } catch (error) {
+    console.warn("本地资源文件夹授权检查失败", error);
+    return false;
+  }
+}
+
+function cleanupLocalAssetPreviewUrls() {
+  for (const url of localAssetPreviewUrls) URL.revokeObjectURL(url);
+  localAssetPreviewUrls = [];
+}
+
+function localAssetOriginalName(filename) {
+  const marker = String(filename || "").indexOf("__");
+  return marker >= 0 ? filename.slice(marker + 2) : filename;
+}
+
+function isManagedLocalAssetFilename(filename) {
+  return /^[0-9a-f]{24}__.+\.(avif|bmp|gif|heic|jpe?g|png|svg|webp)$/i.test(String(filename || ""));
+}
+
+function sanitizeLocalAssetFilename(name, mimeType = "") {
+  const extensionByMime = {
+    "image/avif": ".avif",
+    "image/bmp": ".bmp",
+    "image/gif": ".gif",
+    "image/heic": ".heic",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/svg+xml": ".svg",
+    "image/webp": ".webp",
+  };
+  let filename = String(name || "图片")
+    .split(/[\\/]/)
+    .pop()
+    .replace(/[\u0000-\u001f<>:"|?*]/g, "-")
+    .replace(/^\.+/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!filename) filename = "图片";
+  if (!/\.(avif|bmp|gif|heic|jpe?g|png|svg|webp)$/i.test(filename)) {
+    filename += extensionByMime[mimeType] || ".png";
+  }
+  return filename.slice(-96);
+}
+
+async function sha256Hex(blob) {
+  if (!window.crypto?.subtle) throw new Error("当前浏览器不支持图片去重");
+  const bytes = await blob.arrayBuffer();
+  const digest = await window.crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+async function findLocalAssetByHashPrefix(directory, prefix) {
+  for await (const [name, entry] of directory.entries()) {
+    if (entry.kind === "file" && name.startsWith(prefix) && isImageFile({ name })) return name;
+  }
+  return "";
+}
+
+async function writeDataUrlToLocalAssetDirectory(dataUrl, originalName) {
+  if (!localAssetDirectoryHandle || !(await ensureLocalAssetDirectoryPermission())) {
+    throw new Error("本地资源文件夹尚未授权");
+  }
+  const response = await fetch(dataUrl);
+  const blob = await response.blob();
+  if (!blob.type.startsWith("image/")) throw new Error("资源不是受支持的图片");
+  const hash = await sha256Hex(blob);
+  const prefix = `${hash.slice(0, 24)}__`;
+  const existingName = await findLocalAssetByHashPrefix(localAssetDirectoryHandle, prefix);
+  if (existingName) return existingName;
+
+  const filename = `${prefix}${sanitizeLocalAssetFilename(originalName, blob.type)}`;
+  const fileHandle = await localAssetDirectoryHandle.getFileHandle(filename, { create: true });
+  const writable = await fileHandle.createWritable();
+  try {
+    await writable.write(blob);
+  } finally {
+    await writable.close();
+  }
+  return filename;
+}
+
+function localAssetReferenceCount(filename) {
+  const referencedProjects = new Set();
+  for (const project of state.projects) {
+    if (!project || isBuiltInProject(project)) continue;
+    const data = project.id === state.currentProjectId ? readForm() : project.data || {};
+    const images = data.images && typeof data.images === "object" ? data.images : {};
+    for (const imageId of String(data.content || "").matchAll(/\[\[image:([^\]]+)\]\]/g)) {
+      if (images[imageId[1]]?.localAssetName === filename) {
+        referencedProjects.add(project.id);
+        break;
+      }
+    }
+  }
+  return referencedProjects.size;
+}
+
+async function syncProjectImagesToLocalAssetDirectory() {
+  if (!(await ensureLocalAssetDirectoryPermission())) return { stored: 0, failed: 0 };
+  if (!isBuiltInProjectId(state.currentProjectId)) saveState();
+  let stored = 0;
+  let failed = 0;
+  for (const project of state.projects) {
+    const images = project?.data?.images;
+    if (!images || typeof images !== "object") continue;
+    for (const image of Object.values(images)) {
+      if (!image || typeof image.src !== "string" || !image.src.startsWith("data:image/")) continue;
+      if (image.localAssetDeletedAt) continue;
+      try {
+        image.localAssetName = await writeDataUrlToLocalAssetDirectory(image.src, image.name || image.sourcePath || "图片");
+        stored += 1;
+      } catch (error) {
+        failed += 1;
+        console.warn("本地资源图片写入失败", error);
+      }
+    }
+  }
+  saveProjectStore();
+  if (state.localDatabaseHydrated) await flushProjectStoreToIndexedDb();
+  return { stored, failed };
+}
+
+async function listLocalAssetDirectory() {
+  if (!localAssetDirectoryHandle || !(await ensureLocalAssetDirectoryPermission())) return [];
+  cleanupLocalAssetPreviewUrls();
+  const assets = [];
+  for await (const [name, entry] of localAssetDirectoryHandle.entries()) {
+    // Never expose or delete ordinary photos if a user selects a broad folder.
+    if (entry.kind !== "file" || !isManagedLocalAssetFilename(name)) continue;
+    try {
+      const file = await entry.getFile();
+      const previewUrl = URL.createObjectURL(file);
+      localAssetPreviewUrls.push(previewUrl);
+      assets.push({
+        assetId: `local:${name}`,
+        originalName: localAssetOriginalName(name),
+        byteSize: file.size,
+        createdAt: file.lastModified,
+        lastUsedAt: file.lastModified,
+        referenceCount: localAssetReferenceCount(name),
+        previewUrl,
+        localFileName: name,
+        storageMode: "local",
+      });
+    } catch (error) {
+      console.warn(`无法读取本地资源 ${name}`, error);
+    }
+  }
+  return assets.sort((left, right) => Number(right.lastUsedAt || 0) - Number(left.lastUsedAt || 0));
+}
+
+function formatAssetByteSize(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return "大小未知";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const units = ["KB", "MB", "GB"];
+  let size = bytes / 1024;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  return `${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function formatAssetDate(value) {
+  const date = new Date(value);
+  if (!value || Number.isNaN(date.getTime())) return "时间未知";
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function setAssetLibraryStatus(message, kind = "") {
+  if (!els.assetLibraryStatus) return;
+  els.assetLibraryStatus.textContent = message;
+  els.assetLibraryStatus.dataset.kind = kind;
+}
+
+async function readAssetApiPayload(response) {
+  try {
+    return await response.json();
+  } catch {
+    return {};
+  }
+}
+
+function assetApiError(payload, fallback) {
+  return String(payload?.error || payload?.message || fallback);
+}
+
+function setAssetLibraryStorageMode(mode, folderName = "") {
+  assetLibraryMode = mode;
+  const local = String(mode).startsWith("local");
+  if (els.assetLibraryFolder) {
+    els.assetLibraryFolder.hidden = !local;
+    els.assetLibraryFolder.innerHTML = localAssetDirectoryHandle || folderName
+      ? '<i data-lucide="folder-cog"></i> 更换本地文件夹'
+      : '<i data-lucide="folder-open"></i> 选择本地文件夹';
+  }
+  if (els.assetLibraryDescription) {
+    els.assetLibraryDescription.textContent = local
+      ? folderName
+        ? `TOS 不可用，图片保存在你授权的“${folderName}”文件夹。`
+        : "TOS 不可用，请选择一个只保存在本机的图片资源文件夹。"
+      : "拖入或粘贴的图片会保存到私有 TOS；只有在这里确认删除，才会从云端移除。";
+  }
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function renderLocalAssetDirectoryPrompt(reason = "") {
+  if (!els.assetLibraryGrid) return;
+  cleanupLocalAssetPreviewUrls();
+  setAssetLibraryStorageMode("local", localAssetDirectoryHandle?.name || "");
+  els.assetLibraryGrid.innerHTML = "";
+  const empty = document.createElement("div");
+  empty.className = "asset-library-empty";
+  if (canUseLocalAssetDirectoryPicker()) {
+    empty.innerHTML = '<i data-lucide="folder-open"></i><strong>选择本地资源文件夹</strong><span>文件夹路径和授权只保存在这个浏览器，不会上传到 GitHub 或服务器。</span>';
+    setAssetLibraryStatus("无法连接 TOS，已降级为本地存储 · 请选择资源文件夹", "warning");
+  } else {
+    empty.innerHTML = '<i data-lucide="monitor-up"></i><strong>当前浏览器不能选择可写文件夹</strong><span>请通过 npm start 打开 127.0.0.1，并使用最新版 Chrome 或 Edge。</span>';
+    setAssetLibraryStatus("无法连接 TOS，已降级为本地存储，但当前浏览器不支持文件夹授权", "error");
+  }
+  if (reason) empty.title = reason;
+  els.assetLibraryGrid.append(empty);
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function renderServerLocalDirectoryPrompt(reason = "") {
+  if (!els.assetLibraryGrid) return;
+  cleanupLocalAssetPreviewUrls();
+  setAssetLibraryStorageMode("local-server", "");
+  els.assetLibraryGrid.innerHTML = "";
+  const empty = document.createElement("div");
+  empty.className = "asset-library-empty";
+  empty.innerHTML = '<i data-lucide="folder-open"></i><strong>选择本地资源存储文件夹</strong><span>文件夹位置只会保存在这台电脑，不会上传到 GitHub、Supabase 或 TOS。</span>';
+  if (reason) empty.title = reason;
+  els.assetLibraryGrid.append(empty);
+  setAssetLibraryStatus("无法连接 TOS，已降级为本地存储 · 请选择资源存储文件夹", "warning");
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function renderAssetLibrary(payload) {
+  if (!els.assetLibraryGrid) return;
+  const assets = Array.isArray(payload?.assets) ? payload.assets : [];
+  const local = String(payload?.storageMode || "").startsWith("local");
+  els.assetLibraryGrid.innerHTML = "";
+
+  const connection = local
+    ? `无法连接 TOS，已降级为本地存储 · ${payload.folderName || "本地文件夹"}`
+    : "TOS 云端存储已连接";
+  setAssetLibraryStatus(`${connection} · 共 ${assets.length} 张图片`, local ? "warning" : "success");
+
+  if (!assets.length) {
+    const empty = document.createElement("div");
+    empty.className = "asset-library-empty";
+    empty.innerHTML = `<i data-lucide="image-off"></i><strong>资源库还是空的</strong><span>${local ? "拖入、粘贴或上传图片后，会自动写入这个文件夹。" : "拖入或粘贴图片后，它们会出现在这里。"}</span>`;
+    els.assetLibraryGrid.append(empty);
+    if (window.lucide) window.lucide.createIcons();
+    return;
+  }
+
+  for (const asset of assets) {
+    const assetId = String(asset?.assetId || "");
+    if (!assetId) continue;
+    const name = String(asset.originalName || "未命名图片");
+    const referenceCount = Math.max(0, Number(asset.referenceCount) || 0);
+    const item = document.createElement("article");
+    item.className = "asset-library-item";
+
+    const preview = document.createElement("div");
+    preview.className = "asset-library-preview";
+    const fallback = document.createElement("div");
+    fallback.className = "asset-library-preview-fallback";
+    fallback.innerHTML = '<i data-lucide="image"></i>';
+    preview.append(fallback);
+    if (asset.previewUrl) {
+      const image = document.createElement("img");
+      image.src = asset.previewUrl;
+      image.alt = name;
+      image.loading = "lazy";
+      image.addEventListener("load", () => fallback.classList.add("hidden"));
+      image.addEventListener("error", () => image.remove());
+      preview.append(image);
+    }
+
+    const meta = document.createElement("div");
+    meta.className = "asset-library-meta";
+    const title = document.createElement("strong");
+    title.textContent = name;
+    title.title = name;
+    const details = document.createElement("span");
+    details.textContent = `${formatAssetByteSize(asset.byteSize)} · ${referenceCount} 处引用`;
+    const time = document.createElement("span");
+    time.textContent = `最近使用 ${formatAssetDate(asset.lastUsedAt || asset.createdAt)}`;
+    meta.append(title, details, time);
+
+    const actions = document.createElement("div");
+    actions.className = "asset-library-actions";
+    const insertButton = document.createElement("button");
+    insertButton.type = "button";
+    insertButton.className = "secondary-button";
+    insertButton.disabled = isBuiltInProjectId(state.currentProjectId);
+    insertButton.title = insertButton.disabled ? "说明书不可编辑，请先新建图文" : `插入 ${name}`;
+    insertButton.innerHTML = '<i data-lucide="plus"></i>插入';
+    insertButton.addEventListener("click", () => insertAssetFromLibrary(asset, insertButton));
+
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "asset-delete-button";
+    const deleteLocation = String(asset.storageMode || "").startsWith("local") ? "本地资源文件夹" : "云端";
+    deleteButton.title = `从${deleteLocation}永久删除 ${name}`;
+    deleteButton.setAttribute("aria-label", `从${deleteLocation}永久删除 ${name}`);
+    deleteButton.innerHTML = '<i data-lucide="trash-2"></i>';
+    deleteButton.addEventListener("click", () => deleteAssetFromLibrary(asset, deleteButton));
+    actions.append(insertButton, deleteButton);
+
+    item.append(preview, meta, actions);
+    els.assetLibraryGrid.append(item);
+  }
+
+  if (window.lucide) window.lucide.createIcons();
+}
+
+async function loadLocalAssetLibrary(reason = "") {
+  setAssetLibraryStorageMode("local", localAssetDirectoryHandle?.name || "");
+  if (!localAssetDirectoryHandle) await loadLocalAssetDirectoryConnection();
+  if (!canUseLocalAssetDirectoryPicker() || !localAssetDirectoryHandle || !(await ensureLocalAssetDirectoryPermission())) {
+    renderLocalAssetDirectoryPrompt(reason);
+    return;
+  }
+  try {
+    setAssetLibraryStatus(`正在同步“${localAssetDirectoryHandle.name}”中的本地资源…`, "loading");
+    await syncProjectImagesToLocalAssetDirectory();
+    const assets = await listLocalAssetDirectory();
+    setAssetLibraryStorageMode("local", localAssetDirectoryHandle.name);
+    renderAssetLibrary({
+      assets,
+      cloudEnabled: false,
+      storageMode: "local",
+      folderName: localAssetDirectoryHandle.name,
+    });
+  } catch (error) {
+    console.error(error);
+    renderLocalAssetDirectoryPrompt(error.message || reason || "本地资源文件夹无法读取");
+    setAssetLibraryStatus("无法连接 TOS，本地资源文件夹也无法读取 · 请重新选择文件夹", "error");
+  }
+}
+
+async function selectLocalAssetDirectory() {
+  if (assetLibraryMode === "local-server") {
+    setAssetLibraryStatus("正在打开本机文件夹选择器…", "loading");
+    try {
+      const response = await fetch("/api/local-assets/select-directory", { method: "POST" });
+      const payload = await readAssetApiPayload(response);
+      if (response.status === 409 && payload?.cancelled) {
+        setAssetLibraryStatus("已取消选择，本地草稿仍安全保留。", "warning");
+        return;
+      }
+      if (!response.ok) throw new Error(assetApiError(payload, `文件夹选择失败（${response.status}）`));
+      await loadAssetLibrary();
+      setAssetLibraryStatus(`无法连接 TOS，已降级为本地存储 · 已切换到“${payload.folderName || "所选文件夹"}”`, "success");
+      return;
+    } catch (error) {
+      console.error(error);
+      setAssetLibraryStatus(error.message || "本地资源文件夹连接失败", "error");
+      return;
+    }
+  }
+  if (!canUseLocalAssetDirectoryPicker()) {
+    renderLocalAssetDirectoryPrompt("showDirectoryPicker unavailable");
+    return;
+  }
+  try {
+    const handle = await window.showDirectoryPicker({
+      id: "write-then-publish-assets",
+      mode: "readwrite",
+      startIn: "pictures",
+    });
+    localAssetDirectoryHandle = handle;
+    setAssetLibraryStorageMode("local", handle.name);
+    await saveLocalAssetDirectoryHandle(handle);
+    setAssetLibraryStatus(`正在把现有草稿图片写入“${handle.name}”…`, "loading");
+    const result = await syncProjectImagesToLocalAssetDirectory();
+    await loadLocalAssetLibrary();
+    const suffix = result.failed ? `，${result.failed} 张写入失败` : "";
+    setAssetLibraryStatus(`无法连接 TOS，已降级为本地存储 · 已保存 ${result.stored} 张草稿图片到“${handle.name}”${suffix}`, result.failed ? "warning" : "success");
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      setAssetLibraryStatus("已取消选择，本地草稿仍安全保留。", "warning");
+      return;
+    }
+    console.error(error);
+    setAssetLibraryStatus(error.message || "本地资源文件夹连接失败", "error");
+  }
+}
+
+async function loadAssetLibrary() {
+  if (!els.assetLibraryGrid) return;
+  setAssetLibraryStatus("正在读取资源库…", "loading");
+  els.assetLibraryGrid.setAttribute("aria-busy", "true");
+  if (els.assetLibraryRefresh) els.assetLibraryRefresh.disabled = true;
+  try {
+    const response = await fetch(ASSET_LIBRARY_URL, { cache: "no-store" });
+    const payload = await readAssetApiPayload(response);
+    if (!response.ok) {
+      await loadLocalAssetLibrary(assetApiError(payload, `资源库读取失败（${response.status}）`));
+      return;
+    }
+    if (payload?.storageMode === "local-server") {
+      cleanupLocalAssetPreviewUrls();
+      if (payload.directorySelectionRequired) {
+        renderServerLocalDirectoryPrompt(payload?.status?.lastError || "TOS 未配置");
+        return;
+      }
+      setAssetLibraryStorageMode("local-server", payload.folderName || "本地资源文件夹");
+      renderAssetLibrary(payload);
+      return;
+    }
+    if (!payload?.cloudEnabled) {
+      await loadLocalAssetLibrary(payload?.status?.lastError || "TOS 未配置");
+      return;
+    }
+    cleanupLocalAssetPreviewUrls();
+    setAssetLibraryStorageMode("cloud");
+    renderAssetLibrary(payload);
+  } catch (error) {
+    console.error(error);
+    await loadLocalAssetLibrary(error.message || "TOS 连接失败");
+  } finally {
+    els.assetLibraryGrid.removeAttribute("aria-busy");
+    if (els.assetLibraryRefresh) els.assetLibraryRefresh.disabled = false;
+  }
+}
+
+function openAssetLibrary() {
+  if (!els.assetLibraryModal) return;
+  assetLibraryReturnFocus = document.activeElement;
+  els.assetLibraryModal.classList.remove("hidden");
+  els.workspace?.setAttribute("inert", "");
+  window.requestAnimationFrame(() => {
+    if (!els.assetLibraryModal?.classList.contains("hidden")) els.assetLibraryClose?.focus();
+  });
+  void loadAssetLibrary();
+}
+
+function closeAssetLibrary() {
+  els.assetLibraryModal?.classList.add("hidden");
+  els.workspace?.removeAttribute("inert");
+  cleanupLocalAssetPreviewUrls();
+  if (assetLibraryReturnFocus instanceof HTMLElement) assetLibraryReturnFocus.focus();
+  assetLibraryReturnFocus = null;
+}
+
+async function insertAssetFromLibrary(asset, button) {
+  if (isBuiltInProjectId(state.currentProjectId)) {
+    setAssetLibraryStatus("说明书不可编辑，请先新建图文后再插入。", "warning");
+    return;
+  }
+  const assetId = String(asset?.assetId || "");
+  if (!assetId) return;
+  button.disabled = true;
+  setAssetLibraryStatus(`正在读取 ${asset.originalName || "图片"}…`, "loading");
+  try {
+    let dataUrl = "";
+    let detail = asset;
+    if (asset.storageMode === "local") {
+      if (!(await ensureLocalAssetDirectoryPermission({ request: true }))) {
+        throw new Error("需要重新授权本地资源文件夹");
+      }
+      const filename = String(asset.localFileName || assetId.replace(/^local:/, ""));
+      const fileHandle = await localAssetDirectoryHandle.getFileHandle(filename);
+      dataUrl = await readFileAsDataURL(await fileHandle.getFile());
+    } else {
+      const response = await fetch(`${ASSET_LIBRARY_URL}/${encodeURIComponent(assetId)}`, { cache: "no-store" });
+      const payload = await readAssetApiPayload(response);
+      if (!response.ok) throw new Error(assetApiError(payload, `图片读取失败（${response.status}）`));
+      dataUrl = payload.dataUrl;
+      detail = payload.asset && typeof payload.asset === "object" ? payload.asset : asset;
+    }
+    if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:image/")) throw new Error("资源库返回的图片数据无效");
+    const localStorageMode = String(asset.storageMode || detail.storageMode || "").startsWith("local");
+    const localAssetName = String(
+      asset.localFileName || detail.localFileName || detail.localAssetName || assetId.replace(/^local:/, ""),
+    );
+    const localId = createImportedImageId();
+    state.images[localId] = {
+      src: dataUrl,
+      name: String(detail.originalName || asset.originalName || "资源库图片"),
+      sourcePath: localStorageMode ? `local-folder://${localAssetName}` : `cloud://${assetId}`,
+      ...(localStorageMode
+        ? { localAssetId: assetId, localAssetName }
+        : { cloudAssetId: assetId, ...(detail.cloudObjectKey ? { cloudObjectKey: detail.cloudObjectKey } : {}) }),
+      crop: null,
+      layout: defaultNewImageLayout(),
+    };
+    insertImageTagsAtCursor([`[[image:${localId}]]`]);
+    closeAssetLibrary();
+    const saved = await persistCurrentDraftImmediately();
+    els.status.textContent = saved ? "已从资源库插入图片并保存" : "已从资源库插入图片，正在自动保存";
+  } catch (error) {
+    console.error(error);
+    setAssetLibraryStatus(error.message || "图片插入失败", "error");
+    button.disabled = false;
+  }
+}
+
+async function requestAssetDeletion(assetId, force) {
+  const response = await fetch(`${ASSET_LIBRARY_URL}/${encodeURIComponent(assetId)}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: true, force }),
+  });
+  return { response, payload: await readAssetApiPayload(response) };
+}
+
+async function markLocalAssetDeleted(filename) {
+  if (!isBuiltInProjectId(state.currentProjectId)) saveState();
+  const deletedAt = new Date().toISOString();
+  for (const project of state.projects) {
+    const images = project?.data?.images;
+    if (!images || typeof images !== "object") continue;
+    for (const image of Object.values(images)) {
+      if (image?.localAssetName === filename) image.localAssetDeletedAt = deletedAt;
+    }
+  }
+  for (const image of Object.values(state.images || {})) {
+    if (image?.localAssetName === filename) image.localAssetDeletedAt = deletedAt;
+  }
+  saveProjectStore();
+  if (state.localDatabaseHydrated) await flushProjectStoreToIndexedDb();
+}
+
+async function deleteLocalAssetFromLibrary(asset, button) {
+  const filename = String(asset.localFileName || asset.assetId?.replace(/^local:/, ""));
+  if (!isManagedLocalAssetFilename(filename)) {
+    setAssetLibraryStatus("该文件不是写了就发管理的资源，已拒绝删除。", "error");
+    return;
+  }
+  const name = String(asset.originalName || filename);
+  const confirmed = window.confirm(`确认从本地资源文件夹永久删除“${name}”？\n\n正文引用和草稿内嵌副本不会被删除。`);
+  if (!confirmed) return;
+  const referenceCount = Math.max(0, Number(asset.referenceCount) || 0);
+  if (referenceCount) {
+    const forceConfirmed = window.confirm(`这张图片仍被 ${referenceCount} 篇草稿引用。\n\n仍要从本地资源文件夹永久删除吗？草稿中的内嵌图片仍会保留。`);
+    if (!forceConfirmed) {
+      setAssetLibraryStatus("已取消删除，图片仍保留在本地资源文件夹。", "warning");
+      return;
+    }
+  }
+  button.disabled = true;
+  setAssetLibraryStatus(`正在从本地文件夹删除 ${name}…`, "loading");
+  try {
+    if (!(await ensureLocalAssetDirectoryPermission({ request: true }))) throw new Error("需要重新授权本地资源文件夹");
+    await localAssetDirectoryHandle.removeEntry(filename);
+    await markLocalAssetDeleted(filename);
+    await loadLocalAssetLibrary();
+    setAssetLibraryStatus(`已从本地资源文件夹永久删除“${name}”；正文和草稿内嵌副本未改动。`, "success");
+  } catch (error) {
+    console.error(error);
+    setAssetLibraryStatus(error.message || "本地图片删除失败", "error");
+    button.disabled = false;
+  }
+}
+
+async function deleteAssetFromLibrary(asset, button) {
+  if (asset.storageMode === "local") {
+    await deleteLocalAssetFromLibrary(asset, button);
+    return;
+  }
+  const assetId = String(asset?.assetId || "");
+  if (!assetId) return;
+  const name = String(asset.originalName || "未命名图片");
+  const localServer = String(asset.storageMode || "").startsWith("local");
+  const storageLabel = localServer ? "本地资源文件夹" : "云端资源库";
+  const confirmed = window.confirm(`确认从${storageLabel}永久删除“${name}”？\n\n当前文字框里的图片引用和本地草稿不会被改动。`);
+  if (!confirmed) return;
+
+  button.disabled = true;
+  setAssetLibraryStatus(`正在删除 ${name}…`, "loading");
+  try {
+    let result = await requestAssetDeletion(assetId, false);
+    if (result.response.status === 409) {
+      const referenceCount = Math.max(0, Number(result.payload.referenceCount ?? asset.referenceCount) || 0);
+      const forceConfirmed = window.confirm(`这张图片仍有 ${referenceCount} 处引用。\n\n仍要从${localServer ? "本地资源文件夹" : " TOS"}永久删除吗？引用文字不会被自动删除。`);
+      if (!forceConfirmed) {
+        setAssetLibraryStatus(`已取消删除，图片仍保留在${storageLabel}。`, "warning");
+        button.disabled = false;
+        return;
+      }
+      result = await requestAssetDeletion(assetId, true);
+    }
+    if (!result.response.ok) {
+      throw new Error(assetApiError(result.payload, `图片删除失败（${result.response.status}）`));
+    }
+    await loadAssetLibrary();
+    setAssetLibraryStatus(`已从${storageLabel}永久删除“${name}”；文字框和本地草稿未改动。`, "success");
+  } catch (error) {
+    console.error(error);
+    setAssetLibraryStatus(error.message || "图片删除失败", "error");
+    button.disabled = false;
+  }
 }
 
 function normalizeObsidianImagePath(value) {
@@ -4794,6 +5496,7 @@ function bindEvents() {
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !els.cropModal.classList.contains("hidden")) closeCropper();
     if (event.key === "Escape" && !els.importPreviewModal?.classList.contains("hidden")) closeProjectImportPreview();
+    if (event.key === "Escape" && !els.assetLibraryModal?.classList.contains("hidden")) closeAssetLibrary();
     if (event.key === "Escape") clearPreviewEditorPin();
   });
   els.findNext.addEventListener("click", findNext);
@@ -4813,6 +5516,13 @@ function bindEvents() {
   els.importPreviewConfirm?.addEventListener("click", confirmProjectBackupImport);
   els.importPreviewModal?.addEventListener("click", (event) => {
     if (event.target === els.importPreviewModal) closeProjectImportPreview();
+  });
+  els.assetLibrary?.addEventListener("click", openAssetLibrary);
+  els.assetLibraryClose?.addEventListener("click", closeAssetLibrary);
+  els.assetLibraryFolder?.addEventListener("click", selectLocalAssetDirectory);
+  els.assetLibraryRefresh?.addEventListener("click", loadAssetLibrary);
+  els.assetLibraryModal?.addEventListener("click", (event) => {
+    if (event.target === els.assetLibraryModal) closeAssetLibrary();
   });
   els.convertMode.addEventListener("click", convertCurrentMode);
   els.headerModeToggle.addEventListener("click", toggleHeaderMode);
@@ -4847,6 +5557,7 @@ render({ persist: false })
   .then(hydrateProjectStoreFromIndexedDb)
   .then(restoreProjectBackupFromUrl);
 void loadObsidianVaultConnection();
+void loadLocalAssetDirectoryConnection();
 if (window.lucide) {
   window.lucide.createIcons();
 }

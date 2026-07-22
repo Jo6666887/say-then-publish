@@ -1,4 +1,7 @@
 node_modules
+.venv/
+.env*
+!.env.example
 outputs
 .DS_Store
 .vercel

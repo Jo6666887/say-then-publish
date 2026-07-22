@@ -1,0 +1,719 @@
+"""Supabase metadata + private Volcengine TOS asset storage.
+
+Local browser/disk copies remain the primary offline cache. This module adds a
+cloud replica without ever placing Supabase/TOS secrets in browser JavaScript.
+"""
+
+from __future__ import annotations
+
+import base64
+import copy
+import hashlib
+import json
+import mimetypes
+import os
+import re
+import threading
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from urllib.parse import quote, unquote_to_bytes
+
+
+DATA_URI_RE = re.compile(r"^data:([^,]*?),(.*)$", re.DOTALL)
+IMAGE_TOKEN_RE = re.compile(r"\[\[image:([^\]]+)\]\]")
+TOS_ASSET_PREFIX = "tos://"
+TOS_DELETED_PREFIX = "tos-deleted://"
+
+
+class CloudStoreError(RuntimeError):
+    pass
+
+
+class AssetInUseError(CloudStoreError):
+    def __init__(self, reference_count: int):
+        super().__init__(f"该资源仍被 {reference_count} 篇草稿引用")
+        self.reference_count = reference_count
+
+
+def load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        if key:
+            os.environ.setdefault(key, value)
+
+
+@dataclass(frozen=True)
+class CloudConfig:
+    enabled: bool
+    supabase_url: str
+    supabase_secret_key: str
+    workspace_id: str
+    tos_access_key: str
+    tos_secret_key: str
+    tos_endpoint: str
+    tos_region: str
+    tos_bucket: str
+    tos_key_prefix: str
+
+    @classmethod
+    def from_env(cls, root: Path) -> "CloudConfig":
+        load_env_file(root / ".env")
+        enabled = os.getenv("WRITE_THEN_PUBLISH_CLOUD_SYNC", "0").strip().lower() in {"1", "true", "yes", "on"}
+        return cls(
+            enabled=enabled,
+            supabase_url=os.getenv("SUPABASE_URL", "").strip().rstrip("/"),
+            supabase_secret_key=(os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip(),
+            workspace_id=os.getenv("WRITE_THEN_PUBLISH_WORKSPACE_ID", "default-workspace").strip() or "default-workspace",
+            tos_access_key=os.getenv("TOS_ACCESS_KEY", "").strip(),
+            tos_secret_key=os.getenv("TOS_SECRET_KEY", "").strip(),
+            tos_endpoint=os.getenv("TOS_ENDPOINT", "tos-cn-beijing.volces.com").strip(),
+            tos_region=os.getenv("TOS_REGION", "cn-beijing").strip(),
+            tos_bucket=os.getenv("TOS_BUCKET", "").strip(),
+            tos_key_prefix=os.getenv("TOS_KEY_PREFIX", "write-then-publish/assets/").strip().strip("/") + "/",
+        )
+
+    @property
+    def missing(self) -> list[str]:
+        values = {
+            "SUPABASE_URL": self.supabase_url,
+            "SUPABASE_SECRET_KEY": self.supabase_secret_key,
+            "TOS_ACCESS_KEY": self.tos_access_key,
+            "TOS_SECRET_KEY": self.tos_secret_key,
+            "TOS_BUCKET": self.tos_bucket,
+        }
+        return [key for key, value in values.items() if not value]
+
+    @property
+    def ready(self) -> bool:
+        return self.enabled and not self.missing
+
+
+class SupabaseRest:
+    def __init__(self, config: CloudConfig):
+        self.base_url = config.supabase_url
+        self.secret_key = config.supabase_secret_key
+        self.session = requests.Session()
+        retries = Retry(
+            total=4,
+            connect=4,
+            read=4,
+            status=4,
+            backoff_factor=0.5,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset({"GET", "POST", "PATCH", "DELETE"}),
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retries)
+        self.session.mount("https://", adapter)
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        query: dict[str, str] | None = None,
+        payload: Any = None,
+        prefer: str | None = None,
+    ) -> Any:
+        url = f"{self.base_url}{path}"
+        headers = {
+            "apikey": self.secret_key,
+            "Authorization": f"Bearer {self.secret_key}",
+            "Accept": "application/json",
+        }
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+        if prefer:
+            headers["Prefer"] = prefer
+        try:
+            response = self.session.request(
+                method,
+                url,
+                params=query,
+                headers=headers,
+                json=payload if payload is not None else None,
+                timeout=(10, 60),
+            )
+        except requests.RequestException as error:
+            raise CloudStoreError(f"Supabase 连接失败：{error}") from error
+        if response.status_code >= 400:
+            detail = response.text[:800]
+            raise CloudStoreError(f"Supabase {method} {path} 失败（{response.status_code}）：{detail}")
+        if not response.content:
+            return None
+        try:
+            return response.json()
+        except requests.JSONDecodeError as error:
+            raise CloudStoreError("Supabase 返回了无法解析的数据") from error
+
+
+class CloudStore:
+    def __init__(self, config: CloudConfig):
+        self.config = config
+        self.rest = SupabaseRest(config) if config.ready else None
+        self._tos_client = None
+        self._lock = threading.RLock()
+        self._asset_bytes: dict[str, bytes] = {}
+
+    @classmethod
+    def from_root(cls, root: Path) -> "CloudStore":
+        return cls(CloudConfig.from_env(root))
+
+    @property
+    def enabled(self) -> bool:
+        return self.config.ready
+
+    @property
+    def disabled_reason(self) -> str:
+        if not self.config.enabled:
+            return "WRITE_THEN_PUBLISH_CLOUD_SYNC 未开启"
+        if self.config.missing:
+            return "缺少环境变量：" + ", ".join(self.config.missing)
+        return ""
+
+    def _require_enabled(self) -> None:
+        if not self.enabled or not self.rest:
+            raise CloudStoreError(self.disabled_reason or "云同步未配置")
+
+    def _get_tos_client(self):
+        if self._tos_client is not None:
+            return self._tos_client
+        try:
+            import tos
+        except ImportError as error:
+            raise CloudStoreError("缺少 TOS SDK，请安装 requirements.txt") from error
+        self._tos_client = tos.TosClientV2(
+            ak=self.config.tos_access_key,
+            sk=self.config.tos_secret_key,
+            endpoint=self.config.tos_endpoint,
+            region=self.config.tos_region,
+            enable_crc=True,
+        )
+        return self._tos_client
+
+    def _select_projects(self) -> list[dict]:
+        self._require_enabled()
+        rows = self.rest.request(
+            "GET",
+            "/rest/v1/write_then_publish_projects",
+            query={
+                "workspace_id": f"eq.{self.config.workspace_id}",
+                "select": "workspace_id,project_id,title,project_data,updated_at_ms,is_active",
+                "order": "updated_at_ms.desc",
+            },
+        )
+        return rows if isinstance(rows, list) else []
+
+    def _select_assets(self, *, include_deleted: bool = False) -> list[dict]:
+        self._require_enabled()
+        query = {
+            "workspace_id": f"eq.{self.config.workspace_id}",
+            "select": "asset_id,workspace_id,sha256,object_key,original_name,mime_type,byte_size,created_at,last_used_at,delete_pending_at,delete_error,deleted_at,metadata",
+            "order": "created_at.desc",
+        }
+        if not include_deleted:
+            query["deleted_at"] = "is.null"
+            query["delete_pending_at"] = "is.null"
+        rows = self.rest.request("GET", "/rest/v1/write_then_publish_assets", query=query)
+        return rows if isinstance(rows, list) else []
+
+    def _select_asset(self, asset_id: str, *, include_deleted: bool = False) -> dict | None:
+        query = {
+            "workspace_id": f"eq.{self.config.workspace_id}",
+            "asset_id": f"eq.{asset_id}",
+            "select": "asset_id,workspace_id,sha256,object_key,original_name,mime_type,byte_size,created_at,last_used_at,delete_pending_at,delete_error,deleted_at,metadata",
+            "limit": "1",
+        }
+        if not include_deleted:
+            query["deleted_at"] = "is.null"
+            query["delete_pending_at"] = "is.null"
+        rows = self.rest.request("GET", "/rest/v1/write_then_publish_assets", query=query)
+        return rows[0] if isinstance(rows, list) and rows else None
+
+    def _select_pending_assets(self) -> list[dict]:
+        self._require_enabled()
+        rows = self.rest.request(
+            "GET",
+            "/rest/v1/write_then_publish_assets",
+            query={
+                "workspace_id": f"eq.{self.config.workspace_id}",
+                "delete_pending_at": "not.is.null",
+                "deleted_at": "is.null",
+                "select": "asset_id,workspace_id,sha256,object_key,original_name,mime_type,byte_size,created_at,last_used_at,delete_pending_at,delete_error,deleted_at,metadata",
+                "order": "delete_pending_at.asc",
+            },
+        )
+        return rows if isinstance(rows, list) else []
+
+    @staticmethod
+    def _parse_data_uri(src: str) -> tuple[str, bytes] | None:
+        match = DATA_URI_RE.match(src)
+        if not match:
+            return None
+        header, encoded = match.groups()
+        parts = header.split(";") if header else []
+        mime_type = (parts[0] if parts and "/" in parts[0] else "application/octet-stream").lower()
+        try:
+            if any(part.lower() == "base64" for part in parts[1:]):
+                raw = base64.b64decode(encoded, validate=False)
+            else:
+                raw = unquote_to_bytes(encoded)
+        except (ValueError, TypeError) as error:
+            raise CloudStoreError("图片 Data URL 无法解析") from error
+        if not raw:
+            return None
+        return mime_type, raw
+
+    @staticmethod
+    def _data_uri(mime_type: str, raw: bytes) -> str:
+        return f"data:{mime_type};base64,{base64.b64encode(raw).decode('ascii')}"
+
+    @staticmethod
+    def _extension(mime_type: str, original_name: str) -> str:
+        known = {
+            "image/jpeg": ".jpg",
+            "image/png": ".png",
+            "image/webp": ".webp",
+            "image/gif": ".gif",
+            "image/svg+xml": ".svg",
+            "image/avif": ".avif",
+            "image/bmp": ".bmp",
+        }
+        extension = known.get(mime_type) or mimetypes.guess_extension(mime_type) or Path(original_name).suffix.lower() or ".bin"
+        return extension if re.fullmatch(r"\.[a-z0-9]{1,8}", extension) else ".bin"
+
+    def _upload_private_object(self, key: str, raw: bytes, mime_type: str) -> None:
+        import tos
+
+        client = self._get_tos_client()
+        try:
+            client.head_object(bucket=self.config.tos_bucket, key=key)
+            return
+        except tos.exceptions.TosServerError as error:
+            if getattr(error, "status_code", None) != 404:
+                raise CloudStoreError(f"TOS 检查对象失败：{getattr(error, 'code', '')}") from error
+        try:
+            client.put_object(
+                bucket=self.config.tos_bucket,
+                key=key,
+                content=raw,
+                content_length=len(raw),
+                content_type=mime_type,
+                acl=tos.ACLType.ACL_Private,
+                forbid_overwrite=True,
+            )
+        except tos.exceptions.TosServerError as error:
+            if getattr(error, "status_code", None) not in {409, 412}:
+                raise CloudStoreError(f"TOS 上传失败：{getattr(error, 'code', '')}") from error
+        except tos.exceptions.TosClientError as error:
+            raise CloudStoreError(f"TOS 上传失败：{error}") from error
+
+    def _download_object(self, asset: dict) -> bytes:
+        asset_id = str(asset["asset_id"])
+        cached = self._asset_bytes.get(asset_id)
+        if cached is not None:
+            return cached
+        try:
+            output = self._get_tos_client().get_object(bucket=self.config.tos_bucket, key=asset["object_key"])
+            raw = output.read()
+        except Exception as error:
+            raise CloudStoreError(f"TOS 读取资源失败：{asset_id}") from error
+        self._asset_bytes[asset_id] = raw
+        return raw
+
+    def _insert_asset(self, row: dict) -> dict:
+        try:
+            rows = self.rest.request(
+                "POST",
+                "/rest/v1/write_then_publish_assets",
+                payload=row,
+                prefer="return=representation",
+            )
+        except CloudStoreError:
+            matches = [asset for asset in self._select_assets() if asset.get("sha256") == row["sha256"]]
+            if matches:
+                return matches[0]
+            raise
+        if not isinstance(rows, list) or not rows:
+            raise CloudStoreError("Supabase 未返回新资源记录")
+        return rows[0]
+
+    def _ensure_asset(
+        self,
+        image: dict,
+        *,
+        original_name: str,
+        known_by_sha: dict[str, dict],
+        known_by_id: dict[str, dict],
+        all_by_id: dict[str, dict],
+        metadata: dict,
+    ) -> dict | None:
+        existing_id = image.get("cloudAssetId")
+        if isinstance(existing_id, str):
+            existing = all_by_id.get(existing_id)
+            if existing and (existing.get("deleted_at") or existing.get("delete_pending_at")):
+                return None
+            if existing:
+                return existing
+
+        src = image.get("src")
+        if not isinstance(src, str):
+            return None
+        if src.startswith(TOS_ASSET_PREFIX):
+            return known_by_id.get(src[len(TOS_ASSET_PREFIX) :])
+        parsed = self._parse_data_uri(src)
+        if not parsed:
+            return None
+        mime_type, raw = parsed
+        if not mime_type.startswith("image/"):
+            return None
+        sha256 = hashlib.sha256(raw).hexdigest()
+        existing = known_by_sha.get(sha256)
+        if existing:
+            return existing
+
+        extension = self._extension(mime_type, original_name)
+        object_key = f"{self.config.tos_key_prefix}{sha256[:2]}/{sha256}{extension}"
+        self._upload_private_object(object_key, raw, mime_type)
+        asset_id = str(uuid.uuid4())
+        asset = self._insert_asset(
+            {
+                "asset_id": asset_id,
+                "workspace_id": self.config.workspace_id,
+                "sha256": sha256,
+                "object_key": object_key,
+                "original_name": (original_name or "image")[:255],
+                "mime_type": mime_type,
+                "byte_size": len(raw),
+                "metadata": metadata,
+            }
+        )
+        self._asset_bytes[str(asset["asset_id"])] = raw
+        known_by_sha[sha256] = asset
+        known_by_id[str(asset["asset_id"])] = asset
+        all_by_id[str(asset["asset_id"])] = asset
+        return asset
+
+    def _encode_project(
+        self,
+        project: dict,
+        *,
+        known_by_sha: dict[str, dict],
+        known_by_id: dict[str, dict],
+        all_by_id: dict[str, dict],
+    ) -> tuple[dict, dict]:
+        local_project = copy.deepcopy(project)
+        cloud_project = copy.deepcopy(project)
+        local_data = local_project.get("data") if isinstance(local_project.get("data"), dict) else {}
+        cloud_data = cloud_project.get("data") if isinstance(cloud_project.get("data"), dict) else {}
+        local_project["data"] = local_data
+        cloud_project["data"] = cloud_data
+
+        avatar = local_data.get("avatar")
+        if isinstance(avatar, str):
+            avatar_asset = self._ensure_asset(
+                {"src": avatar},
+                original_name="avatar",
+                known_by_sha=known_by_sha,
+                known_by_id=known_by_id,
+                all_by_id=all_by_id,
+                metadata={"kind": "avatar", "firstProjectId": project.get("id")},
+            )
+            if avatar_asset:
+                cloud_data["avatar"] = TOS_ASSET_PREFIX + str(avatar_asset["asset_id"])
+
+        local_images = local_data.get("images") if isinstance(local_data.get("images"), dict) else {}
+        cloud_images = cloud_data.get("images") if isinstance(cloud_data.get("images"), dict) else {}
+        local_data["images"] = local_images
+        cloud_data["images"] = cloud_images
+        for image_id, local_image in local_images.items():
+            if not isinstance(local_image, dict):
+                continue
+            cloud_image = cloud_images.get(image_id)
+            if not isinstance(cloud_image, dict):
+                cloud_image = copy.deepcopy(local_image)
+                cloud_images[image_id] = cloud_image
+            asset = self._ensure_asset(
+                local_image,
+                original_name=str(local_image.get("name") or local_image.get("sourcePath") or image_id),
+                known_by_sha=known_by_sha,
+                known_by_id=known_by_id,
+                all_by_id=all_by_id,
+                metadata={"kind": "content", "firstProjectId": project.get("id"), "firstImageId": image_id},
+            )
+            if asset:
+                asset_id = str(asset["asset_id"])
+                for target in (local_image, cloud_image):
+                    target["cloudAssetId"] = asset_id
+                    target["cloudObjectKey"] = asset["object_key"]
+                cloud_image["src"] = TOS_ASSET_PREFIX + asset_id
+            elif isinstance(local_image.get("cloudAssetId"), str):
+                cloud_image["src"] = TOS_DELETED_PREFIX + local_image["cloudAssetId"]
+        return local_project, cloud_project
+
+    def _decode_project(self, row: dict, assets_by_id: dict[str, dict]) -> dict:
+        data = copy.deepcopy(row.get("project_data") if isinstance(row.get("project_data"), dict) else {})
+        avatar = data.get("avatar")
+        if isinstance(avatar, str) and avatar.startswith(TOS_ASSET_PREFIX):
+            asset = assets_by_id.get(avatar[len(TOS_ASSET_PREFIX) :])
+            if asset:
+                data["avatar"] = self._data_uri(asset["mime_type"], self._download_object(asset))
+        images = data.get("images") if isinstance(data.get("images"), dict) else {}
+        data["images"] = images
+        for image in images.values():
+            if not isinstance(image, dict):
+                continue
+            src = image.get("src")
+            if not isinstance(src, str) or not src.startswith(TOS_ASSET_PREFIX):
+                continue
+            asset_id = src[len(TOS_ASSET_PREFIX) :]
+            asset = assets_by_id.get(asset_id)
+            if not asset:
+                continue
+            image["src"] = self._data_uri(asset["mime_type"], self._download_object(asset))
+            image["cloudAssetId"] = asset_id
+            image["cloudObjectKey"] = asset["object_key"]
+        return {
+            "id": row["project_id"],
+            "title": row.get("title") or "未命名项目",
+            "updatedAt": int(row.get("updated_at_ms") or 0),
+            "data": data,
+        }
+
+    @staticmethod
+    def _merge_stores(local: dict, remote: dict) -> dict:
+        merged: dict[str, dict] = {}
+        for project in [*(remote.get("projects") or []), *(local.get("projects") or [])]:
+            if not isinstance(project, dict) or not isinstance(project.get("id"), str):
+                continue
+            previous = merged.get(project["id"])
+            timestamp = int(float(project.get("updatedAt") or 0))
+            previous_timestamp = int(float(previous.get("updatedAt") or 0)) if previous else -1
+            if previous is None or timestamp >= previous_timestamp:
+                merged[project["id"]] = project
+        projects = sorted(merged.values(), key=lambda project: int(float(project.get("updatedAt") or 0)), reverse=True)[:24]
+        project_ids = {project["id"] for project in projects}
+        active_id = local.get("activeId") if local.get("activeId") in project_ids else remote.get("activeId")
+        if active_id not in project_ids:
+            active_id = projects[0]["id"] if projects else None
+        return {"activeId": active_id, "projects": projects}
+
+    def fetch_store(self) -> dict:
+        with self._lock:
+            assets = self._select_assets()
+            assets_by_id = {str(asset["asset_id"]): asset for asset in assets}
+            rows = self._select_projects()
+            projects = [self._decode_project(row, assets_by_id) for row in rows]
+            active_id = next((row["project_id"] for row in rows if row.get("is_active")), None)
+            return {"activeId": active_id, "projects": projects}
+
+    def sync_store(self, local_store: dict) -> dict:
+        with self._lock:
+            self._require_enabled()
+            self.cleanup_pending_deletions()
+            active_assets = self._select_assets()
+            all_assets = self._select_assets(include_deleted=True)
+            known_by_sha = {asset["sha256"]: asset for asset in active_assets}
+            known_by_id = {str(asset["asset_id"]): asset for asset in active_assets}
+            all_by_id = {str(asset["asset_id"]): asset for asset in all_assets}
+            rows = self._select_projects()
+            remote_store = {
+                "activeId": next((row["project_id"] for row in rows if row.get("is_active")), None),
+                "projects": [self._decode_project(row, known_by_id) for row in rows],
+            }
+            merged = self._merge_stores(local_store, remote_store)
+            cloud_rows = []
+            enriched_projects = []
+            for project in merged["projects"]:
+                local_project, cloud_project = self._encode_project(
+                    project,
+                    known_by_sha=known_by_sha,
+                    known_by_id=known_by_id,
+                    all_by_id=all_by_id,
+                )
+                enriched_projects.append(local_project)
+                cloud_rows.append(
+                    {
+                        "workspace_id": self.config.workspace_id,
+                        "project_id": cloud_project["id"],
+                        "title": str(cloud_project.get("title") or "未命名项目")[:255],
+                        "project_data": cloud_project.get("data") or {},
+                        "updated_at_ms": int(float(cloud_project.get("updatedAt") or 0)),
+                        "is_active": cloud_project["id"] == merged.get("activeId"),
+                        "synced_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            if cloud_rows:
+                self.rest.request(
+                    "POST",
+                    "/rest/v1/rpc/sync_write_then_publish_projects",
+                    payload={
+                        "p_workspace_id": self.config.workspace_id,
+                        "p_active_id": merged.get("activeId"),
+                        "p_projects": cloud_rows,
+                    },
+                )
+            return {"activeId": merged.get("activeId"), "projects": enriched_projects}
+
+    @staticmethod
+    def _src_sha256(src: Any) -> str | None:
+        if not isinstance(src, str):
+            return None
+        parsed = CloudStore._parse_data_uri(src)
+        return hashlib.sha256(parsed[1]).hexdigest() if parsed else None
+
+    def _reference_counts(self, store: dict, assets: list[dict]) -> dict[str, int]:
+        by_sha = {asset["sha256"]: str(asset["asset_id"]) for asset in assets}
+        projects_by_asset: dict[str, set[str]] = {str(asset["asset_id"]): set() for asset in assets}
+        for project in store.get("projects") or []:
+            if not isinstance(project, dict):
+                continue
+            project_id = str(project.get("id") or "")
+            data = project.get("data") if isinstance(project.get("data"), dict) else {}
+            avatar_id = by_sha.get(self._src_sha256(data.get("avatar")) or "")
+            if avatar_id:
+                projects_by_asset.setdefault(avatar_id, set()).add(project_id)
+            content = str(data.get("content") or "")
+            images = data.get("images") if isinstance(data.get("images"), dict) else {}
+            for image_id in IMAGE_TOKEN_RE.findall(content):
+                image = images.get(image_id)
+                if not isinstance(image, dict):
+                    continue
+                asset_id = image.get("cloudAssetId")
+                if not isinstance(asset_id, str):
+                    asset_id = by_sha.get(self._src_sha256(image.get("src")) or "")
+                if asset_id:
+                    projects_by_asset.setdefault(asset_id, set()).add(project_id)
+        return {asset_id: len(project_ids) for asset_id, project_ids in projects_by_asset.items()}
+
+    @staticmethod
+    def _public_asset(asset: dict, reference_count: int) -> dict:
+        asset_id = str(asset["asset_id"])
+        return {
+            "assetId": asset_id,
+            "originalName": asset.get("original_name") or "image",
+            "mimeType": asset.get("mime_type") or "application/octet-stream",
+            "byteSize": int(asset.get("byte_size") or 0),
+            "createdAt": asset.get("created_at"),
+            "lastUsedAt": asset.get("last_used_at"),
+            "referenceCount": reference_count,
+            "previewUrl": f"/api/assets/{quote(asset_id)}/content",
+            "cloudObjectKey": asset.get("object_key"),
+        }
+
+    def list_assets(self, local_store: dict) -> list[dict]:
+        with self._lock:
+            self.cleanup_pending_deletions()
+            assets = self._select_assets()
+            counts = self._reference_counts(local_store, assets)
+            return [self._public_asset(asset, counts.get(str(asset["asset_id"]), 0)) for asset in assets]
+
+    def get_asset(self, asset_id: str) -> tuple[dict, bytes]:
+        with self._lock:
+            self._require_enabled()
+            asset = self._select_asset(asset_id)
+            if not asset:
+                raise CloudStoreError("找不到该资源")
+            return asset, self._download_object(asset)
+
+    def get_asset_payload(self, asset_id: str, local_store: dict) -> dict:
+        asset, raw = self.get_asset(asset_id)
+        counts = self._reference_counts(local_store, [asset])
+        public = self._public_asset(asset, counts.get(asset_id, 0))
+        return {"asset": public, "dataUrl": self._data_uri(asset["mime_type"], raw)}
+
+    def _finish_pending_deletion(self, asset: dict) -> None:
+        asset_id = str(asset["asset_id"])
+        try:
+            self._get_tos_client().delete_object(bucket=self.config.tos_bucket, key=asset["object_key"])
+        except Exception as error:
+            try:
+                self.rest.request(
+                    "PATCH",
+                    "/rest/v1/write_then_publish_assets",
+                    query={
+                        "workspace_id": f"eq.{self.config.workspace_id}",
+                        "asset_id": f"eq.{asset_id}",
+                        "delete_pending_at": "not.is.null",
+                        "deleted_at": "is.null",
+                    },
+                    payload={"delete_error": str(error)[:500]},
+                    prefer="return=minimal",
+                )
+            except CloudStoreError:
+                pass
+            raise CloudStoreError("TOS 资源清理失败，已保留待重试状态") from error
+
+        self._asset_bytes.pop(asset_id, None)
+        self.rest.request(
+            "PATCH",
+            "/rest/v1/write_then_publish_assets",
+            query={
+                "workspace_id": f"eq.{self.config.workspace_id}",
+                "asset_id": f"eq.{asset_id}",
+                "delete_pending_at": "not.is.null",
+                "deleted_at": "is.null",
+            },
+            payload={
+                "deleted_at": datetime.now(timezone.utc).isoformat(),
+                "delete_pending_at": None,
+                "delete_error": None,
+            },
+            prefer="return=minimal",
+        )
+
+    def cleanup_pending_deletions(self) -> int:
+        with self._lock:
+            completed = 0
+            for asset in self._select_pending_assets():
+                try:
+                    self._finish_pending_deletion(asset)
+                except CloudStoreError:
+                    continue
+                completed += 1
+            return completed
+
+    def delete_asset(self, asset_id: str, local_store: dict, *, force: bool = False) -> None:
+        with self._lock:
+            self._require_enabled()
+            asset = self._select_asset(asset_id)
+            if not asset:
+                raise CloudStoreError("找不到该资源")
+            reference_count = self._reference_counts(local_store, [asset]).get(asset_id, 0)
+            if reference_count and not force:
+                raise AssetInUseError(reference_count)
+
+            rows = self.rest.request(
+                "PATCH",
+                "/rest/v1/write_then_publish_assets",
+                query={
+                    "workspace_id": f"eq.{self.config.workspace_id}",
+                    "asset_id": f"eq.{asset_id}",
+                    "delete_pending_at": "is.null",
+                    "deleted_at": "is.null",
+                },
+                payload={
+                    "delete_pending_at": datetime.now(timezone.utc).isoformat(),
+                    "delete_error": None,
+                },
+                prefer="return=representation",
+            )
+            if not isinstance(rows, list) or not rows:
+                raise CloudStoreError("资源删除状态未能保存")
+            self._finish_pending_deletion({**asset, **rows[0]})

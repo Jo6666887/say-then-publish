@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>写了就发 | Write Then Publish</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2317202f'/%3E%3Cpath d='M18 17h28v7H18zm0 13h20v6H18zm0 12h28v6H18z' fill='%23fff'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="src/styles.css?v=20260721-startup-fix" />
+    <link rel="stylesheet" href="src/styles.css?v=20260722-local-asset-fallback" />
   </head>
   <body>
     <main class="workspace">
@@ -57,6 +57,10 @@
             <button class="secondary-button" id="importProjectsBtn" type="button" title="从本地 JSON 合并导入草稿、图片和排版设置">
               <i data-lucide="folder-up"></i>
               导入 JSON
+            </button>
+            <button class="secondary-button" id="assetLibraryBtn" type="button" title="查看和管理图片资源">
+              <i data-lucide="images"></i>
+              资源库
             </button>
             <input id="projectBackupInput" class="backup-file-input" type="file" accept=".json,application/json" />
             <button class="secondary-button convert-mode-button" id="convertModeBtn" type="button">
@@ -431,9 +435,37 @@
       </div>
     </div>
 
+    <div id="assetLibraryModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="assetLibraryTitle">
+      <div class="modal-card asset-library-card">
+        <div class="modal-head">
+          <div>
+            <h3 id="assetLibraryTitle">图片资源库</h3>
+            <p id="assetLibraryDescription">优先连接私有 TOS；不可用时会降级到你授权的本地资源文件夹。</p>
+          </div>
+          <div class="asset-library-head-actions">
+            <button id="assetLibraryFolderBtn" class="secondary-button" type="button" hidden>
+              <i data-lucide="folder-open"></i>
+              选择本地文件夹
+            </button>
+            <button id="assetLibraryRefreshBtn" class="secondary-button" type="button">
+              <i data-lucide="refresh-cw"></i>
+              刷新
+            </button>
+            <button id="assetLibraryCloseBtn" class="icon-button ghost" type="button" title="关闭资源库" aria-label="关闭资源库">
+              <i data-lucide="x"></i>
+            </button>
+          </div>
+        </div>
+        <div class="asset-library-body">
+          <div id="assetLibraryStatus" class="asset-library-status" role="status">正在读取资源库…</div>
+          <div id="assetLibraryGrid" class="asset-library-grid" aria-live="polite"></div>
+        </div>
+      </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/lucide@1.8.0/dist/umd/lucide.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
-    <script src="src/app.js?v=20260721-startup-fix"></script>
+    <script src="src/app.js?v=20260722-local-asset-fallback"></script>
   </body>
 </html>
