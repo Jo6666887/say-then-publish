@@ -23,6 +23,8 @@ const LOCAL_STATE_SAVE_MAX_WAIT = 5000;
 const LOCAL_DATABASE_SAVE_DELAY = 1200;
 const SHARED_PROJECT_STORE_URL = "/api/project-store";
 const SHARED_PROJECT_TEXT_URL = "/api/project-store/current-text";
+const CLOUD_STATUS_URL = "/api/cloud-status";
+const CLOUD_SYNC_URL = "/api/cloud-sync";
 const ASSET_LIBRARY_URL = "/api/assets";
 const MAX_DECODED_IMAGE_CACHE = 64;
 const MAX_PROJECTS = 24;
@@ -37,6 +39,7 @@ const PANEL_LIMITS = {
 let previewEditorPin = null;
 let lastEditorImageReferenceSignature = "";
 let sharedTextSaveTimer = 0;
+let persistenceMode = "detecting";
 let assetLibraryMode = "unknown";
 let localAssetDirectoryHandle = null;
 let assetLibraryReturnFocus = null;
@@ -52,10 +55,12 @@ const els = {
   projectTitle: $("#projectTitleInput"),
   status: $("#statusText"),
   historySidebar: $("#historySidebar"),
+  historyNote: $("#historyNote"),
   historyToggle: $("#historyToggleBtn"),
   historyClose: $("#historyCloseBtn"),
   newProject: $("#newProjectBtn"),
   exportProjects: $("#exportProjectsBtn"),
+  exportProjectsLabel: $("#exportProjectsLabel"),
   importProjects: $("#importProjectsBtn"),
   projectBackupInput: $("#projectBackupInput"),
   importPreviewModal: $("#importPreviewModal"),
@@ -1319,6 +1324,92 @@ async function exportProjectBackup() {
   const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
   await saveBlob(blob, filename);
   els.status.textContent = `已备份 ${payload.projects.length} 篇草稿（含图片和排版设置）`;
+}
+
+function updatePersistenceControls(status = {}) {
+  const cloudConnected = status.enabled === true && status.fallbackToLocal !== true;
+  persistenceMode = cloudConnected ? "cloud" : "local";
+
+  if (els.exportProjectsLabel) {
+    els.exportProjectsLabel.textContent = cloudConnected ? "保存" : "导出 JSON";
+  }
+  if (els.exportProjects) {
+    els.exportProjects.title = cloudConnected
+      ? "当前内容会自动保存；点击可立即保存并同步到 Supabase 与私有 TOS"
+      : "导出全部草稿、图片和排版设置，供本地恢复或迁移";
+    els.exportProjects.setAttribute("aria-label", cloudConnected ? "立即保存到云端" : "导出 JSON 备份");
+    const icon = els.exportProjects.querySelector("[data-lucide]");
+    if (icon) icon.setAttribute("data-lucide", cloudConnected ? "save" : "file-down");
+  }
+  if (els.historyNote) {
+    els.historyNote.textContent = cloudConnected
+      ? "自动保存到云端，点击恢复"
+      : "自动保存到本机，点击恢复";
+  }
+  if (window.lucide) window.lucide.createIcons();
+  return persistenceMode;
+}
+
+async function refreshPersistenceMode({ quiet = true } = {}) {
+  try {
+    const response = await fetch(CLOUD_STATUS_URL, { cache: "no-store" });
+    if (!response.ok) throw new Error(`保存状态读取失败（${response.status}）`);
+    const status = await response.json();
+    updatePersistenceControls(status);
+    return status;
+  } catch (error) {
+    updatePersistenceControls({ enabled: false, fallbackToLocal: true });
+    if (!quiet) els.status.textContent = "无法连接云端，当前按本地模式保存";
+    return { enabled: false, fallbackToLocal: true, lastError: error?.message || String(error) };
+  }
+}
+
+function formatSavedTime(value) {
+  const date = value ? new Date(value) : new Date();
+  if (Number.isNaN(date.getTime())) return "刚刚";
+  return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+async function saveProjectNow() {
+  if (!els.exportProjects) return;
+  els.exportProjects.disabled = true;
+  try {
+    saveState();
+    if (sharedTextSaveTimer) await saveCurrentProjectTextToSharedServer();
+    const persisted = state.localDatabaseHydrated
+      ? await flushProjectStoreToIndexedDb()
+      : saveProjectStore();
+    if (!persisted) throw new Error("本地数据库与共享草稿库均未确认保存");
+
+    els.status.textContent = "已保存本机副本，正在同步云端…";
+    const response = await fetch(CLOUD_SYNC_URL, { method: "POST" });
+    const payload = await response.json().catch(() => ({}));
+    const status = payload.status || await refreshPersistenceMode();
+    updatePersistenceControls(status);
+    if (!response.ok || payload.ok !== true || status.fallbackToLocal) {
+      throw new Error(status.lastError || payload.error || `云同步失败（${response.status}）`);
+    }
+    els.status.textContent = `已保存到云端 · ${formatSavedTime(status.lastSuccessAt)}`;
+  } catch (error) {
+    console.warn("手动保存到云端失败", error);
+    const status = await refreshPersistenceMode();
+    if (status.fallbackToLocal || status.enabled !== true) {
+      els.status.textContent = `已自动保存到本机；云端不可用，可点击“导出 JSON”备份${status.lastError ? `（${status.lastError}）` : ""}`;
+    } else {
+      els.status.textContent = `本机副本已保留，云端保存未确认：${error?.message || "请稍后重试"}`;
+    }
+  } finally {
+    els.exportProjects.disabled = false;
+  }
+}
+
+async function handlePrimaryPersistenceAction() {
+  if (persistenceMode === "detecting") await refreshPersistenceMode({ quiet: false });
+  if (persistenceMode === "cloud") {
+    await saveProjectNow();
+    return;
+  }
+  await exportProjectBackup();
 }
 
 async function importProjectBackupPayload(payload) {
@@ -5508,7 +5599,7 @@ function bindEvents() {
     button.addEventListener("click", () => setHistoryFilter(button.dataset.historyFilter));
   });
   els.newProject.addEventListener("click", createNewProject);
-  els.exportProjects?.addEventListener("click", exportProjectBackup);
+  els.exportProjects?.addEventListener("click", handlePrimaryPersistenceAction);
   els.importProjects?.addEventListener("click", () => els.projectBackupInput?.click());
   els.projectBackupInput?.addEventListener("change", handleProjectBackupImport);
   els.importPreviewClose?.addEventListener("click", closeProjectImportPreview);
@@ -5556,6 +5647,7 @@ bindEvents();
 render({ persist: false })
   .then(hydrateProjectStoreFromIndexedDb)
   .then(restoreProjectBackupFromUrl);
+void refreshPersistenceMode();
 void loadObsidianVaultConnection();
 void loadLocalAssetDirectoryConnection();
 if (window.lucide) {
