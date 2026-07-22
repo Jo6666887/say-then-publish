@@ -935,6 +935,16 @@ body[data-guide-readonly="true"] .editor-textarea:focus {
   height: 18px;
 }
 
+#exportProjectsBtn.is-saving svg {
+  animation: save-button-spin 0.9s linear infinite;
+}
+
+@keyframes save-button-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .file-tool input,
 .avatar-picker input {
   position: absolute;

@@ -1370,9 +1370,21 @@ function formatSavedTime(value) {
   return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
+function setPrimarySaveButtonFeedback(label, iconName, { busy = false } = {}) {
+  if (els.exportProjectsLabel) els.exportProjectsLabel.textContent = label;
+  if (!els.exportProjects) return;
+  els.exportProjects.classList.toggle("is-saving", busy);
+  els.exportProjects.setAttribute("aria-busy", String(busy));
+  const icon = els.exportProjects.querySelector("[data-lucide]");
+  if (icon) icon.setAttribute("data-lucide", iconName);
+  if (window.lucide) window.lucide.createIcons();
+}
+
 async function saveProjectNow() {
   if (!els.exportProjects) return;
   els.exportProjects.disabled = true;
+  setPrimarySaveButtonFeedback("保存中…", "loader-circle", { busy: true });
+  let savedToCloud = false;
   try {
     saveState();
     if (sharedTextSaveTimer) await saveCurrentProjectTextToSharedServer();
@@ -1390,6 +1402,8 @@ async function saveProjectNow() {
       throw new Error(status.lastError || payload.error || `云同步失败（${response.status}）`);
     }
     els.status.textContent = `已保存到云端 · ${formatSavedTime(status.lastSuccessAt)}`;
+    savedToCloud = true;
+    setPrimarySaveButtonFeedback("已保存", "check");
   } catch (error) {
     console.warn("手动保存到云端失败", error);
     const status = await refreshPersistenceMode();
@@ -1400,6 +1414,11 @@ async function saveProjectNow() {
     }
   } finally {
     els.exportProjects.disabled = false;
+    if (savedToCloud) {
+      window.setTimeout(() => updatePersistenceControls({ enabled: true, fallbackToLocal: false }), 1800);
+    } else if (persistenceMode === "cloud") {
+      updatePersistenceControls({ enabled: true, fallbackToLocal: false });
+    }
   }
 }
 
