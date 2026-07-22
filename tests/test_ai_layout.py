@@ -10,7 +10,9 @@ from ai_layout import (
     AILayoutResponseError,
     AILayoutService,
     AILayoutValidationError,
+    apply_ai_layout_highlights,
     parse_ai_layout_response,
+    parse_ai_layout_selection_response,
     validate_optimized_content,
 )
 
@@ -124,6 +126,26 @@ class AILayoutParsingTests(unittest.TestCase):
         with self.assertRaises(AILayoutResponseError):
             parse_ai_layout_response('{"optimized_content": 123, "changes": []}')
 
+    def test_layout_selection_keeps_only_supported_items(self):
+        parsed = parse_ai_layout_selection_response(
+            json.dumps(
+                {
+                    "highlights": [
+                        {"text": "逐字存在的重点", "style": "color"},
+                        {"text": "另一个重点", "style": "rainbow"},
+                        "invalid",
+                    ],
+                    "changes": ["选择重点"],
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(
+            parsed["highlights"],
+            [{"text": "逐字存在的重点", "style": "color"}],
+        )
+
 
 class AILayoutGuardrailTests(unittest.TestCase):
     def test_layout_accepts_supported_formatting_without_copy_change(self):
@@ -140,6 +162,69 @@ class AILayoutGuardrailTests(unittest.TestCase):
             validate_optimized_content("原文", "**改过的原文**", mode="layout")
 
         self.assertEqual(caught.exception.code, "VISIBLE_COPY_CHANGED")
+
+    def test_layout_applies_only_unique_exact_unformatted_targets(self):
+        original = (
+            "标题\n唯一重点值得强调。\n重复短语，重复短语。\n"
+            "{{color:#5B5FEF|已经高亮}}\n[[image:img_1]]"
+        )
+        optimized, changes = apply_ai_layout_highlights(
+            original,
+            [
+                {"text": "唯一重点", "style": "color"},
+                {"text": "重复短语", "style": "bold"},
+                {"text": "已经高亮", "style": "bg"},
+                {"text": "img_1", "style": "bold"},
+                {"text": "# 标题", "style": "color"},
+            ],
+            accent_color="#5B5FEF",
+        )
+
+        self.assertIn("{{color:#5B5FEF|唯一重点}}", optimized)
+        self.assertEqual(optimized.count("重复短语"), 2)
+        self.assertEqual(optimized.count("{{color:#5B5FEF|已经高亮}}"), 1)
+        self.assertIn("[[image:img_1]]", optimized)
+        self.assertEqual(changes, ("从原文中安全标出 1 处重点",))
+        validate_optimized_content(original, optimized, mode="layout")
+
+    def test_layout_protects_links_images_code_and_table_structure(self):
+        original = (
+            "安全重点值得强调。\n"
+            "链接 https://example.com/plan\n"
+            "![[终稿素材.png]]\n"
+            "![终稿](assets/final.png)\n"
+            "[文档](docs/guide.md)\n"
+            "[guide]: docs/guide-final.md \"文档标题\"\n"
+            "```python\ndanger_call()\n```\n"
+            "| 项目 | 说明 |\n| --- | --- |\n| A | 表格重点 |"
+        )
+        optimized, changes = apply_ai_layout_highlights(
+            original,
+            [
+                {"text": "安全重点", "style": "color"},
+                {"text": "example.com", "style": "color"},
+                {"text": "终稿素材.png", "style": "bg"},
+                {"text": "assets/final.png", "style": "color"},
+                {"text": "docs/guide.md", "style": "bold"},
+                {"text": "docs/guide-final.md", "style": "bold"},
+                {"text": "文档标题", "style": "color"},
+                {"text": "danger_call()", "style": "bold"},
+                {"text": "表格重点", "style": "bg"},
+                {"text": "A | 表格重点", "style": "bold"},
+            ],
+            accent_color="#5B5FEF",
+        )
+
+        self.assertIn("{{color:#5B5FEF|安全重点}}", optimized)
+        self.assertIn("https://example.com/plan", optimized)
+        self.assertIn("![[终稿素材.png]]", optimized)
+        self.assertIn("![终稿](assets/final.png)", optimized)
+        self.assertIn("[文档](docs/guide.md)", optimized)
+        self.assertIn('[guide]: docs/guide-final.md "文档标题"', optimized)
+        self.assertIn("```python\ndanger_call()\n```", optimized)
+        self.assertIn("| A | 表格重点 |", optimized)
+        self.assertEqual(changes, ("从原文中安全标出 1 处重点",))
+        validate_optimized_content(original, optimized, mode="layout")
 
     def test_rejects_missing_reordered_or_duplicated_image_markers(self):
         original = "A\n[[image:img_1]]\nB\n[[image:img_2]]"
@@ -206,18 +291,22 @@ class AILayoutClientTests(unittest.TestCase):
     def test_non_stream_request_uses_server_headers_and_returns_validated_result(self):
         model_json = json.dumps(
             {
-                "optimized_content": "# 标题\n正文\n[[image:img_1]]",
-                "changes": ["增加标题层级"],
+                "highlights": [{"text": "正文重点", "style": "color"}],
+                "changes": ["选择正文重点"],
             },
             ensure_ascii=False,
         )
         session = RecordingSession(completion(model_json))
         service = AILayoutService(enabled_config(), session=session)
 
-        result = service.optimize("标题\n正文\n[[image:img_1]]", mode="layout")
+        result = service.optimize("标题\n正文重点\n[[image:img_1]]", mode="layout")
 
         self.assertEqual(result.model, "test-model")
-        self.assertEqual(result.changes, ("增加标题层级",))
+        self.assertEqual(result.changes, ("从原文中安全标出 1 处重点",))
+        self.assertEqual(
+            result.optimized_content,
+            "标题\n{{color:#5B5FEF|正文重点}}\n[[image:img_1]]",
+        )
         self.assertEqual(len(session.calls), 1)
         url, kwargs = session.calls[0]
         self.assertEqual(url, "https://provider.example/v2/chat/completions")
@@ -226,6 +315,8 @@ class AILayoutClientTests(unittest.TestCase):
         self.assertEqual(kwargs["headers"]["lora_id"], "0")
         self.assertFalse(kwargs["json"]["stream"])
         self.assertTrue(kwargs["json"]["search_disable"])
+        self.assertEqual(kwargs["json"]["temperature"], 0)
+        self.assertEqual(kwargs["json"]["max_tokens"], 2048)
         self.assertEqual(kwargs["timeout"], 12)
 
     def test_network_error_does_not_expose_provider_or_secret_details(self):

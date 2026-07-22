@@ -21,6 +21,7 @@ DEFAULT_MODEL_ID = "xopkimik25"
 DEFAULT_TIMEOUT_SECONDS = 90.0
 DEFAULT_MAX_TOKENS = 8192
 VALID_MODES = {"layout", "polish"}
+VALID_LAYOUT_STYLES = {"color", "bg", "bold"}
 
 _IMAGE_MARKER_RE = re.compile(r"\[\[image:([\w-]+)\]\]")
 _THINK_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
@@ -31,6 +32,19 @@ _STYLE_MACRO_RE = re.compile(
 _URL_RE = re.compile(r"https?://[^\s<>\"'\[\]{}（）。，、；：！？]+", re.IGNORECASE)
 _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*(?:%|[A-Za-z]+)?")
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{3,8}$")
+_BOLD_RE = re.compile(r"\*\*[^*\n]+?\*\*")
+_ITALIC_RE = re.compile(r"(?<!\*)\*[^*\n]+?\*(?!\*)")
+_INLINE_CODE_RE = re.compile(r"`[^`\n]+?`")
+_FENCED_CODE_RE = re.compile(
+    r"(?:^|\n)(?:```|~~~)[^\n]*\n[\s\S]*?\n(?:```|~~~)(?=\n|$)"
+)
+_OBSIDIAN_LINK_RE = re.compile(r"!?\[\[[^\]\n]+\]\]")
+_MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]\n]*\]\([^\)\n]+\)")
+_MARKDOWN_REFERENCE_RE = re.compile(r"!?\[[^\]\n]+\]\[[^\]\n]+\]")
+_MARKDOWN_REFERENCE_DEFINITION_RE = re.compile(
+    r"^[ \t]{0,3}\[[^\]\n]+\]:[^\n]+$", re.MULTILINE
+)
+_HTML_TAG_RE = re.compile(r"<[^>\n]+>")
 
 
 class AILayoutError(RuntimeError):
@@ -161,11 +175,20 @@ class AILayoutService:
         if not isinstance(accent_color, str) or not _HEX_COLOR_RE.fullmatch(accent_color):
             raise AILayoutValidationError("主题色格式无效", code="INVALID_ACCENT_COLOR")
 
+        messages = (
+            _build_layout_selection_messages(content)
+            if mode == "layout"
+            else _build_messages(content, mode=mode, accent_color=accent_color)
+        )
         payload = {
             "model": self.config.model_id,
-            "messages": _build_messages(content, mode=mode, accent_color=accent_color),
-            "temperature": 0.15 if mode == "layout" else 0.25,
-            "max_tokens": self.config.max_tokens,
+            "messages": messages,
+            "temperature": 0 if mode == "layout" else 0.25,
+            "max_tokens": (
+                min(self.config.max_tokens, 2048)
+                if mode == "layout"
+                else self.config.max_tokens
+            ),
             "stream": False,
             "search_disable": True,
         }
@@ -214,12 +237,21 @@ class AILayoutService:
                 code="AI_EMPTY_RESPONSE",
             )
 
-        parsed = parse_ai_layout_response(raw_content)
-        optimized_content = parsed["optimized_content"]
+        if mode == "layout":
+            selection = parse_ai_layout_selection_response(raw_content)
+            optimized_content, changes = apply_ai_layout_highlights(
+                content,
+                selection["highlights"],
+                accent_color=accent_color,
+            )
+        else:
+            parsed = parse_ai_layout_response(raw_content)
+            optimized_content = parsed["optimized_content"]
+            changes = tuple(parsed["changes"])
         validate_optimized_content(content, optimized_content, mode=mode)
         return AILayoutResult(
             optimized_content=optimized_content,
-            changes=tuple(parsed["changes"]),
+            changes=changes,
             model=self.config.model_id,
         )
 
@@ -227,29 +259,7 @@ class AILayoutService:
 def parse_ai_layout_response(raw_content: str) -> dict[str, Any]:
     """Parse the model's strict JSON envelope after allowed wrapper cleanup."""
 
-    cleaned = _THINK_RE.sub("", raw_content or "").strip().lstrip("\ufeff")
-    fence = _FENCE_RE.fullmatch(cleaned)
-    if fence:
-        cleaned = fence.group(1).strip()
-
-    if not cleaned.startswith("{") or not cleaned.endswith("}"):
-        raise AILayoutResponseError(
-            "AI 返回格式不符合要求，本次未修改内容",
-            code="AI_INVALID_JSON",
-        )
-    try:
-        payload = json.loads(cleaned)
-    except (TypeError, json.JSONDecodeError):
-        raise AILayoutResponseError(
-            "AI 返回格式不符合要求，本次未修改内容",
-            code="AI_INVALID_JSON",
-        ) from None
-
-    if not isinstance(payload, dict):
-        raise AILayoutResponseError(
-            "AI 返回格式不符合要求，本次未修改内容",
-            code="AI_INVALID_SCHEMA",
-        )
+    payload = _parse_ai_json_object(raw_content)
     optimized_content = payload.get("optimized_content")
     changes = payload.get("changes", [])
     if not isinstance(optimized_content, str) or not optimized_content.strip():
@@ -266,6 +276,162 @@ def parse_ai_layout_response(raw_content: str) -> dict[str, Any]:
         "optimized_content": optimized_content.strip(),
         "changes": [item.strip() for item in changes if item.strip()][:8],
     }
+
+
+def parse_ai_layout_selection_response(raw_content: str) -> dict[str, Any]:
+    """Parse exact-source highlight choices used by safe layout mode."""
+
+    payload = _parse_ai_json_object(raw_content)
+
+    highlights = payload.get("highlights")
+    changes = payload.get("changes", [])
+    if not isinstance(highlights, list) or not isinstance(changes, list):
+        raise AILayoutResponseError(
+            "AI 返回格式不符合要求，本次未修改内容",
+            code="AI_INVALID_SCHEMA",
+        )
+    if not all(isinstance(item, str) for item in changes):
+        raise AILayoutResponseError(
+            "AI 返回格式不符合要求，本次未修改内容",
+            code="AI_INVALID_SCHEMA",
+        )
+
+    normalized = []
+    for item in highlights[:8]:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        style = item.get("style")
+        if (
+            isinstance(text, str)
+            and 4 <= len(text) <= 64
+            and isinstance(style, str)
+            and style in VALID_LAYOUT_STYLES
+        ):
+            normalized.append({"text": text, "style": style})
+    return {
+        "highlights": normalized,
+        "changes": [item.strip() for item in changes if item.strip()][:8],
+    }
+
+
+def _parse_ai_json_object(raw_content: str) -> dict[str, Any]:
+    cleaned = _THINK_RE.sub("", raw_content or "").strip().lstrip("\ufeff")
+    fence = _FENCE_RE.fullmatch(cleaned)
+    if fence:
+        cleaned = fence.group(1).strip()
+    if not cleaned.startswith("{") or not cleaned.endswith("}"):
+        raise AILayoutResponseError(
+            "AI 返回格式不符合要求，本次未修改内容",
+            code="AI_INVALID_JSON",
+        )
+    try:
+        payload = json.loads(cleaned)
+    except (TypeError, json.JSONDecodeError):
+        raise AILayoutResponseError(
+            "AI 返回格式不符合要求，本次未修改内容",
+            code="AI_INVALID_JSON",
+        ) from None
+    if not isinstance(payload, dict):
+        raise AILayoutResponseError(
+            "AI 返回格式不符合要求，本次未修改内容",
+            code="AI_INVALID_SCHEMA",
+        )
+    return payload
+
+
+def apply_ai_layout_highlights(
+    content: str,
+    highlights: Sequence[Mapping[str, str]],
+    *,
+    accent_color: str,
+) -> tuple[str, tuple[str, ...]]:
+    """Apply only exact, unique, unformatted source spans selected by the AI."""
+
+    protected_spans = _protected_layout_spans(content)
+    selected_spans: list[tuple[int, int, str]] = []
+    for item in highlights:
+        target = item.get("text", "")
+        style = item.get("style", "")
+        if (
+            not target
+            or style not in VALID_LAYOUT_STYLES
+            or any(
+                token in target
+                for token in (
+                    "\n",
+                    "\r",
+                    "[[",
+                    "]]",
+                    "{{",
+                    "}}",
+                    "*",
+                    "`",
+                    "|",
+                )
+            )
+            or re.match(r"^\s*(?:#{1,6}|>|[-+]|\d+[.)])\s", target)
+        ):
+            continue
+        start = content.find(target)
+        if start < 0 or content.find(target, start + 1) >= 0:
+            continue
+        end = start + len(target)
+        if any(_spans_overlap(start, end, left, right) for left, right in protected_spans):
+            continue
+        if style in {"color", "bg"} and _line_contains_pipe(content, start, end):
+            continue
+        if any(_spans_overlap(start, end, left, right) for left, right, _ in selected_spans):
+            continue
+        selected_spans.append((start, end, style))
+
+    optimized = content
+    for start, end, style in sorted(selected_spans, reverse=True):
+        target = content[start:end]
+        if style == "color":
+            replacement = f"{{{{color:{accent_color}|{target}}}}}"
+        elif style == "bg":
+            replacement = f"{{{{bg:#E8E9FF|{target}}}}}"
+        else:
+            replacement = f"**{target}**"
+        optimized = optimized[:start] + replacement + optimized[end:]
+
+    count = len(selected_spans)
+    if count:
+        return optimized, (f"从原文中安全标出 {count} 处重点",)
+    return content, ("没有找到可安全应用的新增重点，已完整保留原文",)
+
+
+def _protected_layout_spans(content: str) -> tuple[tuple[int, int], ...]:
+    spans = []
+    for pattern in (
+        _IMAGE_MARKER_RE,
+        _STYLE_MACRO_RE,
+        _BOLD_RE,
+        _ITALIC_RE,
+        _INLINE_CODE_RE,
+        _FENCED_CODE_RE,
+        _OBSIDIAN_LINK_RE,
+        _MARKDOWN_LINK_RE,
+        _MARKDOWN_REFERENCE_RE,
+        _MARKDOWN_REFERENCE_DEFINITION_RE,
+        _URL_RE,
+        _HTML_TAG_RE,
+    ):
+        spans.extend((match.start(), match.end()) for match in pattern.finditer(content))
+    return tuple(spans)
+
+
+def _spans_overlap(start: int, end: int, other_start: int, other_end: int) -> bool:
+    return start < other_end and end > other_start
+
+
+def _line_contains_pipe(content: str, start: int, end: int) -> bool:
+    line_start = content.rfind("\n", 0, start) + 1
+    line_end = content.find("\n", end)
+    if line_end < 0:
+        line_end = len(content)
+    return "|" in content[line_start:line_end]
 
 
 def validate_optimized_content(original: str, optimized: str, *, mode: str) -> None:
@@ -306,6 +472,23 @@ def validate_optimized_content(original: str, optimized: str, *, mode: str) -> N
             "AI 润色结果改变了数字，本次未修改内容",
             code="NUMBERS_CHANGED",
         )
+
+
+def _build_layout_selection_messages(content: str) -> list[dict[str, str]]:
+    rules = """
+你是中文社交图文排版助手。只输出一个合法 JSON 对象，不要代码块、解释或 <think>。
+JSON schema：
+{"highlights":[{"text":"原文中逐字存在的连续短语","style":"color|bg|bold"}],"changes":["简短说明"]}
+
+从原文选择 3-8 个最值得强调的短语，每个 4-64 个字符。text 必须从输入正文逐字复制且只出现一次，
+不得改字、标点、大小写或空格，不得包含换行、[[image:...]]、{{...}}、Markdown 标记，
+也不要选择已经位于 color/bg/加粗/斜体标记内的文字。style 只能是 color、bg、bold。
+重点要克制，优先结论、行动建议与关键限制；无法确认逐字一致的内容不要选择。
+""".strip()
+    return [
+        {"role": "system", "content": rules},
+        {"role": "user", "content": f"请从下面正文中选择排版重点：\n\n{content}"},
+    ]
 
 
 def _build_messages(content: str, *, mode: str, accent_color: str) -> list[dict[str, str]]:
