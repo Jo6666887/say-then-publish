@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>写了就发 | Write Then Publish</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2317202f'/%3E%3Cpath d='M18 17h28v7H18zm0 13h20v6H18zm0 12h28v6H18z' fill='%23fff'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="src/styles.css?v=20260723-page-themes" />
+    <link rel="stylesheet" href="src/styles.css?v=20260723-card-templates-v2" />
   </head>
   <body>
     <main class="workspace">
@@ -246,6 +246,34 @@
               </summary>
               <div class="tool-popover settings-popover">
                 <div class="settings-grid">
+                  <section class="card-template-settings wide" aria-labelledby="cardTemplateTitle">
+                    <div class="settings-section-heading">
+                      <strong id="cardTemplateTitle">卡片模板</strong>
+                      <span>模板会应用版式、字体与推荐配色；不会改正文和图片顺序，下方仍可继续微调。</span>
+                    </div>
+                    <div class="card-template-grid" role="group" aria-label="卡片模板">
+                      <button type="button" class="card-template-button active" data-card-theme="social-clean" aria-pressed="true">
+                        <span class="card-template-preview template-social-clean" aria-hidden="true"><i></i><b></b><em></em></span>
+                        <span><strong>社交原生</strong><small>现有样式 · 顶部作者</small></span>
+                      </button>
+                      <button type="button" class="card-template-button" data-card-theme="creator-white" aria-pressed="false">
+                        <span class="card-template-preview template-creator-white" aria-hidden="true"><i></i><b></b><em></em></span>
+                        <span><strong>创作者白</strong><small>橙色作者 · 右上页码</small></span>
+                      </button>
+                      <button type="button" class="card-template-button" data-card-theme="highlight-note" aria-pressed="false">
+                        <span class="card-template-preview template-highlight-note" aria-hidden="true"><i></i><b></b><em></em></span>
+                        <span><strong>荧光笔记</strong><small>马克笔重点 · 双细线</small></span>
+                      </button>
+                      <button type="button" class="card-template-button" data-card-theme="minimal-opinion" aria-pressed="false">
+                        <span class="card-template-preview template-minimal-opinion" aria-hidden="true"><i></i><b></b><em></em></span>
+                        <span><strong>极简观点</strong><small>大留白 · 克制粗体</small></span>
+                      </button>
+                      <button type="button" class="card-template-button" data-card-theme="magazine" aria-pressed="false">
+                        <span class="card-template-preview template-magazine" aria-hidden="true"><i></i><b></b><em></em></span>
+                        <span><strong>观点杂志</strong><small>宋体正文 · 底部署名</small></span>
+                      </button>
+                    </div>
+                  </section>
                   <section class="card-appearance-settings wide" aria-labelledby="cardAppearanceTitle">
                     <div class="settings-section-heading">
                       <strong id="cardAppearanceTitle">页面配色</strong>
@@ -425,21 +453,21 @@
         </div>
         <div class="ai-optimize-body">
           <div id="aiOptimizeStatus" class="ai-optimize-status" role="status" aria-live="polite">选择优化方式后开始生成建议。</div>
-          <div class="ai-mode-switch" role="group" aria-label="AI 优化方式">
-            <button id="aiModeLayout" class="ai-mode-button active" type="button" data-ai-mode="layout" aria-pressed="true">
+          <div class="ai-mode-switch" role="radiogroup" aria-label="AI 优化方式">
+            <button id="aiModeLayout" class="ai-mode-button" type="button" data-ai-mode="layout" role="radio" aria-checked="false" tabindex="0">
               <i data-lucide="wand-sparkles"></i>
-              <span><strong>只优化排版</strong><small>识别重点、增加层级与高亮，不改原意</small></span>
+              <span><strong>只优化排版</strong><small>正文逐字不改，只给原文重点添加颜色、背景或加粗</small></span>
             </button>
-            <button id="aiModePolish" class="ai-mode-button" type="button" data-ai-mode="polish" aria-pressed="false">
+            <button id="aiModePolish" class="ai-mode-button" type="button" data-ai-mode="polish" role="radio" aria-checked="false" tabindex="-1">
               <i data-lucide="message-square-text"></i>
-              <span><strong>润色并排版</strong><small>同时优化表达、节奏与视觉重点</small></span>
+              <span><strong>润色并排版</strong><small>会修改少量文案表达，再添加视觉重点；图片、数字和链接受保护</small></span>
             </button>
           </div>
           <div class="ai-compare-grid">
             <section class="ai-compare-pane" aria-labelledby="aiBeforeTitle">
               <div class="ai-compare-heading">
                 <h4 id="aiBeforeTitle">优化前</h4>
-                <span>当前保存版本</span>
+                <span>当前编辑内容</span>
               </div>
               <pre id="aiBeforePreview" class="ai-copy-preview" tabindex="0">等待读取当前正文…</pre>
             </section>
@@ -459,10 +487,14 @@
           </section>
         </div>
         <div class="ai-optimize-actions">
-          <button id="aiOptimizeCancelBtn" class="secondary-button" type="button">保留原文</button>
-          <button id="aiOptimizeApplyBtn" class="primary-button" type="button">
+          <button id="aiOptimizeCancelBtn" class="secondary-button" type="button">关闭（不应用）</button>
+          <button id="aiOptimizeGenerateBtn" class="primary-button" type="button" disabled>
+            <i data-lucide="sparkles"></i>
+            <span>开始生成建议</span>
+          </button>
+          <button id="aiOptimizeApplyBtn" class="primary-button" type="button" disabled hidden>
             <i data-lucide="check"></i>
-            应用优化
+            <span>应用到正文</span>
           </button>
         </div>
       </div>
@@ -577,6 +609,6 @@
     <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/lucide@1.8.0/dist/umd/lucide.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
-    <script src="src/app.js?v=20260723-page-themes"></script>
+    <script src="src/app.js?v=20260723-card-templates-v2"></script>
   </body>
 </html>

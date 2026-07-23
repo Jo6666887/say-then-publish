@@ -56,6 +56,7 @@ let pendingAiOptimization = null;
 let aiOptimizeReturnFocus = null;
 let aiOptimizeRequestGeneration = 0;
 let aiOptimizeAbortController = null;
+let aiOptimizeUiState = "closed";
 let imageReorderDrag = null;
 let imageReorderBusy = false;
 
@@ -122,6 +123,7 @@ const els = {
   aiAfterPreview: $("#aiAfterPreview"),
   aiChangeList: $("#aiChangeList"),
   aiOptimizeCancel: $("#aiOptimizeCancelBtn"),
+  aiOptimizeGenerate: $("#aiOptimizeGenerateBtn"),
   aiOptimizeApply: $("#aiOptimizeApplyBtn"),
   projectHistory: $("#projectHistory"),
   historyFilterButtons: document.querySelectorAll("[data-history-filter]"),
@@ -174,6 +176,7 @@ const els = {
   textColor: $("#textColorInput"),
   accentColor: $("#accentColorInput"),
   bgColor: $("#bgColorInput"),
+  cardThemeButtons: document.querySelectorAll("[data-card-theme]"),
   cardPaletteButtons: document.querySelectorAll("[data-card-palette]"),
   fontSize: $("#fontSizeInput"),
   lineHeight: $("#lineHeightInput"),
@@ -303,6 +306,155 @@ const CARD_PALETTES = {
   },
 };
 
+const CARD_THEME_DEFAULT = "social-clean";
+
+const CARD_THEMES = {
+  "social-clean": {
+    label: "社交原生",
+    identityPlacement: "top",
+    geometry: { sidePadding: 42, topWithAuthor: 158, topWithoutAuthor: 42, bottom: 1090 },
+    identity: { x: 42, y: 38, avatarSize: 82, nameSize: 30, handleSize: 29 },
+    typography: {
+      h1: { scale: 1.36, lineHeight: 1.45, weight: 650, marginTop: 22, marginBottom: 10 },
+      h2: { scale: 1.12, lineHeight: 1.55, weight: 560, marginTop: 20, marginBottom: 6 },
+      h3: { scale: 1.02, lineHeight: 1.55, weight: 620, marginTop: 16, marginBottom: 4 },
+      paragraph: { marginTop: 5 },
+    },
+    imageRadius: 13,
+    emphasis: "pill",
+    pageNumber: "none",
+    footer: "none",
+    defaults: {
+      textColor: "#202938",
+      accentColor: "#2563eb",
+      bgColor: "#ffffff",
+      fontSize: 31,
+      lineHeight: 1.65,
+      zhFont: "zh-system",
+      enFont: "en-system",
+      imageHeight: 520,
+      headerMode: "every",
+    },
+  },
+  "creator-white": {
+    label: "创作者白",
+    identityPlacement: "top",
+    geometry: { sidePadding: 52, topWithAuthor: 150, topWithoutAuthor: 58, bottom: 1078 },
+    identity: { x: 52, y: 42, avatarSize: 64, nameSize: 25, handleSize: 20, accentName: true },
+    typography: {
+      h1: { scale: 1.42, lineHeight: 1.34, weight: 720, marginTop: 25, marginBottom: 12 },
+      h2: { scale: 1.16, lineHeight: 1.48, weight: 680, marginTop: 24, marginBottom: 8 },
+      h3: { scale: 1.05, lineHeight: 1.52, weight: 650, marginTop: 18, marginBottom: 5 },
+      paragraph: { marginTop: 7 },
+    },
+    imageRadius: 10,
+    emphasis: "accent-underline",
+    pageNumber: "top-right",
+    footer: "hairline",
+    defaults: {
+      textColor: "#282824",
+      accentColor: "#ef6b35",
+      bgColor: "#ffffff",
+      fontSize: 30,
+      lineHeight: 1.72,
+      zhFont: "zh-system",
+      enFont: "en-rounded",
+      imageHeight: 500,
+      headerMode: "first",
+    },
+  },
+  "highlight-note": {
+    label: "荧光笔记",
+    identityPlacement: "top",
+    geometry: { sidePadding: 50, topWithAuthor: 150, topWithoutAuthor: 56, bottom: 1072 },
+    identity: { x: 50, y: 42, avatarSize: 64, nameSize: 25, handleSize: 20, accentName: true },
+    typography: {
+      h1: { scale: 1.4, lineHeight: 1.36, weight: 720, marginTop: 24, marginBottom: 12 },
+      h2: { scale: 1.16, lineHeight: 1.5, weight: 680, marginTop: 22, marginBottom: 8 },
+      h3: { scale: 1.05, lineHeight: 1.52, weight: 650, marginTop: 18, marginBottom: 5 },
+      paragraph: { marginTop: 7 },
+    },
+    imageRadius: 7,
+    emphasis: "marker",
+    pageNumber: "bottom-right",
+    footer: "double-line",
+    defaults: {
+      textColor: "#2d2b25",
+      accentColor: "#6f7f29",
+      bgColor: "#fffdf7",
+      fontSize: 30,
+      lineHeight: 1.68,
+      zhFont: "zh-system",
+      enFont: "en-system",
+      imageHeight: 480,
+      headerMode: "first",
+    },
+  },
+  "minimal-opinion": {
+    label: "极简观点",
+    identityPlacement: "top",
+    geometry: { sidePadding: 64, topWithAuthor: 154, topWithoutAuthor: 64, bottom: 1068 },
+    identity: { x: 64, y: 44, avatarSize: 62, nameSize: 24, handleSize: 19 },
+    typography: {
+      h1: { scale: 1.34, lineHeight: 1.4, weight: 720, marginTop: 30, marginBottom: 14 },
+      h2: { scale: 1.1, lineHeight: 1.56, weight: 700, marginTop: 28, marginBottom: 10 },
+      h3: { scale: 1.02, lineHeight: 1.58, weight: 680, marginTop: 22, marginBottom: 7 },
+      paragraph: { marginTop: 9 },
+    },
+    imageRadius: 3,
+    emphasis: "bold-line",
+    pageNumber: "bottom-center",
+    footer: "none",
+    defaults: {
+      textColor: "#292823",
+      accentColor: "#292823",
+      bgColor: "#ffffff",
+      fontSize: 31,
+      lineHeight: 1.82,
+      zhFont: "zh-hei",
+      enFont: "en-system",
+      imageHeight: 470,
+      headerMode: "first",
+    },
+  },
+  magazine: {
+    label: "观点杂志",
+    identityPlacement: "bottom",
+    geometry: { sidePadding: 58, topWithAuthor: 86, topWithoutAuthor: 86, bottom: 1018 },
+    identity: { x: 58, y: 1060, avatarSize: 38, nameSize: 19, handleSize: 16 },
+    typography: {
+      h1: { scale: 1.38, lineHeight: 1.38, weight: 720, marginTop: 26, marginBottom: 12, headingFont: "zh-hei" },
+      h2: { scale: 1.14, lineHeight: 1.5, weight: 680, marginTop: 24, marginBottom: 8, headingFont: "zh-hei" },
+      h3: { scale: 1.04, lineHeight: 1.54, weight: 650, marginTop: 20, marginBottom: 6, headingFont: "zh-hei" },
+      paragraph: { marginTop: 8 },
+    },
+    imageRadius: 14,
+    emphasis: "editorial",
+    pageNumber: "bottom-right",
+    footer: "author",
+    openingQuote: true,
+    defaults: {
+      textColor: "#2f2b28",
+      accentColor: "#4f7d43",
+      bgColor: "#fffdfa",
+      fontSize: 30,
+      lineHeight: 1.82,
+      zhFont: "zh-song",
+      enFont: "en-serif",
+      imageHeight: 400,
+      headerMode: "every",
+    },
+  },
+};
+
+function normalizeCardTheme(value) {
+  return CARD_THEMES[value] ? value : CARD_THEME_DEFAULT;
+}
+
+function cardThemeFor(settings = state) {
+  return CARD_THEMES[normalizeCardTheme(settings.cardTheme)];
+}
+
 const defaultText = `[[image:sample]]
 
 她说，如果你无聊的时候，不想只是刷手机，可以让 AI 做一件事：
@@ -330,6 +482,7 @@ const state = {
   colorBrush: false,
   bgColorBrush: false,
   uiTheme: "light",
+  cardTheme: CARD_THEME_DEFAULT,
   headerMode: "every",
   appMode: "cards",
   articleTheme: "wechat",
@@ -400,6 +553,7 @@ function defaultFormState() {
     zhFont: "zh-system",
     enFont: "en-system",
     imageHeight: "520",
+    cardTheme: CARD_THEME_DEFAULT,
     headerMode: "every",
     appMode: "cards",
     articleTheme: "wechat",
@@ -639,6 +793,7 @@ function readForm() {
     zhFont: FONT_STACKS[els.zhFont.value] ? els.zhFont.value : "zh-system",
     enFont: FONT_STACKS[els.enFont.value] ? els.enFont.value : "en-system",
     imageHeight: clamp(Number(els.imageHeight.value) || 520, 220, 760),
+    cardTheme: normalizeCardTheme(state.cardTheme),
     headerMode: state.headerMode === "first" ? "first" : "every",
     appMode: state.appMode === "article" ? "article" : "cards",
     articleTheme: normalizeArticleTheme(state.articleTheme),
@@ -664,7 +819,8 @@ function applyForm(data) {
   els.lineHeight.value = data.lineHeight ?? "1.65";
   els.zhFont.value = FONT_STACKS[data.zhFont] ? data.zhFont : "zh-system";
   els.enFont.value = FONT_STACKS[data.enFont] ? data.enFont : "en-system";
-  els.imageHeight.value = String(data.imageHeight ?? "520") === "380" ? "520" : data.imageHeight ?? "520";
+  els.imageHeight.value = data.imageHeight ?? "520";
+  state.cardTheme = normalizeCardTheme(data.cardTheme);
   state.headerMode = data.headerMode === "first" ? "first" : "every";
   state.appMode = data.appMode === "article" ? "article" : "cards";
   state.articleTheme = normalizeArticleTheme(data.articleTheme);
@@ -683,6 +839,7 @@ function applyForm(data) {
   document.documentElement.style.setProperty("--brush-color", els.inlineColor.value);
   document.documentElement.style.setProperty("--text-bg-brush-color", els.inlineBgColor.value);
   updateImageList();
+  syncCardThemeControls();
   syncCardPaletteControls();
   syncAiUndoAvailability();
   const currentProject = findHistoryProject(state.currentProjectId);
@@ -781,8 +938,40 @@ function syncCardPaletteControls() {
   });
 }
 
+function syncCardThemeControls() {
+  const currentTheme = normalizeCardTheme(state.cardTheme);
+  els.cardThemeButtons.forEach((button) => {
+    const active = button.dataset.cardTheme === currentTheme;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
 function flushAppearanceSaveIfHydrated() {
   if (state.localDatabaseHydrated) flushStateSave();
+}
+
+function applyCardTheme(event) {
+  const themeId = normalizeCardTheme(event.currentTarget.dataset.cardTheme);
+  const theme = CARD_THEMES[themeId];
+  if (!theme) return;
+  state.cardTheme = themeId;
+  const defaults = theme.defaults;
+  els.textColor.value = defaults.textColor;
+  els.accentColor.value = defaults.accentColor;
+  els.bgColor.value = defaults.bgColor;
+  els.fontSize.value = String(defaults.fontSize);
+  els.lineHeight.value = String(defaults.lineHeight);
+  els.zhFont.value = defaults.zhFont;
+  els.enFont.value = defaults.enFont;
+  els.imageHeight.value = String(defaults.imageHeight);
+  state.headerMode = defaults.headerMode;
+  syncCardThemeControls();
+  syncCardPaletteControls();
+  updateHeaderModeButton();
+  requestRender();
+  flushAppearanceSaveIfHydrated();
+  els.status.textContent = `已应用「${theme.label}」模板；正文和图片顺序未改变，模板将随当前项目自动保存`;
 }
 
 function applyCardPalette(event) {
@@ -836,8 +1025,8 @@ function updateHeaderModeButton() {
   if (!els.headerModeToggle) return;
   const firstOnly = state.headerMode === "first";
   els.headerModeToggle.classList.toggle("active", firstOnly);
-  els.headerModeToggle.innerHTML = `<i data-lucide="${firstOnly ? "user-round-check" : "user-round"}"></i>${firstOnly ? "仅首页头像" : "每页头像"}`;
-  els.headerModeToggle.title = firstOnly ? "当前仅首页显示头像昵称，点击改为每页显示" : "当前每页显示头像昵称，点击改为仅首页显示";
+  els.headerModeToggle.innerHTML = `<i data-lucide="${firstOnly ? "user-round-check" : "user-round"}"></i>${firstOnly ? "仅首页作者" : "每页作者"}`;
+  els.headerModeToggle.title = firstOnly ? "当前仅首页显示作者信息，点击改为每页显示" : "当前每页显示作者信息，点击改为仅首页显示";
   els.headerModeToggle.setAttribute("aria-label", els.headerModeToggle.title);
   if (window.lucide) window.lucide.createIcons();
 }
@@ -847,7 +1036,7 @@ async function toggleHeaderMode() {
   state.headerMode = state.headerMode === "first" ? "every" : "first";
   updateHeaderModeButton();
   await render();
-  els.status.textContent = state.headerMode === "first" ? "仅首页显示个人信息" : "每张图片都显示个人信息";
+  els.status.textContent = state.headerMode === "first" ? "仅首页显示作者信息" : "每张图片都显示作者信息";
 }
 
 function updateAppMode() {
@@ -1245,9 +1434,9 @@ function migrateStoredState(data) {
     oldBoldQuote,
     "“请你从某个领域里，选择一个研究生水平的概念。然后写一个寓言故事，用间接的方式把这个概念讲清楚。不要一开始就说答案，尽量到故事快结束的时候，才让人意识到原来讲的是这个概念。故事结束后，再解释这个概念，以及故事里的隐喻分别对应什么。”",
   );
-  if (String(data.imageHeight) === "380") data.imageHeight = "520";
   if (!Number.isFinite(Number(data.lineHeight))) data.lineHeight = "1.65";
   if (Math.abs(Number(data.lineHeight) - 1.85) < 0.001) data.lineHeight = "1.65";
+  data.cardTheme = normalizeCardTheme(data.cardTheme);
   data.headerMode = data.headerMode === "first" ? "first" : "every";
   data.appMode = data.appMode === "article" ? "article" : "cards";
   data.articleTheme = normalizeArticleTheme(data.articleTheme);
@@ -2883,22 +3072,89 @@ function setAiOptimizeRequestBusy(busy) {
   [els.aiModeLayout, els.aiModePolish].forEach((button) => {
     if (button) button.disabled = Boolean(busy);
   });
+  if (els.aiOptimizeGenerate) els.aiOptimizeGenerate.disabled = Boolean(busy);
   els.aiOptimizeModal?.setAttribute("aria-busy", String(Boolean(busy)));
 }
 
 function selectedAiOptimizeMode() {
-  return els.aiModePolish?.classList.contains("active") ? "polish" : "layout";
+  if (els.aiModeLayout?.getAttribute("aria-checked") === "true") return "layout";
+  if (els.aiModePolish?.getAttribute("aria-checked") === "true") return "polish";
+  return null;
 }
 
 function setAiOptimizeMode(mode) {
-  const nextMode = mode === "polish" ? "polish" : "layout";
+  const nextMode = ["layout", "polish"].includes(mode) ? mode : null;
   [els.aiModeLayout, els.aiModePolish].forEach((button) => {
     if (!button) return;
     const active = button.dataset.aiMode === nextMode;
     button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", String(active));
+    button.setAttribute("aria-checked", String(active));
+    button.tabIndex = nextMode ? (active ? 0 : -1) : (button === els.aiModeLayout ? 0 : -1);
   });
   return nextMode;
+}
+
+function setAiOptimizeUiState(nextState) {
+  aiOptimizeUiState = nextState;
+  if (els.aiOptimizeModal) els.aiOptimizeModal.dataset.aiState = nextState;
+  const selectedMode = selectedAiOptimizeMode();
+  const requesting = nextState === "requesting";
+  const success = nextState === "success";
+  const error = nextState === "error";
+  setAiOptimizeRequestBusy(requesting);
+  if (els.aiOptimizeGenerate) {
+    els.aiOptimizeGenerate.hidden = false;
+    els.aiOptimizeGenerate.disabled = requesting || !selectedMode;
+    const label = els.aiOptimizeGenerate.querySelector("span");
+    if (label) {
+      label.textContent = requesting
+        ? "正在生成建议…"
+        : success
+          ? "重新生成建议"
+          : error
+            ? "重试生成建议"
+            : "开始生成建议";
+    }
+  }
+  if (els.aiOptimizeApply) {
+    els.aiOptimizeApply.hidden = !success;
+    els.aiOptimizeApply.disabled = !success;
+  }
+}
+
+function chooseAiOptimizeMode(mode, { focus = false } = {}) {
+  if (aiOptimizeUiState === "requesting") return;
+  const nextMode = setAiOptimizeMode(mode);
+  if (!nextMode) return;
+  aiOptimizeRequestGeneration += 1;
+  aiOptimizeAbortController?.abort();
+  aiOptimizeAbortController = null;
+  pendingAiOptimization = null;
+  els.aiBeforePreview.textContent = els.content.value;
+  els.aiAfterPreview.textContent = "点击“开始生成建议”后，完整结果会显示在这里。";
+  renderAiChangeList([
+    nextMode === "polish"
+      ? "会对少量句子做局部润色，并重新标注视觉重点；确认应用前正文不会改变。"
+      : "正文逐字保持不变，只会为原文中的少量重点添加排版标记。",
+  ]);
+  setAiOptimizeStatus(
+    nextMode === "polish"
+      ? "已选择「润色并排版」；点击开始后才会保存当前版本并连接 AI。"
+      : "已选择「只优化排版」；点击开始后才会保存当前版本并连接 AI。",
+    "ready",
+  );
+  setAiOptimizeUiState("ready");
+  if (focus) {
+    const target = nextMode === "polish" ? els.aiModePolish : els.aiModeLayout;
+    target?.focus();
+  }
+}
+
+function handleAiModeKeydown(event) {
+  if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const nextMode = ["ArrowRight", "ArrowDown", "End"].includes(event.key) ? "polish" : "layout";
+  chooseAiOptimizeMode(nextMode, { focus: true });
 }
 
 function renderAiChangeList(changes = []) {
@@ -2913,16 +3169,20 @@ function renderAiChangeList(changes = []) {
   );
 }
 
-async function runAiOptimization(mode = selectedAiOptimizeMode()) {
+async function runAiOptimization(mode) {
   if (!els.aiOptimizeModal || els.aiOptimizeModal.classList.contains("hidden")) return;
+  const requestedMode = ["layout", "polish"].includes(mode) ? mode : selectedAiOptimizeMode();
+  if (!requestedMode || aiOptimizeUiState === "requesting") {
+    setAiOptimizeStatus("请先选择一种优化方式，再点击“开始生成建议”。", "error");
+    return;
+  }
   const generation = ++aiOptimizeRequestGeneration;
   aiOptimizeAbortController?.abort();
   const abortController = new AbortController();
   aiOptimizeAbortController = abortController;
-  const nextMode = setAiOptimizeMode(mode);
+  const nextMode = setAiOptimizeMode(requestedMode);
   pendingAiOptimization = null;
-  els.aiOptimizeApply.disabled = true;
-  setAiOptimizeRequestBusy(true);
+  setAiOptimizeUiState("requesting");
   els.aiAfterPreview.textContent = "正在安全生成建议，原文不会被改动…";
   renderAiChangeList(["正在识别层级、重点和适合高亮的内容…"]);
   setAiOptimizeStatus("正在保存当前版本并连接 AI…", "loading");
@@ -2983,7 +3243,7 @@ async function runAiOptimization(mode = selectedAiOptimizeMode()) {
     els.aiBeforePreview.textContent = before;
     els.aiAfterPreview.textContent = payload.optimizedContent;
     renderAiChangeList(pendingAiOptimization.changes);
-    els.aiOptimizeApply.disabled = false;
+    setAiOptimizeUiState("success");
     setAiOptimizeStatus(`建议已生成 · ${payload.model || "Kimi"} · 确认后才会替换正文`, "success");
   } catch (error) {
     if (error?.name === "AbortError") return;
@@ -2991,10 +3251,13 @@ async function runAiOptimization(mode = selectedAiOptimizeMode()) {
     pendingAiOptimization = null;
     els.aiAfterPreview.textContent = "本次没有改动正文。解决提示中的问题后，可以重新选择优化方式重试。";
     renderAiChangeList([error?.message || "AI 优化暂时不可用"]);
+    setAiOptimizeUiState("error");
     setAiOptimizeStatus(error?.message || "AI 优化暂时不可用", "error");
   } finally {
     if (aiOptimizeAbortController === abortController) aiOptimizeAbortController = null;
-    if (generation === aiOptimizeRequestGeneration) setAiOptimizeRequestBusy(false);
+    if (generation === aiOptimizeRequestGeneration && aiOptimizeUiState === "requesting") {
+      setAiOptimizeUiState("error");
+    }
   }
 }
 
@@ -3003,8 +3266,10 @@ function closeAiOptimizeModal() {
   aiOptimizeAbortController?.abort();
   aiOptimizeAbortController = null;
   pendingAiOptimization = null;
-  setAiOptimizeRequestBusy(false);
+  setAiOptimizeMode(null);
+  setAiOptimizeUiState("closed");
   els.aiOptimizeModal?.classList.add("hidden");
+  els.workspace?.removeAttribute("inert");
   aiOptimizeReturnFocus?.focus?.();
   aiOptimizeReturnFocus = null;
 }
@@ -3029,7 +3294,7 @@ function trapAiOptimizeModalFocus(event) {
   }
 }
 
-async function openAiOptimizeModal() {
+function openAiOptimizeModal() {
   if (isBuiltInProjectId(state.currentProjectId)) {
     els.status.textContent = "内置说明书不可修改，请先新建图文";
     return;
@@ -3039,13 +3304,16 @@ async function openAiOptimizeModal() {
     return;
   }
   aiOptimizeReturnFocus = document.activeElement;
+  pendingAiOptimization = null;
   els.aiBeforePreview.textContent = els.content.value;
-  els.aiAfterPreview.textContent = "生成完成后将在这里展示完整结果。";
-  renderAiChangeList(["正在准备当前保存版本…"]);
-  setAiOptimizeMode("layout");
+  els.aiAfterPreview.textContent = "先在上方选择一种方式，再点击“开始生成建议”。";
+  renderAiChangeList(["尚未连接 AI，也没有改动正文。"]);
+  setAiOptimizeMode(null);
+  setAiOptimizeStatus("请选择一种优化方式。只有点击“开始生成建议”后才会连接 AI，正文不会被改动。", "ready");
+  setAiOptimizeUiState("choosing");
+  els.workspace?.setAttribute("inert", "");
   els.aiOptimizeModal.classList.remove("hidden");
-  els.aiOptimizeClose?.focus();
-  await runAiOptimization("layout");
+  els.aiModeLayout?.focus();
 }
 
 async function applyAiOptimization() {
@@ -5121,43 +5389,48 @@ function parseInline(text, baseStart = 0) {
 
 function styleForBlock(type, settings) {
   const baseSize = settings.fontSize;
+  const theme = cardThemeFor(settings);
+  const themeRole = theme.typography[type] || null;
   const fontSettings = {
-    zhFont: settings.zhFont,
+    zhFont: themeRole?.headingFont || settings.zhFont,
     enFont: settings.enFont,
   };
   if (type === "h1") {
+    const role = theme.typography.h1;
     return {
       ...fontSettings,
-      size: Math.round(baseSize * 1.36),
-      lineHeight: 1.45,
-      weight: 650,
+      size: Math.round(baseSize * role.scale),
+      lineHeight: role.lineHeight,
+      weight: role.weight,
       italic: false,
-      marginTop: 22,
-      marginBottom: 10,
+      marginTop: role.marginTop,
+      marginBottom: role.marginBottom,
       color: settings.textColor,
     };
   }
   if (type === "h2") {
+    const role = theme.typography.h2;
     return {
       ...fontSettings,
-      size: Math.round(baseSize * 1.12),
-      lineHeight: 1.55,
-      weight: 560,
+      size: Math.round(baseSize * role.scale),
+      lineHeight: role.lineHeight,
+      weight: role.weight,
       italic: false,
-      marginTop: 20,
-      marginBottom: 6,
+      marginTop: role.marginTop,
+      marginBottom: role.marginBottom,
       color: settings.textColor,
     };
   }
   if (type === "h3") {
+    const role = theme.typography.h3;
     return {
       ...fontSettings,
-      size: Math.round(baseSize * 1.02),
-      lineHeight: 1.55,
-      weight: 620,
+      size: Math.round(baseSize * role.scale),
+      lineHeight: role.lineHeight,
+      weight: role.weight,
       italic: false,
-      marginTop: 16,
-      marginBottom: 4,
+      marginTop: role.marginTop,
+      marginBottom: role.marginBottom,
       color: settings.textColor,
     };
   }
@@ -5166,8 +5439,8 @@ function styleForBlock(type, settings) {
       ...fontSettings,
       size: baseSize,
       lineHeight: settings.lineHeight,
-      weight: 400,
-      italic: false,
+      weight: theme.emphasis === "editorial" ? 540 : 400,
+      italic: theme.emphasis === "editorial",
       marginTop: 18,
       marginBottom: 10,
       color: settings.textColor,
@@ -5180,7 +5453,7 @@ function styleForBlock(type, settings) {
     lineHeight: settings.lineHeight,
     weight: 400,
     italic: false,
-    marginTop: 5,
+    marginTop: theme.typography.paragraph.marginTop,
     marginBottom: 0,
     color: settings.textColor,
   };
@@ -5364,9 +5637,10 @@ function imageBlockSize(sourceRect, maxWidth, maxHeight, layout = null) {
   const legacyMaxScale = baseWidth > 0 ? maxWidth / baseWidth : 1;
   const fixedWidth = normalized.fixedWidth && normalized.fixedHeight ? clamp(normalized.fixedWidth, 80, maxWidth) : null;
   const fixedHeight = normalized.fixedWidth && normalized.fixedHeight ? clamp(normalized.fixedHeight, 80, maxHeight) : null;
-  const width = fixedWidth || (normalized.widthPercent
+  const requestedWidth = normalized.widthPercent
     ? maxWidth * (normalized.widthPercent / 100)
-    : baseWidth * clamp(normalized.widthScale, 0.25, legacyMaxScale));
+    : baseWidth * clamp(normalized.widthScale, 0.25, legacyMaxScale);
+  const width = fixedWidth || Math.min(requestedWidth, maxWidth, maxHeight * aspect);
   const height = fixedHeight || width / aspect;
   const maxOffset = Math.max(0, maxWidth - width);
   let offsetX = maxOffset / 2;
@@ -5410,12 +5684,17 @@ function imageMaxHeightForLayout(layout, fallbackMaxHeight, absoluteMaxHeight = 
   return clamp(normalized.fixedHeight, 80, Math.max(80, absoluteMaxHeight));
 }
 
-function contentBoundsForHeader(showHeader) {
+function contentBoundsForPage(settings, showIdentity) {
+  const theme = cardThemeFor(settings);
+  const { geometry } = theme;
+  const top = theme.identityPlacement === "top" && showIdentity
+    ? geometry.topWithAuthor
+    : geometry.topWithoutAuthor;
   return {
-    left: CARD_SIDE_PADDING,
-    right: CANVAS_WIDTH - CARD_SIDE_PADDING,
-    top: showHeader ? 158 : CARD_SIDE_PADDING,
-    bottom: CANVAS_HEIGHT - 62,
+    left: geometry.sidePadding,
+    right: CANVAS_WIDTH - geometry.sidePadding,
+    top,
+    bottom: geometry.bottom,
   };
 }
 
@@ -5434,13 +5713,18 @@ async function buildPages(settings) {
   let previousBlockType = null;
 
   function createPage() {
-    const showHeader = settings.headerMode !== "first" || pages.length === 0;
-    const bounds = contentBoundsForHeader(showHeader);
+    const theme = cardThemeFor(settings);
+    const showIdentity = settings.headerMode !== "first" || pages.length === 0;
+    const bounds = contentBoundsForPage(settings, showIdentity);
     return {
       avatar,
       badge,
       settings,
-      showHeader,
+      pageIndex: pages.length,
+      totalPages: 0,
+      showIdentity,
+      showHeader: showIdentity && theme.identityPlacement === "top",
+      showFooterAuthor: showIdentity && theme.identityPlacement === "bottom",
       bounds,
       items: [],
     };
@@ -5509,7 +5793,7 @@ async function buildPages(settings) {
         y,
         width: size.width,
         height,
-        radius: 13,
+        radius: cardThemeFor(settings).imageRadius,
       });
       y += height + 34;
       hasContent = true;
@@ -5547,7 +5831,12 @@ async function buildPages(settings) {
   }
 
   finishPage();
-  return pages.length ? pages : [createPage()];
+  const result = pages.length ? pages : [createPage()];
+  result.forEach((item, index) => {
+    item.pageIndex = index;
+    item.totalPages = result.length;
+  });
+  return result;
 }
 
 async function buildScrollPage(settings) {
@@ -5557,14 +5846,20 @@ async function buildScrollPage(settings) {
   const avatar = await loadImage(settings.avatar).catch(() => null);
   const badge = await loadImage(verifiedBadgeSrc).catch(() => null);
   const imageCache = {};
-  const bounds = contentBoundsForHeader(true);
+  const theme = cardThemeFor(settings);
+  const showIdentity = true;
+  const bounds = contentBoundsForPage(settings, showIdentity);
   const contentWidth = bounds.right - bounds.left;
   const viewportHeight = bounds.bottom - bounds.top;
   const page = {
     avatar,
     badge,
     settings,
-    showHeader: true,
+    pageIndex: 0,
+    totalPages: 1,
+    showIdentity,
+    showHeader: theme.identityPlacement === "top",
+    showFooterAuthor: theme.identityPlacement === "bottom",
     items: [],
     bounds,
     scrollOffset: 0,
@@ -5616,7 +5911,7 @@ async function buildScrollPage(settings) {
         y,
         width: size.width,
         height: size.height,
-        radius: 13,
+        radius: theme.imageRadius,
       });
       y += size.height + 34;
       hasContent = true;
@@ -5685,6 +5980,15 @@ function pageRenderSignature(page, scrollPage = false) {
         radius: item.radius,
       };
     }
+    if (item.type === "table") {
+      return {
+        type: item.type,
+        x: item.x,
+        y: item.y,
+        width: item.width,
+        table: item.table,
+      };
+    }
     return {
       type: item.type,
       blockType: item.blockType,
@@ -5699,6 +6003,9 @@ function pageRenderSignature(page, scrollPage = false) {
     scrollPage,
     scrollOffset: scrollPage ? page.scrollOffset : 0,
     showHeader: page.showHeader,
+    showFooterAuthor: page.showFooterAuthor,
+    pageIndex: page.pageIndex,
+    totalPages: page.totalPages,
     bounds: page.bounds,
     avatar: imageSourceFingerprint(avatar),
     settings,
@@ -5770,8 +6077,9 @@ function createExportCanvas(sourceCanvas) {
 
 function drawPageToContext(ctx, page, scrollPage = false) {
   drawBackground(ctx, page.settings);
+  drawCardThemeChrome(ctx, page);
   if (page.showHeader !== false) {
-    drawHeader(ctx, page.settings, page.avatar, page.badge);
+    drawCardThemeHeader(ctx, page);
   }
 
   if (!scrollPage) {
@@ -5780,30 +6088,30 @@ function drawPageToContext(ctx, page, scrollPage = false) {
       if (item.type === "table") drawTableBlock(ctx, item, page.settings);
       if (item.type === "text") drawTextLine(ctx, item, page.settings);
     }
-    return;
-  }
-
-  const { bounds } = page;
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
-  ctx.clip();
-  ctx.translate(0, bounds.top - page.scrollOffset);
-  for (const item of page.items) {
-    if (item.type === "image") drawImageBlock(ctx, item);
-    if (item.type === "table") drawTableBlock(ctx, item, page.settings);
-    if (item.type === "text") drawTextLine(ctx, item, page.settings);
-  }
-  ctx.restore();
-
-  if (page.showHeader !== false) {
-    ctx.strokeStyle = isDarkHexColor(page.settings.bgColor) ? "rgba(255,255,255,.12)" : "rgba(23,32,47,.06)";
-    ctx.lineWidth = 1;
+  } else {
+    const { bounds } = page;
+    ctx.save();
     ctx.beginPath();
-    ctx.moveTo(bounds.left, bounds.top - 10);
-    ctx.lineTo(bounds.right, bounds.top - 10);
-    ctx.stroke();
+    ctx.rect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
+    ctx.clip();
+    ctx.translate(0, bounds.top - page.scrollOffset);
+    for (const item of page.items) {
+      if (item.type === "image") drawImageBlock(ctx, item);
+      if (item.type === "table") drawTableBlock(ctx, item, page.settings);
+      if (item.type === "text") drawTextLine(ctx, item, page.settings);
+    }
+    ctx.restore();
+
+    if (page.showHeader !== false) {
+      ctx.strokeStyle = isDarkHexColor(page.settings.bgColor) ? "rgba(255,255,255,.12)" : "rgba(23,32,47,.06)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(bounds.left, bounds.top - 10);
+      ctx.lineTo(bounds.right, bounds.top - 10);
+      ctx.stroke();
+    }
   }
+  drawCardThemeFooter(ctx, page);
 }
 
 function collectTextHits(ctx, page, scrollPage = false) {
@@ -5857,6 +6165,7 @@ function collectImageHits(page, scrollPage = false) {
         y: top,
         width: item.width,
         height: Math.max(0, bottom - top),
+        actualHeight: item.height,
         baseWidth: item.baseWidth || item.width,
         maxWidth: item.maxWidth || CARD_CONTENT_WIDTH,
       };
@@ -5869,10 +6178,28 @@ function drawBackground(ctx, settings) {
   ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 }
 
+function drawCardThemeChrome(ctx, page) {
+  const theme = cardThemeFor(page.settings);
+  if (!theme.openingQuote) return;
+  ctx.save();
+  ctx.globalAlpha = isDarkHexColor(page.settings.bgColor) ? 0.34 : 0.22;
+  ctx.fillStyle = page.settings.accentColor;
+  ctx.font = `700 94px ${FONT_STACKS["en-serif"]}`;
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText("“", theme.geometry.sidePadding - 4, 91);
+  ctx.restore();
+}
+
+function drawCardThemeHeader(ctx, page) {
+  drawHeader(ctx, page.settings, page.avatar, page.badge);
+}
+
 function drawHeader(ctx, settings, avatar, badge) {
-  const x = 42;
-  const y = 38;
-  const size = 82;
+  const theme = cardThemeFor(settings);
+  const identity = theme.identity;
+  const x = identity.x;
+  const y = identity.y;
+  const size = identity.avatarSize;
   const darkCard = isDarkHexColor(settings.bgColor);
 
   ctx.save();
@@ -5893,25 +6220,35 @@ function drawHeader(ctx, settings, avatar, badge) {
   ctx.arc(x + size / 2, y + size / 2, size / 2, 0, Math.PI * 2);
   ctx.stroke();
 
-  const textX = 152;
-  ctx.fillStyle = settings.textColor;
-  ctx.font = `650 30px ${fontFamilyForText(settings.displayName, settings)}`;
+  const textX = x + size + (size >= 80 ? 28 : 18);
+  const nameBaseline = y + Math.round(size * (size >= 80 ? 0.42 : 0.43));
+  const handleBaseline = y + Math.round(size * (size >= 80 ? 0.91 : 0.86));
+  ctx.fillStyle = identity.accentName ? settings.accentColor : settings.textColor;
+  ctx.font = `650 ${identity.nameSize}px ${fontFamilyForText(settings.displayName, settings)}`;
   ctx.textBaseline = "alphabetic";
-  const name = clampText(ctx, settings.displayName, 430);
-  ctx.fillText(name, textX, 72);
+  const name = clampText(ctx, settings.displayName, size >= 80 ? 430 : 360);
+  ctx.fillText(name, textX, nameBaseline);
 
   const nameWidth = ctx.measureText(name).width;
-  drawVerifiedBadge(ctx, badge, textX + nameWidth + 24, 59);
+  drawVerifiedBadge(
+    ctx,
+    badge,
+    textX + nameWidth + (size >= 80 ? 24 : 18),
+    nameBaseline - (size >= 80 ? 13 : 8),
+    size >= 80 ? 34 : 24,
+  );
 
   ctx.fillStyle = darkCard ? "rgba(255,255,255,.72)" : "#6f7785";
-  ctx.font = `400 29px ${fontFamilyForText(settings.handle, settings)}`;
-  ctx.fillText(clampText(ctx, settings.handle, 480), textX, 113);
+  ctx.font = `400 ${identity.handleSize}px ${fontFamilyForText(settings.handle, settings)}`;
+  ctx.fillText(clampText(ctx, settings.handle, size >= 80 ? 480 : 390), textX, handleBaseline);
 
-  ctx.fillStyle = darkCard ? "rgba(255,255,255,.5)" : "#9aa2af";
-  for (let i = 0; i < 3; i += 1) {
-    ctx.beginPath();
-    ctx.arc(769 + i * 16, 79, 5, 0, Math.PI * 2);
-    ctx.fill();
+  if (normalizeCardTheme(settings.cardTheme) === "social-clean") {
+    ctx.fillStyle = darkCard ? "rgba(255,255,255,.5)" : "#9aa2af";
+    for (let i = 0; i < 3; i += 1) {
+      ctx.beginPath();
+      ctx.arc(769 + i * 16, 79, 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 }
 
@@ -5925,25 +6262,94 @@ function isDarkHexColor(hex) {
   return (red * 299 + green * 587 + blue * 114) / 1000 < 128;
 }
 
-function drawVerifiedBadge(ctx, badge, x, y) {
+function drawVerifiedBadge(ctx, badge, x, y, size = 34) {
   ctx.save();
   if (badge) {
-    const size = 34;
     ctx.drawImage(badge, x - size / 2, y - size / 2, size, size);
   } else {
+    const scale = size / 34;
     ctx.fillStyle = "#1d9bf0";
     ctx.beginPath();
-    ctx.arc(x, y, 16, 0, Math.PI * 2);
+    ctx.arc(x, y, 16 * scale, 0, Math.PI * 2);
     ctx.fill();
     ctx.strokeStyle = "#fff";
-    ctx.lineWidth = 4.7;
+    ctx.lineWidth = 4.7 * scale;
     ctx.lineCap = "square";
     ctx.lineJoin = "miter";
     ctx.beginPath();
-    ctx.moveTo(x - 8.4, y - 0.7);
-    ctx.lineTo(x - 2.2, y + 5.8);
-    ctx.lineTo(x + 9.6, y - 8);
+    ctx.moveTo(x - 8.4 * scale, y - 0.7 * scale);
+    ctx.lineTo(x - 2.2 * scale, y + 5.8 * scale);
+    ctx.lineTo(x + 9.6 * scale, y - 8 * scale);
     ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawCardThemeFooter(ctx, page) {
+  const { settings } = page;
+  const theme = cardThemeFor(settings);
+  const darkCard = isDarkHexColor(settings.bgColor);
+  const subtle = darkCard ? "rgba(255,255,255,.42)" : "rgba(42,45,52,.38)";
+  const faint = darkCard ? "rgba(255,255,255,.16)" : "rgba(42,45,52,.12)";
+  const pageLabel = `${String((page.pageIndex || 0) + 1).padStart(2, "0")} / ${String(page.totalPages || 1).padStart(2, "0")}`;
+  ctx.save();
+
+  if (theme.footer === "hairline") {
+    ctx.strokeStyle = faint;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(theme.geometry.sidePadding, 1103);
+    ctx.lineTo(CANVAS_WIDTH - theme.geometry.sidePadding, 1103);
+    ctx.stroke();
+  } else if (theme.footer === "double-line") {
+    ctx.strokeStyle = faint;
+    ctx.lineWidth = 1;
+    [1092, 1098].forEach((y) => {
+      ctx.beginPath();
+      ctx.moveTo(theme.geometry.sidePadding, y);
+      ctx.lineTo(CANVAS_WIDTH - theme.geometry.sidePadding, y);
+      ctx.stroke();
+    });
+  }
+
+  if (page.showFooterAuthor) {
+    const x = theme.identity.x;
+    const y = theme.identity.y;
+    const size = theme.identity.avatarSize;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(x + size / 2, y + size / 2, size / 2, 0, Math.PI * 2);
+    ctx.clip();
+    if (page.avatar) {
+      drawSourceCoverImage(ctx, page.avatar, getImageSourceRect(page.avatar, settings.avatarCrop), x, y, size, size);
+    } else {
+      ctx.fillStyle = "#d8edc0";
+      ctx.fillRect(x, y, size, size);
+    }
+    ctx.restore();
+    ctx.fillStyle = settings.textColor;
+    ctx.font = `650 ${theme.identity.nameSize}px ${fontFamilyForText(settings.displayName, settings)}`;
+    ctx.textBaseline = "alphabetic";
+    const name = clampText(ctx, settings.displayName, 290);
+    ctx.fillText(name, x + size + 13, y + 24);
+    const nameWidth = ctx.measureText(name).width;
+    ctx.fillStyle = subtle;
+    ctx.font = `400 ${theme.identity.handleSize}px ${fontFamilyForText(settings.handle, settings)}`;
+    ctx.fillText(clampText(ctx, settings.handle, 210), x + size + nameWidth + 25, y + 24);
+  }
+
+  ctx.fillStyle = subtle;
+  ctx.textBaseline = "alphabetic";
+  ctx.font = `600 17px ${FONT_STACKS["en-system"]}`;
+  if (theme.pageNumber === "top-right") {
+    ctx.textAlign = "right";
+    ctx.fillText(pageLabel, CANVAS_WIDTH - theme.geometry.sidePadding, 70);
+  } else if (theme.pageNumber === "bottom-center") {
+    ctx.textAlign = "center";
+    ctx.fillText(pageLabel, CANVAS_WIDTH / 2, 1103);
+  } else if (theme.pageNumber === "bottom-right") {
+    ctx.textAlign = "right";
+    ctx.fillText(pageLabel, CANVAS_WIDTH - theme.geometry.sidePadding, theme.footer === "double-line" ? 1124 : 1103);
   }
   ctx.restore();
 }
@@ -5990,10 +6396,20 @@ function drawTableBlock(ctx, item, settings) {
 
 function drawTextLine(ctx, item, settings) {
   const { style, line, x, y, lineHeight } = item;
+  const theme = cardThemeFor(settings);
   if (style.quote) {
-    ctx.fillStyle = settings.accentColor;
-    roundedRect(ctx, x - 28, y + 7, 7, lineHeight - 13, 4);
-    ctx.fill();
+    if (theme.emphasis === "editorial") {
+      ctx.save();
+      ctx.globalAlpha = 0.32;
+      ctx.fillStyle = settings.accentColor;
+      ctx.font = `700 ${Math.max(34, Math.round(lineHeight * 0.9))}px ${FONT_STACKS["en-serif"]}`;
+      ctx.fillText("“", x - 32, y + Math.round(lineHeight * 0.72));
+      ctx.restore();
+    } else {
+      ctx.fillStyle = settings.accentColor;
+      roundedRect(ctx, x - 28, y + 7, 7, lineHeight - 13, 4);
+      ctx.fill();
+    }
   }
 
   let cursor = x;
@@ -6002,9 +6418,32 @@ function drawTextLine(ctx, item, settings) {
     ctx.font = fontString(style, token);
     const width = ctx.measureText(token.text).width;
     if (token.bgColor) {
-      ctx.fillStyle = token.bgColor;
-      roundedRect(ctx, cursor - 3, y + Math.round(lineHeight * 0.14), width + 6, Math.round(lineHeight * 0.72), 7);
-      ctx.fill();
+      if (theme.emphasis === "marker") {
+        ctx.save();
+        ctx.globalAlpha = 0.72;
+        ctx.fillStyle = token.bgColor;
+        ctx.beginPath();
+        const markerTop = y + Math.round(lineHeight * 0.48);
+        const markerBottom = y + Math.round(lineHeight * 0.86);
+        ctx.moveTo(cursor - 4, markerTop + 2);
+        ctx.lineTo(cursor + width + 5, markerTop);
+        ctx.lineTo(cursor + width + 3, markerBottom - 2);
+        ctx.lineTo(cursor - 2, markerBottom);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      } else if (["accent-underline", "bold-line", "editorial"].includes(theme.emphasis)) {
+        ctx.save();
+        ctx.globalAlpha = theme.emphasis === "bold-line" ? 0.72 : 0.52;
+        ctx.fillStyle = token.bgColor;
+        const underlineHeight = theme.emphasis === "editorial" ? 3 : 5;
+        ctx.fillRect(cursor, y + Math.round(lineHeight * 0.82), width, underlineHeight);
+        ctx.restore();
+      } else {
+        ctx.fillStyle = token.bgColor;
+        roundedRect(ctx, cursor - 3, y + Math.round(lineHeight * 0.14), width + 6, Math.round(lineHeight * 0.72), 7);
+        ctx.fill();
+      }
     }
     ctx.fillStyle = token.color || style.color;
     ctx.fillText(token.text, cursor, baseline);
@@ -6309,6 +6748,7 @@ function createImageEditLayer(canvas) {
     box.dataset.occurrenceKey = hit.occurrenceKey || `${hit.imageId}:${hit.sourceStart}`;
     box.dataset.baseWidth = String(hit.baseWidth || hit.width);
     box.dataset.maxWidth = String(hit.maxWidth || CARD_CONTENT_WIDTH);
+    box.dataset.actualHeight = String(hit.actualHeight || hit.height);
     box.tabIndex = 0;
     box.setAttribute("role", "group");
     box.setAttribute("aria-label", `图片 ${state.images[hit.imageId]?.name || hit.imageId}；可拖动调整顺序，Alt 加上下方向键也可移动`);
@@ -6734,7 +7174,8 @@ function startPreviewImageResize(event) {
       x: (Number.parseFloat(box.style.left) / 100) * CANVAS_WIDTH,
       y: (Number.parseFloat(box.style.top) / 100) * CANVAS_HEIGHT,
       width: (Number.parseFloat(box.style.width) / 100) * CANVAS_WIDTH,
-      height: (Number.parseFloat(box.style.height) / 100) * CANVAS_HEIGHT,
+      height: Number(box.dataset.actualHeight) || (Number.parseFloat(box.style.height) / 100) * CANVAS_HEIGHT,
+      visibleHeight: (Number.parseFloat(box.style.height) / 100) * CANVAS_HEIGHT,
       baseWidth: Number(box.dataset.baseWidth) || (Number.parseFloat(box.style.width) / 100) * CANVAS_WIDTH,
       maxWidth: Number(box.dataset.maxWidth) || CARD_CONTENT_WIDTH,
     },
@@ -6757,13 +7198,16 @@ function movePreviewImageResize(event) {
 
   const nextWidth = imageEditDrag.startBox.baseWidth * nextLayout.widthScale;
   const nextHeight = nextWidth * (imageEditDrag.startBox.height / imageEditDrag.startBox.width);
+  const visibleRatio = imageEditDrag.startBox.visibleHeight / Math.max(1, imageEditDrag.startBox.height);
+  const nextVisibleHeight = nextHeight * visibleRatio;
   const maxOffset = Math.max(0, imageEditDrag.startBox.maxWidth - nextWidth);
-  const nextX = nextLayout.align === "left" ? CARD_SIDE_PADDING : nextLayout.align === "right" ? CARD_SIDE_PADDING + maxOffset : CARD_SIDE_PADDING + maxOffset / 2;
+  const sidePadding = cardThemeFor(state).geometry.sidePadding;
+  const nextX = nextLayout.align === "left" ? sidePadding : nextLayout.align === "right" ? sidePadding + maxOffset : sidePadding + maxOffset / 2;
   applyImageBoxStyle(imageEditDrag.box, {
     x: nextX,
     y: imageEditDrag.startBox.y,
     width: nextWidth,
-    height: nextHeight,
+    height: nextVisibleHeight,
   });
 }
 
@@ -7157,6 +7601,7 @@ function bindEvents() {
     requestRender();
   });
   els.bgColor.addEventListener("change", () => ensureCardColorContrast("background"));
+  els.cardThemeButtons.forEach((button) => button.addEventListener("click", applyCardTheme));
   els.cardPaletteButtons.forEach((button) => button.addEventListener("click", applyCardPalette));
 
   els.inlineColor.addEventListener("input", () => {
@@ -7223,9 +7668,11 @@ function bindEvents() {
   els.aiUndo?.addEventListener("click", undoLastAiOptimization);
   els.aiOptimizeClose?.addEventListener("click", closeAiOptimizeModal);
   els.aiOptimizeCancel?.addEventListener("click", closeAiOptimizeModal);
+  els.aiOptimizeGenerate?.addEventListener("click", () => void runAiOptimization(selectedAiOptimizeMode()));
   els.aiOptimizeApply?.addEventListener("click", applyAiOptimization);
   [els.aiModeLayout, els.aiModePolish].forEach((button) => {
-    button?.addEventListener("click", () => void runAiOptimization(button.dataset.aiMode));
+    button?.addEventListener("click", () => chooseAiOptimizeMode(button.dataset.aiMode));
+    button?.addEventListener("keydown", handleAiModeKeydown);
   });
   els.aiOptimizeModal?.addEventListener("click", (event) => {
     if (event.target === els.aiOptimizeModal) closeAiOptimizeModal();
