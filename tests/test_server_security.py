@@ -265,6 +265,47 @@ class StaticFileBoundaryTests(unittest.TestCase):
         self.assertEqual(json.loads(body.decode("utf-8"))["code"], "DRAFT_VERSION_CONFLICT")
         self.assertEqual(fake_ai.calls, [])
 
+    def test_ai_preview_rejects_a_second_concurrent_provider_call(self):
+        fake_ai = FakeAILayoutService()
+        store = {
+            "activeId": "project-ai",
+            "projects": [
+                {
+                    "id": "project-ai",
+                    "updatedAt": 10,
+                    "data": {"content": "正文"},
+                }
+            ],
+        }
+        request_payload = {
+            "projectId": "project-ai",
+            "baseUpdatedAt": 10,
+            "content": "正文",
+            "mode": "polish",
+            "accentColor": "#5B5FEF",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            store_file = Path(temporary) / "project-store.json"
+            store_file.write_text(json.dumps(store), encoding="utf-8")
+            with (
+                mock.patch.object(server, "STORE_FILE", store_file),
+                mock.patch.object(server, "AI_LAYOUT", fake_ai),
+            ):
+                server.AI_OPTIMIZE_LOCK.acquire()
+                try:
+                    status, body = self.request_status(
+                        "/api/ai/optimize-layout",
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                        data=json.dumps(request_payload).encode("utf-8"),
+                    )
+                finally:
+                    server.AI_OPTIMIZE_LOCK.release()
+
+        self.assertEqual(status, 409)
+        self.assertEqual(json.loads(body.decode("utf-8"))["code"], "AI_REQUEST_IN_PROGRESS")
+        self.assertEqual(fake_ai.calls, [])
+
     def test_ai_preview_rejects_malformed_mode_and_accent_color_without_calling_provider(self):
         fake_ai = FakeAILayoutService()
         store = {

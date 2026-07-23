@@ -11,8 +11,10 @@ from ai_layout import (
     AILayoutService,
     AILayoutValidationError,
     apply_ai_layout_highlights,
+    apply_ai_polish_edits,
     parse_ai_layout_response,
     parse_ai_layout_selection_response,
+    parse_ai_polish_selection_response,
     validate_optimized_content,
 )
 
@@ -26,6 +28,22 @@ class FakeResponse:
         if isinstance(self.payload, Exception):
             raise self.payload
         return self.payload
+
+
+class FakeStreamResponse(FakeResponse):
+    def __init__(self, lines, *, status_code=200, error=None):
+        super().__init__(status_code=status_code)
+        self.lines = lines
+        self.error = error
+        self.closed = False
+
+    def iter_lines(self, *, decode_unicode=False):
+        yield from self.lines
+        if self.error:
+            raise self.error
+
+    def close(self):
+        self.closed = True
 
 
 class RecordingSession:
@@ -146,6 +164,33 @@ class AILayoutParsingTests(unittest.TestCase):
             [{"text": "逐字存在的重点", "style": "color"}],
         )
 
+    def test_polish_selection_keeps_edits_and_supported_highlights(self):
+        parsed = parse_ai_polish_selection_response(
+            json.dumps(
+                {
+                    "edits": [
+                        {"source": "原来不顺的句子", "replacement": "读起来更顺的句子"},
+                        {"source": 123, "replacement": "无效"},
+                    ],
+                    "highlights": [
+                        {"text": "读起来更顺的句子", "style": "bold"},
+                        {"text": "无效重点", "style": "rainbow"},
+                    ],
+                    "changes": ["改善表达"],
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(
+            parsed["edits"],
+            [{"source": "原来不顺的句子", "replacement": "读起来更顺的句子"}],
+        )
+        self.assertEqual(
+            parsed["highlights"],
+            [{"text": "读起来更顺的句子", "style": "bold"}],
+        )
+
 
 class AILayoutGuardrailTests(unittest.TestCase):
     def test_layout_accepts_supported_formatting_without_copy_change(self):
@@ -251,6 +296,12 @@ class AILayoutGuardrailTests(unittest.TestCase):
 
         validate_optimized_content(original, optimized, mode="polish")
 
+    def test_polish_number_guard_ignores_supported_style_color_values(self):
+        original = "Lite 39 元，重点信息保持清楚。"
+        optimized = "Lite 39 元，{{color:#5B5FEF|重点信息}}保持清楚。"
+
+        validate_optimized_content(original, optimized, mode="polish")
+
     def test_polish_rejects_changed_number_or_url(self):
         original = "39 元，见 https://example.com/a\n[[image:img_1]]"
         for candidate, code in (
@@ -261,6 +312,72 @@ class AILayoutGuardrailTests(unittest.TestCase):
                 with self.assertRaises(AILayoutValidationError) as caught:
                     validate_optimized_content(original, candidate, mode="polish")
                 self.assertEqual(caught.exception.code, code)
+
+    def test_polish_rejects_changed_chinese_quantities(self):
+        for original, candidate in (
+            ("个人版目前有三档。", "个人版目前有四档。"),
+            ("用量包有效期一个月。", "用量包有效期一个周。"),
+            ("用量包有效期 1 个月。", "用量包有效期 1 周。"),
+            ("Lite 价格 39 元。", "Lite 价格 39 美元。"),
+        ):
+            with self.subTest(original=original):
+                with self.assertRaises(AILayoutValidationError) as caught:
+                    validate_optimized_content(original, candidate, mode="polish")
+                self.assertEqual(caught.exception.code, "NUMBERS_CHANGED")
+
+    def test_polish_allows_non_numeric_wording_that_contains_yi(self):
+        validate_optimized_content(
+            "我以前一直在使用这个入口。",
+            "我以前长期使用这个入口。",
+            mode="polish",
+        )
+
+    def test_polish_rejects_runaway_expansion_or_content_loss(self):
+        original = "这是需要安全润色的正文。" * 120
+        candidates = (
+            (original * 2, "POLISH_EXPANDED_TOO_MUCH"),
+            ("只剩少量文字。", "POLISH_REMOVED_TOO_MUCH"),
+        )
+        for candidate, code in candidates:
+            with self.subTest(code=code):
+                with self.assertRaises(AILayoutValidationError) as caught:
+                    validate_optimized_content(original, candidate, mode="polish")
+                self.assertEqual(caught.exception.code, code)
+
+    def test_polish_applies_only_unique_plain_edits_that_preserve_numbers(self):
+        original = (
+            "这句话写得不太顺畅，39 元方案保持不变。\n"
+            "重复句子。重复句子。\n"
+            "[[image:img_1]]"
+        )
+        optimized, count = apply_ai_polish_edits(
+            original,
+            [
+                {
+                    "source": "这句话写得不太顺畅，39 元方案保持不变。",
+                    "replacement": "这句话读起来不够顺畅，39 元方案保持不变。",
+                },
+                {"source": "重复句子。", "replacement": "重复内容。"},
+                {
+                    "source": "这句话写得不太顺畅",
+                    "replacement": "{{color:#fff|危险样式}}",
+                },
+                {
+                    "source": "39 元方案保持不变",
+                    "replacement": "49 元方案保持不变",
+                },
+                {
+                    "source": "这句话写得不太顺畅",
+                    "replacement": "这四句话写得不太顺畅",
+                },
+                {"source": "image:img_1", "replacement": "删除图片"},
+            ],
+        )
+
+        self.assertEqual(count, 1)
+        self.assertIn("这句话读起来不够顺畅，39 元方案保持不变。", optimized)
+        self.assertIn("[[image:img_1]]", optimized)
+        validate_optimized_content(original, optimized, mode="polish")
 
 
 class AILayoutClientTests(unittest.TestCase):
@@ -318,6 +435,95 @@ class AILayoutClientTests(unittest.TestCase):
         self.assertEqual(kwargs["json"]["temperature"], 0)
         self.assertEqual(kwargs["json"]["max_tokens"], 2048)
         self.assertEqual(kwargs["timeout"], 12)
+        self.assertFalse(kwargs["stream"])
+
+    def test_polish_streams_utf8_safe_edits_with_a_bounded_token_budget(self):
+        original = "这句话不够顺畅，39 元方案见 https://example.com/plan\n[[image:img_1]]"
+        model_json = json.dumps(
+            {
+                "edits": [
+                    {
+                        "source": "这句话不够顺畅",
+                        "replacement": "这句话读起来不够顺畅",
+                    }
+                ],
+                "highlights": [
+                    {"text": "这句话读起来不够顺畅", "style": "bold"}
+                ],
+                "changes": ["改善句子节奏"],
+            },
+            ensure_ascii=False,
+        )
+        midpoint = len(model_json) // 2
+        stream_lines = [
+            "data: "
+            + json.dumps(
+                {"choices": [{"delta": {"reasoning_content": "内部思考"}}]},
+                ensure_ascii=False,
+            ),
+            "data: "
+            + json.dumps(
+                {"choices": [{"delta": {"content": model_json[:midpoint]}}]},
+                ensure_ascii=False,
+            ),
+            "data: "
+            + json.dumps(
+                {"choices": [{"delta": {"content": model_json[midpoint:]}}]},
+                ensure_ascii=False,
+            ),
+            "data: [DONE]",
+        ]
+        response = FakeStreamResponse([line.encode("utf-8") for line in stream_lines])
+        session = RecordingSession(response)
+        service = AILayoutService(enabled_config(), session=session)
+
+        result = service.optimize(original, mode="polish")
+
+        self.assertEqual(
+            result.optimized_content,
+            "**这句话读起来不够顺畅**，39 元方案见 https://example.com/plan\n[[image:img_1]]",
+        )
+        self.assertEqual(result.changes[0], "安全润色 1 处表达")
+        self.assertEqual(result.changes[1], "从原文中安全标出 1 处重点")
+        self.assertTrue(response.closed)
+        _, kwargs = session.calls[0]
+        self.assertTrue(kwargs["stream"])
+        self.assertTrue(kwargs["json"]["stream"])
+        self.assertEqual(kwargs["json"]["stream_options"], {"include_usage": True})
+        self.assertEqual(kwargs["headers"]["Accept"], "text/event-stream")
+        self.assertEqual(kwargs["timeout"], 180)
+        self.assertLessEqual(kwargs["json"]["max_tokens"], 6144)
+        self.assertIn("不要返回完整正文", kwargs["json"]["messages"][0]["content"])
+
+    def test_polish_timeout_has_a_specific_safe_error(self):
+        session = RecordingSession(error=requests.ReadTimeout("private timeout detail"))
+        service = AILayoutService(enabled_config(), session=session)
+
+        with self.assertRaises(AILayoutProviderError) as caught:
+            service.optimize("用于超时测试的合成正文", mode="polish")
+
+        self.assertEqual(caught.exception.code, "AI_PROVIDER_TIMEOUT")
+        self.assertIn("润色生成超时", str(caught.exception))
+        self.assertNotIn("private timeout detail", str(caught.exception))
+
+    def test_polish_stream_timeout_closes_response_and_keeps_the_same_error_code(self):
+        response = FakeStreamResponse(
+            [
+                "data: "
+                + json.dumps(
+                    {"choices": [{"delta": {"content": '{"optimized_content":'}}]},
+                    ensure_ascii=False,
+                )
+            ],
+            error=requests.ReadTimeout("private stream timeout detail"),
+        )
+        service = AILayoutService(enabled_config(), session=RecordingSession(response))
+
+        with self.assertRaises(AILayoutProviderError) as caught:
+            service.optimize("用于流式超时测试的合成正文", mode="polish")
+
+        self.assertEqual(caught.exception.code, "AI_PROVIDER_TIMEOUT")
+        self.assertTrue(response.closed)
 
     def test_network_error_does_not_expose_provider_or_secret_details(self):
         private_detail = "Bearer secret-value sid:private-provider-id"

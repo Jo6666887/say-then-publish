@@ -48,6 +48,7 @@ APP_HEALTH_SCHEMA = 1
 CLOUD = CloudStore.from_root(ROOT)
 AI_LAYOUT = AILayoutService.from_env()
 LOCAL_ASSETS = LocalAssetStore(ROOT, data_dir=DATA_DIR)
+AI_OPTIMIZE_LOCK = threading.Lock()
 CLOUD_SYNC_LOCK = threading.Lock()
 CLOUD_STATUS_LOCK = threading.Lock()
 CLOUD_SYNC_TIMER_LOCK = threading.Lock()
@@ -932,20 +933,32 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
                 self.send_json({"error": "正文已有新修改，请保存后重新优化", "code": "DRAFT_VERSION_CONFLICT"}, HTTPStatus.CONFLICT)
                 return
 
+            if not AI_OPTIMIZE_LOCK.acquire(blocking=False):
+                self.send_json(
+                    {
+                        "error": "上一条 AI 优化仍在生成，请稍后再试",
+                        "code": "AI_REQUEST_IN_PROGRESS",
+                    },
+                    HTTPStatus.CONFLICT,
+                )
+                return
             try:
-                result = AI_LAYOUT.optimize(content, mode=mode, accent_color=accent_color)
-            except AILayoutDisabledError as error:
-                self.send_json({"error": str(error), "code": error.code}, HTTPStatus.SERVICE_UNAVAILABLE)
-                return
-            except AILayoutValidationError as error:
-                self.send_json({"error": str(error), "code": error.code}, HTTPStatus.BAD_REQUEST)
-                return
-            except (AILayoutProviderError, AILayoutResponseError) as error:
-                self.send_json({"error": str(error), "code": error.code}, HTTPStatus.BAD_GATEWAY)
-                return
-            except AILayoutError as error:
-                self.send_json({"error": str(error), "code": error.code}, HTTPStatus.BAD_GATEWAY)
-                return
+                try:
+                    result = AI_LAYOUT.optimize(content, mode=mode, accent_color=accent_color)
+                except AILayoutDisabledError as error:
+                    self.send_json({"error": str(error), "code": error.code}, HTTPStatus.SERVICE_UNAVAILABLE)
+                    return
+                except AILayoutValidationError as error:
+                    self.send_json({"error": str(error), "code": error.code}, HTTPStatus.BAD_REQUEST)
+                    return
+                except (AILayoutProviderError, AILayoutResponseError) as error:
+                    self.send_json({"error": str(error), "code": error.code}, HTTPStatus.BAD_GATEWAY)
+                    return
+                except AILayoutError as error:
+                    self.send_json({"error": str(error), "code": error.code}, HTTPStatus.BAD_GATEWAY)
+                    return
+            finally:
+                AI_OPTIMIZE_LOCK.release()
 
             with STORE_LOCK:
                 after_store = read_store()

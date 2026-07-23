@@ -55,6 +55,7 @@ let manualSaveGeneration = 0;
 let pendingAiOptimization = null;
 let aiOptimizeReturnFocus = null;
 let aiOptimizeRequestGeneration = 0;
+let aiOptimizeAbortController = null;
 let imageReorderDrag = null;
 let imageReorderBusy = false;
 
@@ -2878,6 +2879,13 @@ function setAiOptimizeStatus(message, status = "loading") {
   els.aiOptimizeStatus.dataset.state = status;
 }
 
+function setAiOptimizeRequestBusy(busy) {
+  [els.aiModeLayout, els.aiModePolish].forEach((button) => {
+    if (button) button.disabled = Boolean(busy);
+  });
+  els.aiOptimizeModal?.setAttribute("aria-busy", String(Boolean(busy)));
+}
+
 function selectedAiOptimizeMode() {
   return els.aiModePolish?.classList.contains("active") ? "polish" : "layout";
 }
@@ -2908,9 +2916,13 @@ function renderAiChangeList(changes = []) {
 async function runAiOptimization(mode = selectedAiOptimizeMode()) {
   if (!els.aiOptimizeModal || els.aiOptimizeModal.classList.contains("hidden")) return;
   const generation = ++aiOptimizeRequestGeneration;
+  aiOptimizeAbortController?.abort();
+  const abortController = new AbortController();
+  aiOptimizeAbortController = abortController;
   const nextMode = setAiOptimizeMode(mode);
   pendingAiOptimization = null;
   els.aiOptimizeApply.disabled = true;
+  setAiOptimizeRequestBusy(true);
   els.aiAfterPreview.textContent = "正在安全生成建议，原文不会被改动…";
   renderAiChangeList(["正在识别层级、重点和适合高亮的内容…"]);
   setAiOptimizeStatus("正在保存当前版本并连接 AI…", "loading");
@@ -2924,7 +2936,10 @@ async function runAiOptimization(mode = selectedAiOptimizeMode()) {
     const before = els.content.value;
     const baseUpdatedAt = Number(project?.updatedAt || 0);
 
-    const statusResponse = await fetch(AI_OPTIMIZE_STATUS_URL, { cache: "no-store" });
+    const statusResponse = await fetch(AI_OPTIMIZE_STATUS_URL, {
+      cache: "no-store",
+      signal: abortController.signal,
+    });
     const aiStatus = await statusResponse.json().catch(() => ({}));
     if (generation !== aiOptimizeRequestGeneration || els.aiOptimizeModal.classList.contains("hidden")) return;
     if (!statusResponse.ok || aiStatus.enabled !== true) {
@@ -2942,6 +2957,7 @@ async function runAiOptimization(mode = selectedAiOptimizeMode()) {
         projectId: state.currentProjectId,
         baseUpdatedAt,
       }),
+      signal: abortController.signal,
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || `AI 优化失败（${response.status}）`);
@@ -2970,17 +2986,24 @@ async function runAiOptimization(mode = selectedAiOptimizeMode()) {
     els.aiOptimizeApply.disabled = false;
     setAiOptimizeStatus(`建议已生成 · ${payload.model || "Kimi"} · 确认后才会替换正文`, "success");
   } catch (error) {
+    if (error?.name === "AbortError") return;
     if (generation !== aiOptimizeRequestGeneration) return;
     pendingAiOptimization = null;
     els.aiAfterPreview.textContent = "本次没有改动正文。解决提示中的问题后，可以重新选择优化方式重试。";
     renderAiChangeList([error?.message || "AI 优化暂时不可用"]);
     setAiOptimizeStatus(error?.message || "AI 优化暂时不可用", "error");
+  } finally {
+    if (aiOptimizeAbortController === abortController) aiOptimizeAbortController = null;
+    if (generation === aiOptimizeRequestGeneration) setAiOptimizeRequestBusy(false);
   }
 }
 
 function closeAiOptimizeModal() {
   aiOptimizeRequestGeneration += 1;
+  aiOptimizeAbortController?.abort();
+  aiOptimizeAbortController = null;
   pendingAiOptimization = null;
+  setAiOptimizeRequestBusy(false);
   els.aiOptimizeModal?.classList.add("hidden");
   aiOptimizeReturnFocus?.focus?.();
   aiOptimizeReturnFocus = null;
