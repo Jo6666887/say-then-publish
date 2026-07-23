@@ -109,6 +109,10 @@
               <i data-lucide="undo-2"></i>
               <span>撤回 AI</span>
             </button>
+            <button id="illustrationBtn" class="ai-toolbar-button illustration-toolbar-button" type="button" title="分析正文并从网络图库寻找配图；不会修改文字">
+              <i data-lucide="images"></i>
+              <span>一键配图</span>
+            </button>
             <label class="tool-button file-tool" title="插入图片" aria-label="插入图片">
               <i data-lucide="image-plus"></i>
               <input id="contentImageInput" type="file" accept="image/*" multiple tabindex="-1" />
@@ -273,6 +277,11 @@
                         <span><strong>观点杂志</strong><small>宋体正文 · 底部署名</small></span>
                       </button>
                     </div>
+                    <button id="themeLibraryBtn" class="secondary-button theme-library-open-button" type="button">
+                      <i data-lucide="layout-template"></i>
+                      打开完整主题库
+                      <span>15 套</span>
+                    </button>
                   </section>
                   <section class="card-appearance-settings wide" aria-labelledby="cardAppearanceTitle">
                     <div class="settings-section-heading">
@@ -496,6 +505,85 @@
             <i data-lucide="check"></i>
             <span>应用到正文</span>
           </button>
+        </div>
+      </div>
+    </div>
+
+    <div id="illustrationModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="illustrationTitle" aria-describedby="illustrationDescription">
+      <div class="modal-card illustration-card">
+        <div class="modal-head">
+          <div>
+            <h3 id="illustrationTitle">一键配图</h3>
+            <p id="illustrationDescription">只分析段落、查找网络图片；确认后仅插入图片，不润色、不删改任何文字。</p>
+          </div>
+          <button id="illustrationCloseBtn" class="icon-button ghost" type="button" title="关闭一键配图" aria-label="关闭一键配图">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <div class="illustration-body">
+          <div id="illustrationStatus" class="ai-optimize-status" role="status" aria-live="polite">设置配图数量后开始查找；当前正文不会被改动。</div>
+          <div class="illustration-controls" aria-label="配图查找设置">
+            <label>
+              配图数量
+              <select id="illustrationCountSelect">
+                <option value="1">1 张</option>
+                <option value="2" selected>2 张</option>
+                <option value="3">3 张</option>
+              </select>
+            </label>
+            <label>
+              图源
+              <select id="illustrationProviderSelect">
+                <option value="auto" selected>自动选择可靠图库</option>
+                <option value="wikimedia">Wikimedia Commons</option>
+                <option value="pexels">Pexels（需服务端 Key）</option>
+              </select>
+            </label>
+            <div class="illustration-safety-note">
+              <i data-lucide="shield-check"></i>
+              <span>点击开始后，只把少量适合配图的正文片段交给本机已配置的 AI 生成通用英文搜索词；图库只收到搜索词。AI 不可用时由本机提取通用主题词，不发送正文原句。</span>
+            </div>
+          </div>
+          <div id="illustrationEmpty" class="illustration-empty">
+            <i data-lucide="image"></i>
+            <strong>尚未查找配图</strong>
+            <span>点击“开始找图”，系统会为适合插图的段落生成搜索词与候选图片。</span>
+          </div>
+          <div id="illustrationResults" class="illustration-results" aria-live="polite"></div>
+        </div>
+        <div class="ai-optimize-actions illustration-actions">
+          <button id="illustrationCancelBtn" class="secondary-button" type="button">关闭（不插入）</button>
+          <button id="illustrationSearchBtn" class="primary-button" type="button">
+            <i data-lucide="search"></i>
+            <span>开始找图</span>
+          </button>
+          <button id="illustrationApplyBtn" class="primary-button" type="button" disabled hidden>
+            <i data-lucide="image-down"></i>
+            <span>插入选中图片</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div id="themeLibraryModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="themeLibraryTitle" aria-describedby="themeLibraryDescription">
+      <div class="modal-card theme-library-card">
+        <div class="modal-head">
+          <div>
+            <h3 id="themeLibraryTitle">卡片主题库</h3>
+            <p id="themeLibraryDescription">主题只改变画布结构、字体与配色，不会修改正文，也不会调整图片顺序。</p>
+          </div>
+          <button id="themeLibraryCloseBtn" class="icon-button ghost" type="button" title="关闭主题库" aria-label="关闭主题库">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <div class="theme-library-body">
+          <div class="theme-library-filters" role="group" aria-label="主题分组">
+            <button class="secondary-button active" type="button" data-theme-filter="all" aria-pressed="true">全部</button>
+            <button class="secondary-button" type="button" data-theme-filter="native" aria-pressed="false">原有风格</button>
+            <button class="secondary-button" type="button" data-theme-filter="editorial" aria-pressed="false">纸墨杂志</button>
+            <button class="secondary-button" type="button" data-theme-filter="swiss" aria-pressed="false">瑞士网格</button>
+          </div>
+          <div id="themeLibraryGrid" class="theme-library-grid" aria-live="polite"></div>
         </div>
       </div>
     </div>

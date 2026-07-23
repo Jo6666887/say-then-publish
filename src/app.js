@@ -31,6 +31,10 @@ const CLOUD_STATUS_URL = "/api/cloud-status";
 const CLOUD_SYNC_URL = "/api/cloud-sync";
 const AI_OPTIMIZE_STATUS_URL = "/api/ai/status";
 const AI_OPTIMIZE_URL = "/api/ai/optimize-layout";
+const ILLUSTRATION_STATUS_URL = "/api/illustrations/status";
+const ILLUSTRATION_SEARCH_URL = "/api/illustrations/search";
+const ILLUSTRATION_IMPORT_URL = "/api/illustrations/import";
+const ILLUSTRATION_MAX_TOTAL_BYTES = 12 * 1024 * 1024;
 const ASSET_LIBRARY_URL = "/api/assets";
 const MAX_DECODED_IMAGE_CACHE = 64;
 const MAX_PROJECTS = 24;
@@ -57,6 +61,13 @@ let aiOptimizeReturnFocus = null;
 let aiOptimizeRequestGeneration = 0;
 let aiOptimizeAbortController = null;
 let aiOptimizeUiState = "closed";
+let illustrationReturnFocus = null;
+let illustrationRequestGeneration = 0;
+let illustrationAbortController = null;
+let illustrationUiState = "closed";
+let pendingIllustrationSearch = null;
+let themeLibraryReturnFocus = null;
+let themeLibraryFilter = "all";
 let imageReorderDrag = null;
 let imageReorderBusy = false;
 
@@ -125,6 +136,22 @@ const els = {
   aiOptimizeCancel: $("#aiOptimizeCancelBtn"),
   aiOptimizeGenerate: $("#aiOptimizeGenerateBtn"),
   aiOptimizeApply: $("#aiOptimizeApplyBtn"),
+  illustration: $("#illustrationBtn"),
+  illustrationModal: $("#illustrationModal"),
+  illustrationClose: $("#illustrationCloseBtn"),
+  illustrationCancel: $("#illustrationCancelBtn"),
+  illustrationStatus: $("#illustrationStatus"),
+  illustrationCount: $("#illustrationCountSelect"),
+  illustrationProvider: $("#illustrationProviderSelect"),
+  illustrationEmpty: $("#illustrationEmpty"),
+  illustrationResults: $("#illustrationResults"),
+  illustrationSearch: $("#illustrationSearchBtn"),
+  illustrationApply: $("#illustrationApplyBtn"),
+  themeLibrary: $("#themeLibraryBtn"),
+  themeLibraryModal: $("#themeLibraryModal"),
+  themeLibraryClose: $("#themeLibraryCloseBtn"),
+  themeLibraryGrid: $("#themeLibraryGrid"),
+  themeLibraryFilters: document.querySelectorAll("[data-theme-filter]"),
   projectHistory: $("#projectHistory"),
   historyFilterButtons: document.querySelectorAll("[data-history-filter]"),
   panelResizers: document.querySelectorAll("[data-panel-resize]"),
@@ -308,9 +335,105 @@ const CARD_PALETTES = {
 
 const CARD_THEME_DEFAULT = "social-clean";
 
+function createEditorialCardTheme({
+  id,
+  label,
+  description,
+  textColor,
+  accentColor,
+  bgColor,
+  secondaryColor,
+  dark = false,
+}) {
+  return {
+    id,
+    label,
+    description,
+    group: "editorial",
+    family: "editorial",
+    previewColors: [bgColor, textColor, accentColor],
+    backgroundStyle: dark ? "midnight-paper" : "paper-wash",
+    secondaryColor,
+    identityPlacement: "bottom",
+    geometry: { sidePadding: 58, topWithAuthor: 78, topWithoutAuthor: 78, bottom: 1014 },
+    identity: { x: 58, y: 1062, avatarSize: 36, nameSize: 18, handleSize: 15 },
+    typography: {
+      h1: { scale: 1.45, lineHeight: 1.42, weight: 500, marginTop: 27, marginBottom: 13, headingFont: "zh-song" },
+      h2: { scale: 1.18, lineHeight: 1.5, weight: 520, marginTop: 24, marginBottom: 8, headingFont: "zh-song" },
+      h3: { scale: 1.05, lineHeight: 1.54, weight: 580, marginTop: 19, marginBottom: 6, headingFont: "zh-song" },
+      paragraph: { marginTop: 8 },
+    },
+    imageRadius: 2,
+    emphasis: "editorial",
+    pageNumber: "bottom-right",
+    footer: "author",
+    openingQuote: true,
+    defaults: {
+      textColor,
+      accentColor,
+      bgColor,
+      fontSize: 30,
+      lineHeight: 1.78,
+      zhFont: "zh-song",
+      enFont: "en-serif",
+      imageHeight: 430,
+      headerMode: "every",
+    },
+  };
+}
+
+function createSwissCardTheme({
+  id,
+  label,
+  description,
+  accentColor,
+  accentOn,
+}) {
+  return {
+    id,
+    label,
+    description,
+    group: "swiss",
+    family: "swiss",
+    previewColors: ["#fafaf8", "#0a0a0a", accentColor],
+    backgroundStyle: "swiss-grid",
+    accentOn,
+    identityPlacement: "top",
+    geometry: { sidePadding: 54, topWithAuthor: 142, topWithoutAuthor: 60, bottom: 1078 },
+    identity: { x: 54, y: 42, avatarSize: 56, nameSize: 23, handleSize: 18, accentName: false },
+    typography: {
+      h1: { scale: 1.58, lineHeight: 1.28, weight: 300, marginTop: 28, marginBottom: 15 },
+      h2: { scale: 1.22, lineHeight: 1.42, weight: 380, marginTop: 24, marginBottom: 9 },
+      h3: { scale: 1.08, lineHeight: 1.48, weight: 580, marginTop: 18, marginBottom: 6 },
+      paragraph: { marginTop: 7 },
+    },
+    imageRadius: 0,
+    emphasis: "swiss",
+    pageNumber: "top-right",
+    footer: "hairline",
+    openingQuote: false,
+    defaults: {
+      textColor: "#0a0a0a",
+      accentColor,
+      bgColor: "#fafaf8",
+      fontSize: 30,
+      lineHeight: 1.68,
+      zhFont: "zh-system",
+      enFont: "en-system",
+      imageHeight: 470,
+      headerMode: "first",
+    },
+  };
+}
+
 const CARD_THEMES = {
   "social-clean": {
     label: "社交原生",
+    description: "熟悉的社交卡片结构，作者信息置顶。",
+    group: "native",
+    family: "social",
+    previewColors: ["#ffffff", "#202938", "#2563eb"],
+    backgroundStyle: "flat",
     identityPlacement: "top",
     geometry: { sidePadding: 42, topWithAuthor: 158, topWithoutAuthor: 42, bottom: 1090 },
     identity: { x: 42, y: 38, avatarSize: 82, nameSize: 30, handleSize: 29 },
@@ -338,6 +461,11 @@ const CARD_THEMES = {
   },
   "creator-white": {
     label: "创作者白",
+    description: "轻盈白底、橙色作者名与右上页码。",
+    group: "native",
+    family: "social",
+    previewColors: ["#ffffff", "#282824", "#ef6b35"],
+    backgroundStyle: "flat",
     identityPlacement: "top",
     geometry: { sidePadding: 52, topWithAuthor: 150, topWithoutAuthor: 58, bottom: 1078 },
     identity: { x: 52, y: 42, avatarSize: 64, nameSize: 25, handleSize: 20, accentName: true },
@@ -365,6 +493,11 @@ const CARD_THEMES = {
   },
   "highlight-note": {
     label: "荧光笔记",
+    description: "暖白纸张与马克笔式重点，适合教程清单。",
+    group: "native",
+    family: "social",
+    previewColors: ["#fffdf7", "#2d2b25", "#6f7f29"],
+    backgroundStyle: "flat",
     identityPlacement: "top",
     geometry: { sidePadding: 50, topWithAuthor: 150, topWithoutAuthor: 56, bottom: 1072 },
     identity: { x: 50, y: 42, avatarSize: 64, nameSize: 25, handleSize: 20, accentName: true },
@@ -392,6 +525,11 @@ const CARD_THEMES = {
   },
   "minimal-opinion": {
     label: "极简观点",
+    description: "克制留白与粗细对比，突出短观点。",
+    group: "native",
+    family: "social",
+    previewColors: ["#ffffff", "#292823", "#292823"],
+    backgroundStyle: "flat",
     identityPlacement: "top",
     geometry: { sidePadding: 64, topWithAuthor: 154, topWithoutAuthor: 64, bottom: 1068 },
     identity: { x: 64, y: 44, avatarSize: 62, nameSize: 24, handleSize: 19 },
@@ -419,6 +557,11 @@ const CARD_THEMES = {
   },
   magazine: {
     label: "观点杂志",
+    description: "原有宋体长文模板，底部保留作者署名。",
+    group: "native",
+    family: "social",
+    previewColors: ["#fffdfa", "#2f2b28", "#4f7d43"],
+    backgroundStyle: "flat",
     identityPlacement: "bottom",
     geometry: { sidePadding: 58, topWithAuthor: 86, topWithoutAuthor: 86, bottom: 1018 },
     identity: { x: 58, y: 1060, avatarSize: 38, nameSize: 19, handleSize: 16 },
@@ -445,6 +588,89 @@ const CARD_THEMES = {
       headerMode: "every",
     },
   },
+  "paper-ink": createEditorialCardTheme({
+    id: "paper-ink",
+    label: "纸墨经典",
+    description: "黑墨与暖纸，适合商业评论、AI 随笔与产品思考。",
+    textColor: "#111111",
+    accentColor: "#31302d",
+    bgColor: "#f3f0e8",
+    secondaryColor: "#e5dfd2",
+  }),
+  "porcelain-tech": createEditorialCardTheme({
+    id: "porcelain-tech",
+    label: "瓷蓝研究",
+    description: "冷静瓷白与深蓝，适合科技、研究、数据与 AI。",
+    textColor: "#10243f",
+    accentColor: "#35628f",
+    bgColor: "#f1f4f6",
+    secondaryColor: "#dce5ed",
+  }),
+  "forest-note": createEditorialCardTheme({
+    id: "forest-note",
+    label: "森林手记",
+    description: "柔暖纸色与森林绿，适合自然、户外与生活观察。",
+    textColor: "#17281e",
+    accentColor: "#356c50",
+    bgColor: "#f4f1e8",
+    secondaryColor: "#d9e2d7",
+  }),
+  "kraft-memory": createEditorialCardTheme({
+    id: "kraft-memory",
+    label: "牛皮记忆",
+    description: "旧纸与棕墨质感，适合手作、阅读、记忆和人物故事。",
+    textColor: "#2b2015",
+    accentColor: "#9a5c32",
+    bgColor: "#ecddc4",
+    secondaryColor: "#d8bd99",
+  }),
+  "dune-gallery": createEditorialCardTheme({
+    id: "dune-gallery",
+    label: "沙丘画廊",
+    description: "低饱和沙色，适合作品集、设计与物件研究。",
+    textColor: "#211c16",
+    accentColor: "#846e4d",
+    bgColor: "#efe4cf",
+    secondaryColor: "#d7c6aa",
+  }),
+  "midnight-gilt": createEditorialCardTheme({
+    id: "midnight-gilt",
+    label: "午夜鎏金",
+    description: "唯一深色纸墨主题，适合夜景、影视与暗色题材。",
+    textColor: "#eee3cf",
+    accentColor: "#d4a552",
+    bgColor: "#100f0d",
+    secondaryColor: "#2b2218",
+    dark: true,
+  }),
+  "swiss-blue": createSwissCardTheme({
+    id: "swiss-blue",
+    label: "瑞士蓝",
+    description: "严格网格与高纯度蓝，适合 AI、产品、工程与方法论。",
+    accentColor: "#123bb6",
+    accentOn: "#ffffff",
+  }),
+  "swiss-yellow": createSwissCardTheme({
+    id: "swiss-yellow",
+    label: "瑞士柠黄",
+    description: "高亮黄色与黑色大字，适合年轻消费、零售和运动。",
+    accentColor: "#f3cf00",
+    accentOn: "#0a0a0a",
+  }),
+  "swiss-green": createSwissCardTheme({
+    id: "swiss-green",
+    label: "瑞士新绿",
+    description: "现代荧光绿，适合健康、生态、未来与新兴科技。",
+    accentColor: "#b9db16",
+    accentOn: "#0a0a0a",
+  }),
+  "swiss-orange": createSwissCardTheme({
+    id: "swiss-orange",
+    label: "瑞士安全橙",
+    description: "高警示橙色，适合风险、纠偏、工业与决策信息。",
+    accentColor: "#f26a3d",
+    accentOn: "#ffffff",
+  }),
 };
 
 function normalizeCardTheme(value) {
@@ -940,7 +1166,7 @@ function syncCardPaletteControls() {
 
 function syncCardThemeControls() {
   const currentTheme = normalizeCardTheme(state.cardTheme);
-  els.cardThemeButtons.forEach((button) => {
+  document.querySelectorAll("[data-card-theme]").forEach((button) => {
     const active = button.dataset.cardTheme === currentTheme;
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
@@ -951,8 +1177,8 @@ function flushAppearanceSaveIfHydrated() {
   if (state.localDatabaseHydrated) flushStateSave();
 }
 
-function applyCardTheme(event) {
-  const themeId = normalizeCardTheme(event.currentTarget.dataset.cardTheme);
+function applyCardThemeId(value) {
+  const themeId = normalizeCardTheme(value);
   const theme = CARD_THEMES[themeId];
   if (!theme) return;
   state.cardTheme = themeId;
@@ -972,6 +1198,98 @@ function applyCardTheme(event) {
   requestRender();
   flushAppearanceSaveIfHydrated();
   els.status.textContent = `已应用「${theme.label}」模板；正文和图片顺序未改变，模板将随当前项目自动保存`;
+}
+
+function applyCardTheme(event) {
+  applyCardThemeId(event.currentTarget.dataset.cardTheme);
+}
+
+function renderThemeLibrary(filter = themeLibraryFilter) {
+  if (!els.themeLibraryGrid) return;
+  themeLibraryFilter = ["all", "native", "editorial", "swiss"].includes(filter) ? filter : "all";
+  const entries = Object.entries(CARD_THEMES).filter(([, theme]) =>
+    themeLibraryFilter === "all" || theme.group === themeLibraryFilter,
+  );
+  const currentTheme = normalizeCardTheme(state.cardTheme);
+  els.themeLibraryGrid.replaceChildren(
+    ...entries.map(([themeId, theme]) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "theme-library-item";
+      button.dataset.cardTheme = themeId;
+      const active = themeId === currentTheme;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+
+      const preview = document.createElement("span");
+      preview.className = `theme-library-preview theme-library-preview-${theme.family || "social"}`;
+      preview.setAttribute("aria-hidden", "true");
+      const colors = Array.isArray(theme.previewColors) ? theme.previewColors : [
+        theme.defaults.bgColor,
+        theme.defaults.textColor,
+        theme.defaults.accentColor,
+      ];
+      preview.style.setProperty("--theme-paper", colors[0]);
+      preview.style.setProperty("--theme-ink", colors[1]);
+      preview.style.setProperty("--theme-accent", colors[2]);
+      preview.append(document.createElement("i"), document.createElement("b"), document.createElement("em"));
+
+      const copy = document.createElement("span");
+      copy.className = "theme-library-copy";
+      const heading = document.createElement("span");
+      heading.className = "theme-library-item-heading";
+      const name = document.createElement("strong");
+      name.textContent = theme.label;
+      const group = document.createElement("small");
+      group.textContent = theme.group === "editorial" ? "纸墨" : theme.group === "swiss" ? "瑞士" : "原有";
+      heading.append(name, group);
+      const description = document.createElement("span");
+      description.className = "theme-library-description";
+      description.textContent = theme.description || "卡片视觉主题";
+      const swatches = document.createElement("span");
+      swatches.className = "theme-library-swatches";
+      colors.forEach((color) => {
+        const swatch = document.createElement("i");
+        swatch.style.background = color;
+        swatches.append(swatch);
+      });
+      copy.append(heading, description, swatches);
+      button.append(preview, copy);
+      return button;
+    }),
+  );
+  els.themeLibraryFilters.forEach((button) => {
+    const active = button.dataset.themeFilter === themeLibraryFilter;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
+function openThemeLibrary() {
+  themeLibraryReturnFocus = document.activeElement;
+  renderThemeLibrary("all");
+  els.workspace?.setAttribute("inert", "");
+  els.themeLibraryModal?.classList.remove("hidden");
+  els.themeLibraryFilters[0]?.focus();
+}
+
+function closeThemeLibrary() {
+  els.themeLibraryModal?.classList.add("hidden");
+  els.workspace?.removeAttribute("inert");
+  themeLibraryReturnFocus?.focus?.();
+  themeLibraryReturnFocus = null;
+}
+
+function handleThemeLibrarySelection(event) {
+  const button = event.target.closest("[data-card-theme]");
+  if (!button || !els.themeLibraryGrid?.contains(button)) return;
+  applyCardThemeId(button.dataset.cardTheme);
+  closeThemeLibrary();
+}
+
+function trapThemeLibraryFocus(event) {
+  if (event.key !== "Tab" || els.themeLibraryModal?.classList.contains("hidden")) return;
+  trapModalFocus(event, els.themeLibraryModal);
 }
 
 function applyCardPalette(event) {
@@ -1626,11 +1944,19 @@ async function loadProjectStoreFromSharedServer() {
   }
 }
 
-async function saveProjectStoreToSharedServer(snapshot) {
+async function saveProjectStoreToSharedServer(
+  snapshot,
+  { expectedProjectId = "", expectedUpdatedAt = 0 } = {},
+) {
   try {
+    const headers = { "Content-Type": "application/json" };
+    if (expectedProjectId && Number(expectedUpdatedAt) > 0) {
+      headers["X-WTP-Expected-Project-Id"] = expectedProjectId;
+      headers["X-WTP-Expected-Project-Updated-At"] = String(Number(expectedUpdatedAt));
+    }
     const response = await fetch(SHARED_PROJECT_STORE_URL, {
       method: "PUT",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(snapshot),
     });
     if (!response.ok) throw new Error(`共享草稿库写入失败（${response.status}）`);
@@ -3276,7 +3602,12 @@ function closeAiOptimizeModal() {
 
 function trapAiOptimizeModalFocus(event) {
   if (event.key !== "Tab" || els.aiOptimizeModal?.classList.contains("hidden")) return;
-  const focusable = [...els.aiOptimizeModal.querySelectorAll(
+  trapModalFocus(event, els.aiOptimizeModal);
+}
+
+function trapModalFocus(event, modal) {
+  if (!modal) return;
+  const focusable = [...modal.querySelectorAll(
     'button:not([disabled]):not([hidden]), [href], input:not([disabled]):not([hidden]), select:not([disabled]):not([hidden]), textarea:not([disabled]):not([hidden]), [tabindex]:not([tabindex="-1"]):not([hidden])',
   )].filter((element) => element.getClientRects().length > 0);
   if (!focusable.length) {
@@ -3285,10 +3616,10 @@ function trapAiOptimizeModalFocus(event) {
   }
   const first = focusable[0];
   const last = focusable[focusable.length - 1];
-  if (event.shiftKey && (document.activeElement === first || !els.aiOptimizeModal.contains(document.activeElement))) {
+  if (event.shiftKey && (document.activeElement === first || !modal.contains(document.activeElement))) {
     event.preventDefault();
     last.focus();
-  } else if (!event.shiftKey && (document.activeElement === last || !els.aiOptimizeModal.contains(document.activeElement))) {
+  } else if (!event.shiftKey && (document.activeElement === last || !modal.contains(document.activeElement))) {
     event.preventDefault();
     first.focus();
   }
@@ -3352,6 +3683,622 @@ async function undoLastAiOptimization() {
   state.lastAiRevision = null;
   await applyProgrammaticContent(revision.before, "已撤回本次 AI 优化");
   syncAiUndoAvailability();
+}
+
+function collectIllustrationBlocks(content) {
+  const source = String(content || "");
+  const lines = source.split("\n");
+  const blocks = [];
+  let offset = 0;
+  let blockStart = null;
+  let blockEnd = null;
+  let inFence = false;
+
+  const flush = () => {
+    if (blockStart === null || blockEnd === null || blockEnd <= blockStart) {
+      blockStart = null;
+      blockEnd = null;
+      return;
+    }
+    const exactText = source.slice(blockStart, blockEnd);
+    const visibleText = exactText
+      .replace(/\[\[image:[^\]]+\]\]/g, "")
+      .replace(/\{\{(?:color|bg):#[0-9a-fA-F]{3,8}\|([\s\S]*?)\}\}/g, "$1")
+      .replace(/[*_`>#-]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (
+      visibleText.length >= 6
+      && exactText.length <= 2400
+      && !exactText.split("\n").every((line) => line.includes("|"))
+    ) {
+      const index = blocks.length;
+      blocks.push({
+        blockId: `block-${index}`,
+        text: visibleText.slice(0, 520),
+        exactText,
+        start: blockStart,
+        end: blockEnd,
+      });
+    }
+    blockStart = null;
+    blockEnd = null;
+  };
+
+  lines.forEach((line, index) => {
+    const lineStart = offset;
+    const lineEnd = lineStart + line.length;
+    offset = lineEnd + (index < lines.length - 1 ? 1 : 0);
+    const trimmed = line.trim();
+
+    if (/^(?:```|~~~)/.test(trimmed)) {
+      flush();
+      inFence = !inFence;
+      return;
+    }
+    if (inFence || !trimmed) {
+      flush();
+      return;
+    }
+    if (/^\[\[image:[^\]]+\]\]$/.test(trimmed) || isMarkdownTableDivider(trimmed)) {
+      flush();
+      return;
+    }
+    if (blockStart === null) blockStart = lineStart;
+    blockEnd = lineEnd;
+  });
+  flush();
+  return blocks.slice(0, 24);
+}
+
+function setIllustrationStatus(message, status = "ready") {
+  if (!els.illustrationStatus) return;
+  els.illustrationStatus.textContent = message;
+  els.illustrationStatus.dataset.state = status;
+}
+
+function setIllustrationUiState(nextState) {
+  illustrationUiState = nextState;
+  if (els.illustrationModal) els.illustrationModal.dataset.illustrationState = nextState;
+  const busy = ["saving", "searching", "importing"].includes(nextState);
+  if (els.illustrationSearch) {
+    els.illustrationSearch.disabled = busy;
+    const label = els.illustrationSearch.querySelector("span");
+    if (label) {
+      label.textContent = nextState === "saving"
+        ? "正在保存…"
+        : nextState === "searching"
+          ? "正在找图…"
+          : nextState === "importing"
+            ? "正在下载入库…"
+            : pendingIllustrationSearch
+              ? "重新找图"
+              : "开始找图";
+    }
+  }
+  if (els.illustrationApply) {
+    const hasSelection = Boolean(
+      pendingIllustrationSearch
+      && els.illustrationResults?.querySelector('input[data-candidate-id]:checked'),
+    );
+    els.illustrationApply.hidden = !pendingIllustrationSearch;
+    els.illustrationApply.disabled = busy || !hasSelection;
+  }
+  if (els.illustrationClose) els.illustrationClose.disabled = nextState === "importing";
+  if (els.illustrationCancel) els.illustrationCancel.disabled = nextState === "importing";
+  if (els.illustrationCount) els.illustrationCount.disabled = busy;
+  if (els.illustrationProvider) els.illustrationProvider.disabled = busy;
+  els.illustrationModal?.setAttribute("aria-busy", String(busy));
+}
+
+function illustrationErrorMessage(payload, fallback) {
+  if (typeof payload?.error === "string" && payload.error.trim()) return payload.error.trim();
+  if (typeof payload?.error?.message === "string" && payload.error.message.trim()) return payload.error.message.trim();
+  return fallback;
+}
+
+function normalizeCandidateCreator(candidate) {
+  if (typeof candidate?.creator === "string") return candidate.creator;
+  if (typeof candidate?.creator?.name === "string") return candidate.creator.name;
+  return "来源作者未注明";
+}
+
+function normalizeCandidateLicense(candidate) {
+  if (typeof candidate?.license === "string") return candidate.license;
+  if (typeof candidate?.license?.name === "string") return candidate.license.name;
+  return "许可信息待核对";
+}
+
+function renderIllustrationResults(payload, blocks) {
+  const planItems = Array.isArray(payload?.plan?.items) ? payload.plan.items : [];
+  const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
+  const blocksById = new Map(blocks.map((block) => [block.blockId, block]));
+  const groups = planItems
+    .map((item) => ({
+      item,
+      block: blocksById.get(item.blockId),
+      candidates: candidates.filter((candidate) => candidate.blockId === item.blockId),
+    }))
+    .filter((group) => group.block && group.candidates.length);
+
+  if (!groups.length) {
+    pendingIllustrationSearch = null;
+    els.illustrationResults?.replaceChildren();
+    els.illustrationEmpty?.classList.remove("hidden");
+    setIllustrationStatus("没有找到足够可靠的候选图；可换一个图源或减少配图数量后重试。", "error");
+    setIllustrationUiState("error");
+    return false;
+  }
+
+  pendingIllustrationSearch = {
+    projectId: state.currentProjectId,
+    baseUpdatedAt: Number(findHistoryProject(state.currentProjectId)?.updatedAt || 0),
+    beforeContent: els.content.value,
+    blocksById,
+    planItems,
+    candidates,
+    expiresAt: payload.expiresAt || null,
+  };
+
+  const fragment = document.createDocumentFragment();
+  groups.forEach((group, groupIndex) => {
+    const section = document.createElement("section");
+    section.className = "illustration-slot";
+    const head = document.createElement("div");
+    head.className = "illustration-slot-head";
+    const slotCopy = document.createElement("div");
+    const heading = document.createElement("h4");
+    heading.textContent = `建议位置 ${groupIndex + 1}`;
+    const reason = document.createElement("p");
+    reason.textContent = group.item.reason || "在这段之后加入图片，帮助读者理解当前内容。";
+    slotCopy.append(heading, reason);
+    const query = document.createElement("span");
+    query.className = "illustration-query";
+    query.textContent = `搜索词：${group.item.query || "相关图片"}`;
+    head.append(slotCopy, query);
+
+    const context = document.createElement("blockquote");
+    context.textContent = group.block.text;
+    const grid = document.createElement("div");
+    grid.className = "illustration-candidate-grid";
+
+    group.candidates.forEach((candidate, candidateIndex) => {
+      const label = document.createElement("label");
+      label.className = "illustration-candidate";
+      const input = document.createElement("input");
+      input.type = "radio";
+      input.name = `illustration-slot-${groupIndex}`;
+      input.value = candidate.id;
+      input.dataset.candidateId = candidate.id;
+      input.dataset.blockId = group.item.blockId;
+      input.checked = candidateIndex === 0;
+      const image = document.createElement("img");
+      image.src = candidate.previewUrl || candidate.thumbnailUrl || "";
+      image.alt = candidate.title || "网络配图候选";
+      image.loading = "lazy";
+      const copy = document.createElement("span");
+      copy.className = "illustration-candidate-copy";
+      const title = document.createElement("strong");
+      title.textContent = candidate.title || "网络图片";
+      const meta = document.createElement("small");
+      meta.textContent = `${normalizeCandidateCreator(candidate)} · ${normalizeCandidateLicense(candidate)}`;
+      const source = document.createElement("a");
+      source.href = candidate.sourcePageUrl || "#";
+      source.target = "_blank";
+      source.rel = "noreferrer noopener";
+      source.textContent = `${candidate.provider || "图库"} 来源页`;
+      source.addEventListener("click", (event) => event.stopPropagation());
+      copy.append(title, meta, source);
+      label.append(input, image, copy);
+      grid.append(label);
+    });
+
+    const skip = document.createElement("label");
+    skip.className = "illustration-skip";
+    const skipInput = document.createElement("input");
+    skipInput.type = "radio";
+    skipInput.name = `illustration-slot-${groupIndex}`;
+    skipInput.value = "";
+    const skipText = document.createElement("span");
+    skipText.textContent = "跳过这个位置";
+    skip.append(skipInput, skipText);
+    section.append(head, context, grid, skip);
+    fragment.append(section);
+  });
+
+  els.illustrationResults?.replaceChildren(fragment);
+  els.illustrationEmpty?.classList.add("hidden");
+  els.illustrationResults?.querySelectorAll('input[type="radio"]').forEach((input) => {
+    input.addEventListener("change", () => setIllustrationUiState("ready"));
+  });
+  if (window.lucide) window.lucide.createIcons();
+  setIllustrationStatus(
+    `已找到 ${groups.length} 个插图位置。请选择候选图；确认前正文和资源库都不会改变。`,
+    "success",
+  );
+  setIllustrationUiState("ready");
+  return true;
+}
+
+function updateIllustrationProviderOptions(status) {
+  const providers = Array.isArray(status?.providers) ? status.providers : [];
+  const enabledById = new Map(providers.map((provider) => [provider.id, provider.enabled !== false]));
+  [...(els.illustrationProvider?.options || [])].forEach((option) => {
+    if (option.value === "auto") return;
+    if (enabledById.has(option.value)) option.disabled = !enabledById.get(option.value);
+  });
+  if (els.illustrationProvider?.selectedOptions[0]?.disabled) {
+    els.illustrationProvider.value = "auto";
+  }
+}
+
+async function runIllustrationSearch() {
+  if (illustrationUiState === "saving" || illustrationUiState === "searching" || illustrationUiState === "importing") return;
+  const blocks = collectIllustrationBlocks(els.content.value);
+  if (!blocks.length) {
+    setIllustrationStatus("没有找到适合插图的正文段落；表格、代码和已有图片不会作为插入点。", "error");
+    return;
+  }
+  const generation = ++illustrationRequestGeneration;
+  illustrationAbortController?.abort();
+  const abortController = new AbortController();
+  illustrationAbortController = abortController;
+  pendingIllustrationSearch = null;
+  els.illustrationResults?.replaceChildren();
+  els.illustrationEmpty?.classList.remove("hidden");
+  setIllustrationUiState("saving");
+  setIllustrationStatus("正在保存当前版本；保存完成后才会分析搜索词。", "loading");
+
+  try {
+    saveState();
+    const persisted = state.localDatabaseHydrated ? await flushProjectStoreToIndexedDb() : null;
+    if (generation !== illustrationRequestGeneration) return;
+    if (!persisted?.sharedSaved) throw new Error("当前版本尚未写入本机项目文件，请稍后重试");
+
+    const project = findHistoryProject(state.currentProjectId);
+    const before = els.content.value;
+    const baseUpdatedAt = Number(project?.updatedAt || 0);
+    setIllustrationUiState("searching");
+    setIllustrationStatus("正在分析段落并从可靠网络图库查找候选图片…", "loading");
+
+    const statusResponse = await fetch(ILLUSTRATION_STATUS_URL, {
+      cache: "no-store",
+      signal: abortController.signal,
+    });
+    const status = await statusResponse.json().catch(() => ({}));
+    if (!statusResponse.ok || status.enabled === false) {
+      throw new Error(illustrationErrorMessage(status, status.message || "在线图源暂时不可用"));
+    }
+    updateIllustrationProviderOptions(status);
+
+    const response = await fetch(ILLUSTRATION_SEARCH_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectId: state.currentProjectId,
+        baseUpdatedAt,
+        content: before,
+        blocks: blocks.map(({ blockId, text }) => ({ blockId, text })),
+        maxImages: clamp(Number(els.illustrationCount?.value) || 2, 1, 3),
+        maxCandidates: 4,
+        provider: els.illustrationProvider?.value || "auto",
+      }),
+      signal: abortController.signal,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(illustrationErrorMessage(payload, `配图搜索失败（${response.status}）`));
+    }
+    if (generation !== illustrationRequestGeneration) return;
+    const currentProject = findHistoryProject(state.currentProjectId);
+    if (
+      els.content.value !== before
+      || state.currentProjectId !== project?.id
+      || Number(currentProject?.updatedAt || 0) !== baseUpdatedAt
+    ) {
+      throw new Error("找图期间正文已有新修改，候选图未应用");
+    }
+    renderIllustrationResults(payload, blocks);
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    if (generation !== illustrationRequestGeneration) return;
+    pendingIllustrationSearch = null;
+    setIllustrationStatus(error?.message || "在线配图暂时不可用", "error");
+    setIllustrationUiState("error");
+  } finally {
+    if (illustrationAbortController === abortController) illustrationAbortController = null;
+  }
+}
+
+function selectedIllustrationCandidates() {
+  if (!pendingIllustrationSearch || !els.illustrationResults) return [];
+  return [...els.illustrationResults.querySelectorAll('input[data-candidate-id]:checked')]
+    .map((input) => {
+      const candidate = pendingIllustrationSearch.candidates.find((item) => item.id === input.dataset.candidateId);
+      const block = pendingIllustrationSearch.blocksById.get(input.dataset.blockId);
+      return candidate && block ? { candidate, block } : null;
+    })
+    .filter(Boolean);
+}
+
+function insertIllustrationMarkers(originalContent, placements) {
+  const grouped = new Map();
+  placements.forEach(({ block, imageId }) => {
+    if (!grouped.has(block.end)) grouped.set(block.end, []);
+    grouped.get(block.end).push(imageId);
+  });
+  const patches = [...grouped.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([offset, imageIds]) => ({
+      offset,
+      value: `\n\n${imageIds.map((imageId) => `[[image:${imageId}]]`).join("\n\n")}`,
+    }));
+
+  let sourceCursor = 0;
+  let nextContent = "";
+  const insertedRanges = [];
+  patches.forEach((patch) => {
+    if (!Number.isInteger(patch.offset) || patch.offset < sourceCursor || patch.offset > originalContent.length) {
+      throw new Error("配图插入位置无效，正文未修改");
+    }
+    nextContent += originalContent.slice(sourceCursor, patch.offset);
+    const start = nextContent.length;
+    nextContent += patch.value;
+    insertedRanges.push({ start, end: nextContent.length, value: patch.value });
+    sourceCursor = patch.offset;
+  });
+  nextContent += originalContent.slice(sourceCursor);
+
+  let restored = nextContent;
+  [...insertedRanges].reverse().forEach((range) => {
+    if (restored.slice(range.start, range.end) !== range.value) {
+      throw new Error("配图插入校验失败，正文未修改");
+    }
+    restored = `${restored.slice(0, range.start)}${restored.slice(range.end)}`;
+  });
+  if (restored !== originalContent) {
+    throw new Error("配图插入校验失败，正文未修改");
+  }
+  return nextContent;
+}
+
+async function commitIllustrationRevision({ pending, nextContent, nextImages, message }) {
+  const baseProject = findHistoryProject(pending.projectId);
+  if (
+    !baseProject
+    || state.currentProjectId !== pending.projectId
+    || els.content.value !== pending.beforeContent
+    || Number(baseProject.updatedAt || 0) !== pending.baseUpdatedAt
+  ) {
+    throw new Error("正文或项目版本已经变化，请重新找图");
+  }
+
+  const nextData = {
+    ...readForm(),
+    content: nextContent,
+    images: nextImages,
+  };
+  const nextProject = {
+    ...baseProject,
+    title: normalizeProjectTitle(els.projectTitle?.value)
+      || baseProject.title
+      || projectTitleFromData(nextData),
+    updatedAt: nextProjectTimestamp(baseProject),
+    data: nextData,
+  };
+  const snapshot = {
+    activeId: pending.projectId,
+    projects: [
+      nextProject,
+      ...state.projects.filter(
+        (project) => project.id !== pending.projectId && !isBuiltInProject(project),
+      ),
+    ].slice(0, MAX_PROJECTS),
+    deletedProjects: normalizeProjectDeletions(state.deletedProjects),
+  };
+  const committed = await saveProjectStoreToSharedServer(snapshot, {
+    expectedProjectId: pending.projectId,
+    expectedUpdatedAt: pending.baseUpdatedAt,
+  });
+  if (!committed.saved) {
+    throw new Error("本机发现了更新版本，本次配图没有覆盖它；请刷新后重新找图");
+  }
+
+  const responseProjects = Array.isArray(committed.responseStore?.projects)
+    ? committed.responseStore.projects.map(normalizeProject).filter(Boolean)
+    : snapshot.projects;
+  const committedProject = responseProjects.find((project) => project.id === pending.projectId)
+    || nextProject;
+
+  commitTextHistory();
+  state.projects = responseProjects;
+  state.deletedProjects = normalizeProjectDeletions(
+    committed.responseStore?.deletedProjects || snapshot.deletedProjects,
+  );
+  state.currentProjectId = pending.projectId;
+  state.images = committedProject.data.images;
+  els.content.value = committedProject.data.content;
+  lastEditorImageReferenceSignature = imageReferenceSignature(els.content.value);
+  commitTextHistory();
+  syncAiUndoAvailability();
+  updateImageList();
+  updateProjectHistory();
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(committedProject.data));
+  } catch (error) {
+    console.warn("当前草稿兼容副本写入失败，继续使用本地数据库", error);
+  }
+  saveProjectStore();
+  try {
+    await saveProjectStoreToIndexedDb(projectStoreSnapshot());
+  } catch (error) {
+    console.warn("配图版本的浏览器数据库副本写入失败", error);
+  }
+  const savedAt = new Date().toISOString();
+  setSaveCheckpoint({
+    phase: persistenceMode === "cloud" ? "syncing-cloud" : "degraded",
+    projectId: pending.projectId,
+    targetUpdatedAt: Number(committedProject.updatedAt || nextProject.updatedAt),
+    localSavedAt: savedAt,
+    serverSavedAt: savedAt,
+    destination: persistenceMode === "cloud" ? "Supabase + 私有 TOS" : "本机项目文件",
+    error: "",
+  });
+  try {
+    await render({ persist: false });
+  } catch (error) {
+    console.error("配图版本已保存，但当前预览刷新失败", error);
+  }
+  if (persistenceMode === "cloud") {
+    void confirmCloudCheckpoint(
+      pending.projectId,
+      Number(committedProject.updatedAt || nextProject.updatedAt),
+    );
+  }
+  els.status.textContent = `${message}，当前完整版本已保存`;
+  return true;
+}
+
+async function applyIllustrationSelection() {
+  const pending = pendingIllustrationSearch;
+  const selected = selectedIllustrationCandidates();
+  if (!pending || !selected.length || illustrationUiState === "importing") return;
+  const project = findHistoryProject(state.currentProjectId);
+  if (
+    state.currentProjectId !== pending.projectId
+    || els.content.value !== pending.beforeContent
+    || Number(project?.updatedAt || 0) !== pending.baseUpdatedAt
+  ) {
+    setIllustrationStatus("正文或项目版本已经变化，请重新找图；当前内容没有被覆盖。", "error");
+    setIllustrationUiState("error");
+    return;
+  }
+
+  const generation = ++illustrationRequestGeneration;
+  illustrationAbortController?.abort();
+  const abortController = new AbortController();
+  illustrationAbortController = abortController;
+  setIllustrationUiState("importing");
+  setIllustrationStatus(`正在安全下载并清洗 ${selected.length} 张图片；全部成功后才会插入。`, "loading");
+
+  try {
+    const imported = [];
+    for (const { candidate, block } of selected) {
+      const response = await fetch(ILLUSTRATION_IMPORT_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: pending.projectId,
+          baseUpdatedAt: pending.baseUpdatedAt,
+          content: pending.beforeContent,
+          candidateId: candidate.id,
+        }),
+        signal: abortController.signal,
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(illustrationErrorMessage(payload, `图片下载失败（${response.status}）`));
+      }
+      const asset = payload.asset;
+      if (!asset || typeof asset.dataUrl !== "string" || !/^data:image\/(?:jpeg|png|webp);base64,/i.test(asset.dataUrl)) {
+        throw new Error("图库返回了不受支持的图片格式");
+      }
+      imported.push({ asset, candidate, block });
+      if (generation !== illustrationRequestGeneration) return;
+    }
+    const importedBytes = imported.reduce(
+      (total, item) => total + Math.max(0, Number(item.asset.byteSize) || 0),
+      0,
+    );
+    if (importedBytes > ILLUSTRATION_MAX_TOTAL_BYTES) {
+      throw new Error("本次选中的图片总量过大，请减少配图数量或更换候选");
+    }
+    if (generation !== illustrationRequestGeneration) return;
+    const currentProject = findHistoryProject(state.currentProjectId);
+    if (
+      state.currentProjectId !== pending.projectId
+      || els.content.value !== pending.beforeContent
+      || Number(currentProject?.updatedAt || 0) !== pending.baseUpdatedAt
+    ) {
+      throw new Error("下载期间正文已有新修改，图片没有插入");
+    }
+
+    const addedImages = {};
+    const placements = imported.map(({ asset, candidate, block }, index) => {
+      const imageId = createImportedImageId(index);
+      addedImages[imageId] = {
+        src: asset.dataUrl,
+        name: asset.fileName || candidate.title || `网络配图-${index + 1}`,
+        sourcePath: asset.source?.sourcePageUrl || candidate.sourcePageUrl || "网络图库",
+        source: normalizeWebAssetSource(asset.source) || {
+          kind: "web",
+          provider: candidate.provider,
+          sourcePageUrl: candidate.sourcePageUrl,
+          creator: normalizeCandidateCreator(candidate),
+          license: normalizeCandidateLicense(candidate),
+        },
+        crop: null,
+        layout: defaultNewImageLayout(),
+      };
+      return { block, imageId };
+    });
+    const nextContent = insertIllustrationMarkers(pending.beforeContent, placements);
+    await commitIllustrationRevision({
+      pending,
+      nextContent,
+      nextImages: { ...state.images, ...addedImages },
+      message: `已插入 ${placements.length} 张网络配图，原有文字逐字保留`,
+    });
+    closeIllustrationModal({ force: true });
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    if (generation !== illustrationRequestGeneration) return;
+    setIllustrationStatus(error?.message || "图片入库失败；正文和资源库均未改变", "error");
+    setIllustrationUiState("error");
+  } finally {
+    if (illustrationAbortController === abortController) illustrationAbortController = null;
+  }
+}
+
+function openIllustrationModal() {
+  if (isBuiltInProjectId(state.currentProjectId)) {
+    els.status.textContent = "内置说明书不可修改，请先新建图文";
+    return;
+  }
+  if (!els.content.value.trim()) {
+    els.status.textContent = "正文为空，暂时无法自动配图";
+    return;
+  }
+  illustrationReturnFocus = document.activeElement;
+  pendingIllustrationSearch = null;
+  els.illustrationResults?.replaceChildren();
+  els.illustrationEmpty?.classList.remove("hidden");
+  setIllustrationStatus("设置配图数量后点击“开始找图”；打开窗口不会联网，也不会修改正文。", "ready");
+  setIllustrationUiState("ready");
+  els.workspace?.setAttribute("inert", "");
+  els.illustrationModal?.classList.remove("hidden");
+  els.illustrationSearch?.focus();
+}
+
+function closeIllustrationModal({ force = false } = {}) {
+  if (illustrationUiState === "importing" && !force) {
+    setIllustrationStatus("正在下载并条件保存完整版本，完成前暂不能关闭。", "loading");
+    return;
+  }
+  illustrationRequestGeneration += 1;
+  illustrationAbortController?.abort();
+  illustrationAbortController = null;
+  pendingIllustrationSearch = null;
+  illustrationUiState = "closed";
+  els.illustrationModal?.classList.add("hidden");
+  els.workspace?.removeAttribute("inert");
+  illustrationReturnFocus?.focus?.();
+  illustrationReturnFocus = null;
+}
+
+function trapIllustrationModalFocus(event) {
+  if (event.key !== "Tab" || els.illustrationModal?.classList.contains("hidden")) return;
+  trapModalFocus(event, els.illustrationModal);
 }
 
 function handleTextShortcut(event) {
@@ -3782,6 +4729,54 @@ function localAssetReferenceCount(filename) {
   return referencedProjects.size;
 }
 
+function normalizeWebAssetSource(value) {
+  if (!value || typeof value !== "object" || value.kind !== "web") return null;
+  const source = { kind: "web" };
+  for (const field of [
+    "provider",
+    "title",
+    "sourcePageUrl",
+    "creator",
+    "license",
+    "licenseUrl",
+    "query",
+    "fetchedAt",
+  ]) {
+    if (typeof value[field] === "string" && value[field].trim()) {
+      source[field] = value[field].trim();
+    }
+  }
+  return source;
+}
+
+function safeExternalSourceUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    if (
+      url.protocol !== "https:"
+      || url.username
+      || url.password
+      || (url.port && url.port !== "443")
+    ) return "";
+    return url.href;
+  } catch {
+    return "";
+  }
+}
+
+function localAssetSource(filename) {
+  for (const project of state.projects) {
+    const images = project?.data?.images;
+    if (!images || typeof images !== "object") continue;
+    for (const image of Object.values(images)) {
+      if (image?.localAssetName !== filename) continue;
+      const source = normalizeWebAssetSource(image.source);
+      if (source) return source;
+    }
+  }
+  return null;
+}
+
 async function syncProjectImagesToLocalAssetDirectory() {
   if (!(await ensureLocalAssetDirectoryPermission())) return { stored: 0, failed: 0 };
   if (!isBuiltInProjectId(state.currentProjectId)) saveState();
@@ -3818,6 +4813,7 @@ async function listLocalAssetDirectory() {
       const file = await entry.getFile();
       const previewUrl = URL.createObjectURL(file);
       localAssetPreviewUrls.push(previewUrl);
+      const source = localAssetSource(name);
       assets.push({
         assetId: `local:${name}`,
         originalName: localAssetOriginalName(name),
@@ -3828,6 +4824,7 @@ async function listLocalAssetDirectory() {
         previewUrl,
         localFileName: name,
         storageMode: "local",
+        ...(source ? { source } : {}),
       });
     } catch (error) {
       console.warn(`无法读取本地资源 ${name}`, error);
@@ -3985,6 +4982,26 @@ function renderAssetLibrary(payload) {
     const time = document.createElement("span");
     time.textContent = `最近使用 ${formatAssetDate(asset.lastUsedAt || asset.createdAt)}`;
     meta.append(title, details, time);
+    const source = normalizeWebAssetSource(asset.source);
+    if (source) {
+      const provenance = document.createElement("span");
+      provenance.className = "asset-library-provenance";
+      provenance.textContent = [
+        source.creator || source.provider || "网络图库",
+        source.license || "许可见来源页",
+      ].join(" · ");
+      meta.append(provenance);
+      const sourceUrl = safeExternalSourceUrl(source.sourcePageUrl);
+      if (sourceUrl) {
+        const sourceLink = document.createElement("a");
+        sourceLink.className = "asset-library-source-link";
+        sourceLink.href = sourceUrl;
+        sourceLink.target = "_blank";
+        sourceLink.rel = "noreferrer noopener";
+        sourceLink.textContent = "查看原图与许可";
+        meta.append(sourceLink);
+      }
+    }
 
     const actions = document.createElement("div");
     actions.className = "asset-library-actions";
@@ -4175,6 +5192,7 @@ async function insertAssetFromLibrary(asset, button) {
       asset.localFileName || detail.localFileName || detail.localAssetName || assetId.replace(/^local:/, ""),
     );
     const localId = createImportedImageId();
+    const source = normalizeWebAssetSource(detail.source || asset.source);
     state.images[localId] = {
       src: dataUrl,
       name: String(detail.originalName || asset.originalName || "资源库图片"),
@@ -4182,6 +5200,7 @@ async function insertAssetFromLibrary(asset, button) {
       ...(localStorageMode
         ? { localAssetId: assetId, localAssetName }
         : { cloudAssetId: assetId, ...(detail.cloudObjectKey ? { cloudObjectKey: detail.cloudObjectKey } : {}) }),
+      ...(source ? { source } : {}),
       crop: null,
       layout: defaultNewImageLayout(),
     };
@@ -6174,8 +7193,70 @@ function collectImageHits(page, scrollPage = false) {
 }
 
 function drawBackground(ctx, settings) {
+  const theme = cardThemeFor(settings);
   ctx.fillStyle = settings.bgColor;
   ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+  if (theme.backgroundStyle === "paper-wash" || theme.backgroundStyle === "midnight-paper") {
+    const dark = theme.backgroundStyle === "midnight-paper";
+    const first = ctx.createRadialGradient(150, 110, 10, 150, 110, 520);
+    first.addColorStop(0, colorWithAlpha(settings.accentColor, dark ? 0.13 : 0.085));
+    first.addColorStop(1, colorWithAlpha(settings.accentColor, 0));
+    ctx.fillStyle = first;
+    ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+    const secondary = normalizeHexColor(theme.secondaryColor, settings.accentColor);
+    const second = ctx.createRadialGradient(735, 1010, 20, 735, 1010, 570);
+    second.addColorStop(0, colorWithAlpha(secondary, dark ? 0.2 : 0.16));
+    second.addColorStop(1, colorWithAlpha(secondary, 0));
+    ctx.fillStyle = second;
+    ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+    drawDeterministicPaperGrain(ctx, settings.cardTheme, dark);
+  } else if (theme.backgroundStyle === "swiss-grid") {
+    ctx.fillStyle = settings.accentColor;
+    ctx.fillRect(0, 0, CANVAS_WIDTH, 8);
+    ctx.save();
+    ctx.strokeStyle = colorWithAlpha(settings.textColor, 0.07);
+    ctx.lineWidth = 1;
+    [theme.geometry.sidePadding, CANVAS_WIDTH / 2, CANVAS_WIDTH - theme.geometry.sidePadding].forEach((x) => {
+      ctx.beginPath();
+      ctx.moveTo(x + 0.5, 8);
+      ctx.lineTo(x + 0.5, CANVAS_HEIGHT);
+      ctx.stroke();
+    });
+    ctx.restore();
+  }
+}
+
+function colorWithAlpha(hex, alpha) {
+  const normalized = normalizeHexColor(hex);
+  const red = Number.parseInt(normalized.slice(1, 3), 16);
+  const green = Number.parseInt(normalized.slice(3, 5), 16);
+  const blue = Number.parseInt(normalized.slice(5, 7), 16);
+  return `rgba(${red}, ${green}, ${blue}, ${clamp(Number(alpha) || 0, 0, 1)})`;
+}
+
+function drawDeterministicPaperGrain(ctx, seedText, dark = false) {
+  let seed = 2166136261;
+  for (const char of String(seedText || "paper")) {
+    seed ^= char.codePointAt(0);
+    seed = Math.imul(seed, 16777619);
+  }
+  const next = () => {
+    seed += 0x6d2b79f5;
+    let value = seed;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+  ctx.save();
+  ctx.fillStyle = dark ? "rgba(255,244,219,.08)" : "rgba(28,24,18,.055)";
+  for (let index = 0; index < 150; index += 1) {
+    const size = next() > 0.84 ? 1.6 : 0.9;
+    ctx.fillRect(Math.round(next() * CANVAS_WIDTH), Math.round(next() * CANVAS_HEIGHT), size, size);
+  }
+  ctx.restore();
 }
 
 function drawCardThemeChrome(ctx, page) {
@@ -6432,7 +7513,7 @@ function drawTextLine(ctx, item, settings) {
         ctx.closePath();
         ctx.fill();
         ctx.restore();
-      } else if (["accent-underline", "bold-line", "editorial"].includes(theme.emphasis)) {
+      } else if (["accent-underline", "bold-line", "editorial", "swiss"].includes(theme.emphasis)) {
         ctx.save();
         ctx.globalAlpha = theme.emphasis === "bold-line" ? 0.72 : 0.52;
         ctx.fillStyle = token.bgColor;
@@ -7650,6 +8731,8 @@ function bindEvents() {
     if (event.key === "Escape" && !els.importPreviewModal?.classList.contains("hidden")) closeProjectImportPreview();
     if (event.key === "Escape" && !els.assetLibraryModal?.classList.contains("hidden")) closeAssetLibrary();
     if (event.key === "Escape" && !els.aiOptimizeModal?.classList.contains("hidden")) closeAiOptimizeModal();
+    if (event.key === "Escape" && !els.illustrationModal?.classList.contains("hidden")) closeIllustrationModal();
+    if (event.key === "Escape" && !els.themeLibraryModal?.classList.contains("hidden")) closeThemeLibrary();
     if (event.key === "Escape" && imageReorderDrag) cancelPreviewImageReorder();
     if (event.key === "Escape") clearPreviewEditorPin();
   });
@@ -7678,6 +8761,25 @@ function bindEvents() {
     if (event.target === els.aiOptimizeModal) closeAiOptimizeModal();
   });
   els.aiOptimizeModal?.addEventListener("keydown", trapAiOptimizeModalFocus);
+  els.illustration?.addEventListener("click", openIllustrationModal);
+  els.illustrationClose?.addEventListener("click", closeIllustrationModal);
+  els.illustrationCancel?.addEventListener("click", closeIllustrationModal);
+  els.illustrationSearch?.addEventListener("click", () => void runIllustrationSearch());
+  els.illustrationApply?.addEventListener("click", () => void applyIllustrationSelection());
+  els.illustrationModal?.addEventListener("click", (event) => {
+    if (event.target === els.illustrationModal) closeIllustrationModal();
+  });
+  els.illustrationModal?.addEventListener("keydown", trapIllustrationModalFocus);
+  els.themeLibrary?.addEventListener("click", openThemeLibrary);
+  els.themeLibraryClose?.addEventListener("click", closeThemeLibrary);
+  els.themeLibraryModal?.addEventListener("click", (event) => {
+    if (event.target === els.themeLibraryModal) closeThemeLibrary();
+  });
+  els.themeLibraryModal?.addEventListener("keydown", trapThemeLibraryFocus);
+  els.themeLibraryGrid?.addEventListener("click", handleThemeLibrarySelection);
+  els.themeLibraryFilters.forEach((button) => {
+    button.addEventListener("click", () => renderThemeLibrary(button.dataset.themeFilter));
+  });
   els.importProjects?.addEventListener("click", () => {
     closeProjectActionsMenu();
     els.projectBackupInput?.click();

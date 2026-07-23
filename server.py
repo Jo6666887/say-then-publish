@@ -29,6 +29,14 @@ from ai_layout import (
     AILayoutService,
     AILayoutValidationError,
 )
+from web_image_search import (
+    IllustrationError,
+    IllustrationNotFoundError,
+    IllustrationProviderError,
+    IllustrationSecurityError,
+    IllustrationValidationError,
+    WebImageSearchService,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -47,6 +55,7 @@ APP_SERVICE = "write-then-publish"
 APP_HEALTH_SCHEMA = 1
 CLOUD = CloudStore.from_root(ROOT)
 AI_LAYOUT = AILayoutService.from_env()
+ILLUSTRATIONS = WebImageSearchService.from_env(ai_layout=AI_LAYOUT)
 LOCAL_ASSETS = LocalAssetStore(ROOT, data_dir=DATA_DIR)
 AI_OPTIMIZE_LOCK = threading.Lock()
 CLOUD_SYNC_LOCK = threading.Lock()
@@ -575,6 +584,33 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def send_illustration_error(self, error: IllustrationError) -> None:
+        if isinstance(error, IllustrationNotFoundError):
+            status = HTTPStatus.NOT_FOUND
+        elif (
+            isinstance(error, IllustrationValidationError)
+            and error.code == "DRAFT_VERSION_CONFLICT"
+        ):
+            status = HTTPStatus.CONFLICT
+        elif isinstance(error, IllustrationValidationError):
+            status = HTTPStatus.BAD_REQUEST
+        elif isinstance(error, IllustrationSecurityError):
+            status = HTTPStatus.UNPROCESSABLE_ENTITY
+        elif isinstance(error, IllustrationProviderError):
+            status = HTTPStatus.BAD_GATEWAY
+        else:
+            status = HTTPStatus.BAD_GATEWAY
+        self.send_json(
+            {
+                "ok": False,
+                "error": {
+                    "code": error.code,
+                    "message": str(error),
+                },
+            },
+            status,
+        )
+
     def read_json_body(self, maximum: int = MAX_BODY_BYTES) -> dict | None:
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
@@ -604,7 +640,29 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
                 return True
         return False
 
+    def reject_untrusted_host(self) -> bool:
+        """Reject DNS-rebinding requests before any local data is read."""
+
+        raw_host = self.headers.get("Host", "").strip()
+        try:
+            parsed = urlparse(f"//{raw_host}")
+            hostname = (parsed.hostname or "").lower().rstrip(".")
+            port = parsed.port
+        except ValueError:
+            hostname = ""
+            port = None
+        expected_port = int(getattr(self.server, "server_port", 0) or 0)
+        if (
+            hostname not in {"127.0.0.1", "localhost", "::1"}
+            or (port is not None and expected_port and port != expected_port)
+        ):
+            self.send_json({"error": "已拒绝非本机请求"}, HTTPStatus.FORBIDDEN)
+            return True
+        return False
+
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+        if self.reject_untrusted_host():
+            return
         path = urlparse(self.path).path
         if path == "/api/health":
             self.send_json(
@@ -627,6 +685,24 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
             return
         if path == "/api/ai/status":
             self.send_json(AI_LAYOUT.status())
+            return
+        if path == "/api/illustrations/status":
+            self.send_json(ILLUSTRATIONS.status())
+            return
+        illustration_preview_prefix = "/api/illustrations/candidates/"
+        if path.startswith(illustration_preview_prefix) and path.endswith("/preview"):
+            candidate_id = unquote(
+                path.removeprefix(illustration_preview_prefix).removesuffix("/preview")
+            )
+            if "/" in candidate_id:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            try:
+                raw, mime_type = ILLUSTRATIONS.preview(candidate_id)
+            except IllustrationError as error:
+                self.send_illustration_error(error)
+                return
+            self.send_bytes(raw, mime_type)
             return
         if path == "/api/assets":
             if not CLOUD.enabled or cloud_status().get("fallbackToLocal"):
@@ -686,6 +762,8 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_HEAD(self) -> None:  # noqa: N802 - stdlib handler API
+        if self.reject_untrusted_host():
+            return
         path = urlparse(self.path).path
         if path.startswith("/api/") or not public_static_path(path):
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -693,6 +771,8 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
         return super().do_HEAD()
 
     def do_PUT(self) -> None:  # noqa: N802 - stdlib handler API
+        if self.reject_untrusted_host():
+            return
         if self.reject_cross_origin_mutation():
             return
         if urlparse(self.path).path != "/api/project-store":
@@ -727,6 +807,24 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
         ):
             self.send_json({"error": "当前草稿版本无效"}, HTTPStatus.BAD_REQUEST)
             return
+        expected_project_id = self.headers.get("X-WTP-Expected-Project-Id", "").strip()
+        expected_updated_header = self.headers.get(
+            "X-WTP-Expected-Project-Updated-At",
+            "",
+        ).strip()
+        conditional_save_requested = bool(expected_project_id or expected_updated_header)
+        expected_updated_at = (
+            parse_updated_at(expected_updated_header)
+            if conditional_save_requested
+            else None
+        )
+        if conditional_save_requested and (
+            not expected_project_id
+            or expected_project_id != incoming_project_id
+            or expected_updated_at is None
+        ):
+            self.send_json({"error": "条件保存版本无效"}, HTTPStatus.BAD_REQUEST)
+            return
 
         with STORE_LOCK:
             current_store = read_store()
@@ -736,6 +834,11 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
                 if current_project is not None
                 else None
             )
+            if conditional_save_requested and (
+                current_project is None or current_updated_at != expected_updated_at
+            ):
+                self.send_json(save_conflict_payload(current_project), HTTPStatus.CONFLICT)
+                return
             if incoming_project is not None and current_project is not None and (
                 current_updated_at is not None
                 and (
@@ -793,6 +896,8 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
         self.send_json(response_payload)
 
     def do_PATCH(self) -> None:  # noqa: N802 - stdlib handler API
+        if self.reject_untrusted_host():
+            return
         if self.reject_cross_origin_mutation():
             return
         if urlparse(self.path).path != "/api/project-store/current-text":
@@ -892,6 +997,8 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
         )
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
+        if self.reject_untrusted_host():
+            return
         if self.reject_cross_origin_mutation():
             return
         path = urlparse(self.path).path
@@ -979,6 +1086,182 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
             response["baseUpdatedAt"] = base_updated_at
             self.send_json(response)
             return
+        if path == "/api/illustrations/search":
+            payload = self.read_json_body(maximum=MAX_AI_TEXT_BYTES)
+            if not payload:
+                self.send_json(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "INVALID_REQUEST",
+                            "message": "配图请求无效",
+                        },
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            content = payload.get("content")
+            project_id = payload.get("projectId")
+            base_updated_at = parse_updated_at(payload.get("baseUpdatedAt"))
+            if (
+                not isinstance(content, str)
+                or not isinstance(project_id, str)
+                or not project_id
+                or base_updated_at is None
+            ):
+                self.send_json(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "UNSAVED_DRAFT",
+                            "message": "请先保存当前草稿，再使用一键配图",
+                        },
+                    },
+                    HTTPStatus.CONFLICT,
+                )
+                return
+            with STORE_LOCK:
+                saved_project = find_project(read_store(), project_id)
+            if not project_revision_matches(
+                saved_project,
+                project_id=project_id,
+                updated_at=base_updated_at,
+                content=content,
+            ):
+                self.send_json(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "DRAFT_VERSION_CONFLICT",
+                            "message": "正文已有新修改，请保存后重新配图",
+                        },
+                    },
+                    HTTPStatus.CONFLICT,
+                )
+                return
+            try:
+                result = ILLUSTRATIONS.search(
+                    project_id=project_id,
+                    updated_at=base_updated_at,
+                    content=content,
+                    blocks=payload.get("blocks"),
+                    provider=payload.get("provider", "auto"),
+                    max_images=payload.get("maxImages", 2),
+                    max_candidates=payload.get("maxCandidates", 3),
+                )
+            except IllustrationError as error:
+                self.send_illustration_error(error)
+                return
+            with STORE_LOCK:
+                after_project = find_project(read_store(), project_id)
+            if not project_revision_matches(
+                after_project,
+                project_id=project_id,
+                updated_at=base_updated_at,
+                content=content,
+            ):
+                self.send_json(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "DRAFT_VERSION_CONFLICT",
+                            "message": "找图期间正文已有新修改，请保存后重新配图",
+                        },
+                    },
+                    HTTPStatus.CONFLICT,
+                )
+                return
+            result["baseUpdatedAt"] = base_updated_at
+            self.send_json(result)
+            return
+        if path == "/api/illustrations/import":
+            payload = self.read_json_body(maximum=MAX_AI_TEXT_BYTES)
+            if not payload:
+                self.send_json(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "INVALID_REQUEST",
+                            "message": "配图导入请求无效",
+                        },
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            content = payload.get("content")
+            project_id = payload.get("projectId")
+            candidate_id = payload.get("candidateId")
+            base_updated_at = parse_updated_at(payload.get("baseUpdatedAt"))
+            if (
+                not isinstance(content, str)
+                or not isinstance(project_id, str)
+                or not project_id
+                or not isinstance(candidate_id, str)
+                or not candidate_id
+                or base_updated_at is None
+            ):
+                self.send_json(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "UNSAVED_DRAFT",
+                            "message": "请先保存当前草稿，再导入配图",
+                        },
+                    },
+                    HTTPStatus.CONFLICT,
+                )
+                return
+            with STORE_LOCK:
+                saved_project = find_project(read_store(), project_id)
+            if not project_revision_matches(
+                saved_project,
+                project_id=project_id,
+                updated_at=base_updated_at,
+                content=content,
+            ):
+                self.send_json(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "DRAFT_VERSION_CONFLICT",
+                            "message": "正文已有新修改，请保存后重新配图",
+                        },
+                    },
+                    HTTPStatus.CONFLICT,
+                )
+                return
+            try:
+                result = ILLUSTRATIONS.import_candidate(
+                    candidate_id,
+                    project_id=project_id,
+                    updated_at=base_updated_at,
+                    content=content,
+                )
+            except IllustrationError as error:
+                self.send_illustration_error(error)
+                return
+            with STORE_LOCK:
+                after_project = find_project(read_store(), project_id)
+            if not project_revision_matches(
+                after_project,
+                project_id=project_id,
+                updated_at=base_updated_at,
+                content=content,
+            ):
+                self.send_json(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "DRAFT_VERSION_CONFLICT",
+                            "message": "图片下载期间正文已有新修改，本次没有插入",
+                        },
+                    },
+                    HTTPStatus.CONFLICT,
+                )
+                return
+            result["baseUpdatedAt"] = base_updated_at
+            self.send_json(result)
+            return
         if path == "/api/local-assets/select-directory":
             try:
                 result = LOCAL_ASSETS.select_asset_directory()
@@ -1024,6 +1307,8 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
         )
 
     def do_DELETE(self) -> None:  # noqa: N802 - stdlib handler API
+        if self.reject_untrusted_host():
+            return
         if self.reject_cross_origin_mutation():
             return
         path = urlparse(self.path).path

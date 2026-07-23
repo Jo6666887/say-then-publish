@@ -38,9 +38,11 @@ class RecordingCloudStore(CloudStore):
     def __init__(self):
         super().__init__(test_config())
         self.seen_images = []
+        self.seen_metadata = []
 
     def _ensure_asset(self, image, **kwargs):
         self.seen_images.append(copy.deepcopy(image))
+        self.seen_metadata.append(copy.deepcopy(kwargs.get("metadata")))
         return {
             "asset_id": "asset-1",
             "object_key": "write-then-publish/assets/aa/image.png",
@@ -73,6 +75,24 @@ class FakeTosClient:
         self.events.append("tos:delete")
         if self.fail:
             raise RuntimeError("temporary failure")
+
+
+class FakeMetadataRest:
+    def __init__(self):
+        self.calls = []
+
+    def request(self, method, path, *, query=None, payload=None, prefer=None):
+        self.calls.append((method, path, query, payload, prefer))
+        if method != "PATCH":
+            raise AssertionError(f"Unexpected request: {method} {path}")
+        return [
+            {
+                "asset_id": query["asset_id"].removeprefix("eq."),
+                "sha256": "existing-sha",
+                "object_key": "existing.png",
+                "metadata": copy.deepcopy(payload["metadata"]),
+            }
+        ]
 
 
 class CloudStoreTests(unittest.TestCase):
@@ -111,6 +131,74 @@ class CloudStoreTests(unittest.TestCase):
         self.assertTrue(local_project["data"]["images"]["image-1"]["src"].startswith("data:image/png"))
         self.assertEqual(cloud_project["data"]["images"]["image-1"]["src"], "tos://asset-1")
         self.assertEqual(project["data"]["images"]["image-1"].get("cloudAssetId"), None)
+
+    def test_web_source_metadata_is_preserved_for_resource_library_round_trip(self):
+        store = RecordingCloudStore()
+        source = {
+            "kind": "web",
+            "provider": "wikimedia",
+            "sourcePageUrl": "https://commons.wikimedia.org/wiki/File:Safe.jpg",
+            "creator": "Alice",
+            "license": "CC BY-SA 4.0",
+            "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+        }
+        project = {
+            "id": "project-1",
+            "updatedAt": 1,
+            "data": {
+                "content": "[[image:image-1]]",
+                "images": {
+                    "image-1": {
+                        "src": "data:image/png;base64,aGVsbG8=",
+                        "name": "image.png",
+                        "source": source,
+                    }
+                },
+            },
+        }
+        store._encode_project(
+            project,
+            known_by_sha={},
+            known_by_id={},
+            all_by_id={},
+        )
+        self.assertEqual(store.seen_metadata[-1]["source"], source)
+        public = CloudStore._public_asset(
+            {
+                "asset_id": "asset-1",
+                "metadata": {"kind": "content", "source": source},
+            },
+            1,
+        )
+        self.assertEqual(public["source"], source)
+
+    def test_cloud_dedup_backfills_missing_web_source_metadata(self):
+        store = CloudStore(ready_test_config())
+        store.rest = FakeMetadataRest()
+        source = {
+            "kind": "web",
+            "provider": "wikimedia",
+            "sourcePageUrl": "https://commons.wikimedia.org/wiki/File:Safe.jpg",
+            "creator": "Alice",
+            "license": "CC BY-SA 4.0",
+        }
+        existing = {
+            "asset_id": "asset-1",
+            "sha256": "existing-sha",
+            "object_key": "existing.png",
+            "metadata": {"kind": "content"},
+        }
+        asset = store._ensure_asset(
+            {"cloudAssetId": "asset-1", "source": source},
+            original_name="safe.jpg",
+            known_by_sha={"existing-sha": existing},
+            known_by_id={"asset-1": existing},
+            all_by_id={"asset-1": existing},
+            metadata={"kind": "content", "source": source},
+        )
+        self.assertEqual(asset["metadata"]["source"], source)
+        self.assertEqual(len(store.rest.calls), 1)
+        self.assertEqual(store.rest.calls[0][0], "PATCH")
 
     def test_reference_count_changes_without_deleting_asset(self):
         store = CloudStore(test_config())

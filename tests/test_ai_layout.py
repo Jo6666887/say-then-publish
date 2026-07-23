@@ -405,6 +405,83 @@ class AILayoutClientTests(unittest.TestCase):
 
         self.assertEqual(session.calls, [])
 
+    def test_illustration_planner_returns_only_query_envelope_and_uses_no_web_search(self):
+        session = RecordingSession(
+            completion(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "blockId": "block-1",
+                                "query": "人工智能 工作台",
+                                "reason": "核心场景",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        )
+        service = AILayoutService(enabled_config(), session=session)
+        blocks = [
+            {"blockId": "block-0", "text": "开头"},
+            {"blockId": "block-1", "text": "统一管理多种人工智能模型"},
+        ]
+
+        result = service.plan_illustrations(blocks, max_images=2)
+
+        self.assertEqual(
+            result,
+            [
+                {
+                    "blockId": "block-1",
+                    "query": "人工智能 工作台",
+                    "reason": "核心场景",
+                }
+            ],
+        )
+        _, kwargs = session.calls[0]
+        self.assertFalse(kwargs["json"]["stream"])
+        self.assertTrue(kwargs["json"]["search_disable"])
+        self.assertEqual(kwargs["json"]["temperature"], 0)
+        prompt = kwargs["json"]["messages"][0]["content"]
+        self.assertIn("不得创建、修改或推断 ID", prompt)
+        self.assertIn("不要返回正文", prompt)
+
+    def test_illustration_planner_rejects_invalid_count_before_provider_call(self):
+        session = RecordingSession()
+        service = AILayoutService(enabled_config(), session=session)
+
+        with self.assertRaises(AILayoutValidationError) as caught:
+            service.plan_illustrations(
+                [{"blockId": "block-0", "text": "正文"}],
+                max_images=4,
+            )
+
+        self.assertEqual(caught.exception.code, "INVALID_ILLUSTRATION_COUNT")
+        self.assertEqual(session.calls, [])
+
+    def test_illustration_planner_limits_provider_input_to_eight_truncated_blocks(self):
+        session = RecordingSession(completion('{"items":[]}'))
+        service = AILayoutService(enabled_config(), session=session)
+        blocks = [
+            {"blockId": f"block-{index}", "text": str(index) * 900}
+            for index in range(9)
+        ]
+
+        service.plan_illustrations(blocks, max_images=3)
+
+        _, kwargs = session.calls[0]
+        user_content = kwargs["json"]["messages"][1]["content"]
+        serialized_blocks = json.loads(user_content.split("\n", 1)[1])
+        self.assertEqual(len(serialized_blocks), 8)
+        self.assertEqual(
+            [block["blockId"] for block in serialized_blocks],
+            [f"block-{index}" for index in range(8)],
+        )
+        self.assertTrue(all(len(block["text"]) == 800 for block in serialized_blocks))
+        self.assertNotIn("block-8", user_content)
+
     def test_non_stream_request_uses_server_headers_and_returns_validated_result(self):
         model_json = json.dumps(
             {

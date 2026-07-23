@@ -95,6 +95,28 @@ class LocalAssetStoreTests(unittest.TestCase):
         self.assertEqual(payload["dataUrl"], data_url())
         self.assertEqual(payload["asset"]["storageMode"], "local-server")
 
+    def test_web_source_metadata_survives_local_manifest_and_reinsert_payload(self):
+        source = project_store()
+        provenance = {
+            "kind": "web",
+            "provider": "wikimedia",
+            "sourcePageUrl": "https://commons.wikimedia.org/wiki/File:Safe.jpg",
+            "creator": "Alice",
+            "license": "CC BY-SA 4.0",
+            "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+        }
+        source["projects"][0]["data"]["images"]["image-1"]["source"] = provenance
+        enriched = self.store.sync_store(source)
+        asset = self.store.list_assets(enriched)[0]
+        self.assertEqual(asset["source"], provenance)
+        payload = self.store.get_asset_payload(asset["assetId"], enriched)
+        self.assertEqual(payload["asset"]["source"], provenance)
+        manifest = json.loads(self.store.manifest_file.read_text(encoding="utf-8"))
+        self.assertEqual(
+            next(iter(manifest["assets"].values()))["source"],
+            provenance,
+        )
+
     def test_delete_requires_force_when_referenced_and_writes_tombstone(self):
         enriched = self.store.sync_store(project_store())
         asset = self.store.list_assets(enriched)[0]

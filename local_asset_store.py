@@ -34,6 +34,28 @@ MANIFEST_FILENAME = ".write-then-publish-manifest.json"
 TOMBSTONES_FILENAME = ".write-then-publish-tombstones.json"
 
 
+def _safe_asset_source(image: dict[str, Any]) -> dict[str, str] | None:
+    source = image.get("source") if isinstance(image, dict) else None
+    if not isinstance(source, dict) or source.get("kind") != "web":
+        return None
+    limits = {
+        "provider": 40,
+        "title": 240,
+        "sourcePageUrl": 1000,
+        "creator": 240,
+        "license": 160,
+        "licenseUrl": 1000,
+        "query": 240,
+        "fetchedAt": 80,
+    }
+    normalized = {"kind": "web"}
+    for field, maximum in limits.items():
+        value = source.get(field)
+        if isinstance(value, str) and value.strip():
+            normalized[field] = value.strip()[:maximum]
+    return normalized
+
+
 class LocalAssetStoreError(CloudStoreError):
     """A local asset cannot be stored, read, or removed safely."""
 
@@ -389,6 +411,7 @@ class LocalAssetStore:
         tombstones: dict[str, Any],
         by_sha: dict[str, dict[str, Any]],
     ) -> dict[str, Any] | None:
+        source_metadata = _safe_asset_source(image)
         existing_id = image.get("localAssetId")
         existing = None
         if isinstance(existing_id, str):
@@ -401,6 +424,8 @@ class LocalAssetStore:
         src = image.get("src")
         if not isinstance(src, str):
             if existing:
+                if source_metadata and not existing.get("source"):
+                    existing["source"] = source_metadata
                 image["localAssetName"] = existing.get("file_name")
                 return existing
             return None
@@ -414,6 +439,8 @@ class LocalAssetStore:
         if existing and str(existing.get("sha256") or "") == sha256:
             self._write_asset_bytes(str(existing.get("file_name") or ""), raw)
             existing["last_used_at"] = self._now()
+            if source_metadata and not existing.get("source"):
+                existing["source"] = source_metadata
             image["localAssetName"] = existing.get("file_name")
             return existing
 
@@ -430,6 +457,8 @@ class LocalAssetStore:
         if existing:
             self._write_asset_bytes(str(existing.get("file_name") or ""), raw)
             existing["last_used_at"] = now
+            if source_metadata and not existing.get("source"):
+                existing["source"] = source_metadata
             return existing
 
         original_name = str(image.get("name") or image.get("sourcePath") or "图片")
@@ -446,6 +475,7 @@ class LocalAssetStore:
             "byte_size": len(raw),
             "created_at": now,
             "last_used_at": now,
+            **({"source": source_metadata} if source_metadata else {}),
         }
         assets[asset_id] = asset
         by_sha[sha256] = asset
@@ -552,6 +582,7 @@ class LocalAssetStore:
             "localFileName": file_name,
             "folderName": self.folder_name,
             "storageMode": "local-server",
+            **({"source": asset["source"]} if isinstance(asset.get("source"), dict) else {}),
         }
 
     def list_assets(self, local_store: dict[str, Any]) -> list[dict[str, Any]]:

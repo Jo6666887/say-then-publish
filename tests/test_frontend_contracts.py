@@ -97,6 +97,73 @@ class AiOptimizeInteractionContractTests(unittest.TestCase):
         self.assertIn("fetch(AI_OPTIMIZE_URL", run)
 
 
+class IllustrationInteractionContractTests(unittest.TestCase):
+    def test_opening_illustration_modal_is_read_only_until_explicit_search(self):
+        body = function_body("openIllustrationModal")
+        self.assertNotIn("fetch(", body)
+        self.assertNotIn("saveState(", body)
+        self.assertNotIn("runIllustrationSearch(", body)
+        self.assertIn('els.workspace?.setAttribute("inert", "")', body)
+        self.assertIn('els.workspace?.removeAttribute("inert")', function_body("closeIllustrationModal"))
+
+    def test_search_and_apply_are_separate_explicit_actions(self):
+        bind = function_body("bindEvents")
+        self.assertIn('els.illustrationSearch?.addEventListener("click"', bind)
+        self.assertIn("runIllustrationSearch()", bind)
+        self.assertIn('els.illustrationApply?.addEventListener("click"', bind)
+        self.assertIn("applyIllustrationSelection()", bind)
+        self.assertEqual(
+            APP.count("runIllustrationSearch("),
+            2,
+            "online search must only have its function definition and explicit button binding",
+        )
+
+    def test_search_locks_saved_project_content_and_revision(self):
+        body = function_body("runIllustrationSearch")
+        self.assertIn("saveState()", body)
+        self.assertIn("flushProjectStoreToIndexedDb()", body)
+        self.assertIn("baseUpdatedAt", body)
+        self.assertIn("content: before", body)
+        self.assertIn("els.content.value !== before", body)
+        self.assertNotIn("state.images =", body)
+
+    def test_import_is_all_or_nothing_and_never_keeps_remote_urls(self):
+        body = function_body("applyIllustrationSelection")
+        self.assertIn("for (const { candidate, block } of selected)", body)
+        self.assertIn("/^data:image\\/", body)
+        self.assertIn("commitIllustrationRevision", body)
+        self.assertNotIn("state.images =", body)
+        self.assertIn("ILLUSTRATION_MAX_TOTAL_BYTES", body)
+        self.assertIn("pending.beforeContent", body)
+        self.assertIn("pending.baseUpdatedAt", body)
+
+    def test_final_project_commit_is_conditional_and_mutates_state_only_after_server_save(self):
+        body = function_body("commitIllustrationRevision")
+        save_at = body.index("await saveProjectStoreToSharedServer")
+        mutation_at = body.index("state.projects =")
+        self.assertLess(save_at, mutation_at)
+        self.assertIn("expectedProjectId: pending.projectId", body)
+        self.assertIn("expectedUpdatedAt: pending.baseUpdatedAt", body)
+        self.assertIn("if (!committed.saved)", body)
+        self.assertIn("saveProjectStoreToIndexedDb", body)
+
+    def test_web_source_and_license_survive_resource_library_reinsert(self):
+        render_library = function_body("renderAssetLibrary")
+        self.assertIn("normalizeWebAssetSource(asset.source)", render_library)
+        self.assertIn("asset-library-source-link", render_library)
+        insert = function_body("insertAssetFromLibrary")
+        self.assertIn("normalizeWebAssetSource(detail.source || asset.source)", insert)
+        self.assertIn("...(source ? { source } : {})", insert)
+
+    def test_marker_insertion_verifies_original_text_byte_for_byte(self):
+        body = function_body("insertIllustrationMarkers")
+        self.assertIn("originalContent.slice", body)
+        self.assertIn("insertedRanges", body)
+        self.assertIn("restored !== originalContent", body)
+        self.assertNotIn(".trim(", body)
+        self.assertNotIn(".replaceAll(", body)
+
+
 class CardThemeContractTests(unittest.TestCase):
     def test_card_theme_round_trips_with_compatible_default(self):
         self.assertIn('const CARD_THEME_DEFAULT = "social-clean"', APP)
@@ -110,6 +177,21 @@ class CardThemeContractTests(unittest.TestCase):
         themes = constant_object("CARD_THEMES")
         theme_ids = set(re.findall(r'data-card-theme="([^"]+)"', HTML))
         self.assertGreaterEqual(len(theme_ids), 5)
+        for theme_id in (
+            "paper-ink",
+            "porcelain-tech",
+            "forest-note",
+            "kraft-memory",
+            "dune-gallery",
+            "midnight-gilt",
+            "swiss-blue",
+            "swiss-yellow",
+            "swiss-green",
+            "swiss-orange",
+        ):
+            self.assertIn(f'"{theme_id}"', themes)
+        self.assertIn('group: "editorial"', APP)
+        self.assertIn('group: "swiss"', APP)
         self.assertIn('identityPlacement: "top"', themes)
         self.assertIn('identityPlacement: "bottom"', themes)
         self.assertIn('pageNumber: "top-right"', themes)
@@ -145,8 +227,21 @@ class CardThemeContractTests(unittest.TestCase):
         self.assertIn("cardThemeButtons", bind)
         self.assertIn("applyCardTheme", bind)
         apply_theme = function_body("applyCardTheme")
-        self.assertIn("state.cardTheme = themeId", apply_theme)
-        self.assertIn("flushAppearanceSaveIfHydrated()", apply_theme)
+        self.assertIn("applyCardThemeId", apply_theme)
+        apply_theme_id = function_body("applyCardThemeId")
+        self.assertIn("state.cardTheme = themeId", apply_theme_id)
+        self.assertIn("flushAppearanceSaveIfHydrated()", apply_theme_id)
+
+    def test_full_theme_library_is_filterable_and_does_not_touch_content(self):
+        self.assertIn('id="themeLibraryModal"', HTML)
+        self.assertIn('data-theme-filter="editorial"', HTML)
+        self.assertIn('data-theme-filter="swiss"', HTML)
+        render = function_body("renderThemeLibrary")
+        self.assertIn("Object.entries(CARD_THEMES)", render)
+        self.assertIn("theme-library-item", render)
+        apply_theme_id = function_body("applyCardThemeId")
+        self.assertNotIn("els.content.value =", apply_theme_id)
+        self.assertNotIn("state.images =", apply_theme_id)
 
 
 if __name__ == "__main__":

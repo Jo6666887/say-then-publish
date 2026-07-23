@@ -192,6 +192,130 @@ class AILayoutService:
             "reason": self.config.disabled_reason or None,
         }
 
+    def plan_illustrations(
+        self,
+        blocks: Sequence[Mapping[str, str]],
+        *,
+        max_images: int,
+    ) -> list[dict[str, str]]:
+        """Plan search queries for caller-owned block IDs without editing copy."""
+
+        if not self.config.enabled:
+            raise AILayoutDisabledError(
+                self.config.disabled_reason,
+                code="AI_LAYOUT_DISABLED",
+            )
+        if (
+            not isinstance(max_images, int)
+            or isinstance(max_images, bool)
+            or not 1 <= max_images <= 3
+        ):
+            raise AILayoutValidationError(
+                "配图数量无效",
+                code="INVALID_ILLUSTRATION_COUNT",
+            )
+        normalized_blocks = []
+        for block_index, block in enumerate(blocks):
+            if block_index >= 8:
+                break
+            block_id = block.get("blockId") if isinstance(block, Mapping) else None
+            text = block.get("text") if isinstance(block, Mapping) else None
+            if (
+                not isinstance(block_id, str)
+                or not block_id
+                or not isinstance(text, str)
+                or not text.strip()
+            ):
+                raise AILayoutValidationError(
+                    "正文分块无效",
+                    code="INVALID_ILLUSTRATION_BLOCKS",
+                )
+            normalized_blocks.append(
+                {
+                    "blockId": block_id[:128],
+                    "text": text[:800],
+                }
+            )
+
+        payload = {
+            "model": self.config.model_id,
+            "messages": _build_illustration_plan_messages(
+                normalized_blocks,
+                max_images=max_images,
+            ),
+            "temperature": 0,
+            "max_tokens": 1024,
+            "stream": False,
+            "search_disable": True,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.config.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-Appid": self.config.app_id,
+        }
+        if self.config.resource_id:
+            headers["lora_id"] = self.config.resource_id
+        try:
+            response = self._session.post(
+                f"{self.config.api_base}/chat/completions",
+                json=payload,
+                headers=headers,
+                timeout=self.config.timeout_seconds,
+            )
+        except requests.Timeout:
+            raise AILayoutProviderError(
+                "AI 配图规划超时",
+                code="AI_PROVIDER_TIMEOUT",
+            ) from None
+        except requests.RequestException:
+            raise AILayoutProviderError(
+                "AI 配图规划暂时不可用",
+                code="AI_PROVIDER_UNAVAILABLE",
+            ) from None
+
+        try:
+            if response.status_code != 200:
+                raise _http_error(response.status_code)
+            body = response.json()
+        except AILayoutProviderError:
+            raise
+        except (ValueError, requests.RequestException):
+            raise AILayoutResponseError(
+                "AI 配图规划返回格式无效",
+                code="AI_INVALID_RESPONSE",
+            ) from None
+        finally:
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
+
+        choices = body.get("choices") if isinstance(body, dict) else None
+        choice = choices[0] if isinstance(choices, list) and choices else None
+        message = choice.get("message") if isinstance(choice, dict) else None
+        raw_content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(raw_content, str) or not raw_content.strip():
+            raise AILayoutResponseError(
+                "AI 配图规划返回格式无效",
+                code="AI_INVALID_RESPONSE",
+            )
+        parsed = _parse_ai_json_object(raw_content)
+        items = parsed.get("items")
+        if not isinstance(items, list):
+            raise AILayoutResponseError(
+                "AI 配图规划返回格式无效",
+                code="AI_INVALID_SCHEMA",
+            )
+        return [
+            {
+                "blockId": item.get("blockId"),
+                "query": item.get("query"),
+                "reason": item.get("reason", ""),
+            }
+            for item in items[:max_images]
+            if isinstance(item, dict)
+        ]
+
     def optimize(
         self,
         content: str,
@@ -819,6 +943,32 @@ style 只能是 color、bg、bold。重点要克制，优先结论、行动建�
     return [
         {"role": "system", "content": rules},
         {"role": "user", "content": f"请为下面正文提出安全的局部润色与排版选择：\n\n{content}"},
+    ]
+
+
+def _build_illustration_plan_messages(
+    blocks: Sequence[Mapping[str, str]],
+    *,
+    max_images: int,
+) -> list[dict[str, str]]:
+    rules = f"""
+你是中文社交图文配图规划助手。只输出一个合法 JSON 对象，不要代码块、解释或 <think>。
+JSON schema：
+{{"items":[{{"blockId":"必须逐字复制输入中的 blockId","query":"适合图库检索的简短关键词","reason":"简短说明"}}]}}
+
+最多选择 {max_images} 个最适合插图的段落。只能引用输入中已有的 blockId，不得创建、修改或推断 ID。
+query 必须把原文概念翻译成 2-6 个简短英文视觉关键词，只用英文或通用拉丁缩写，
+以便 Wikimedia Commons 与 Pexels 能稳定检索；不要输出中文句子；
+不要生成图片提示词，不要要求 AI 生图，不要加入品牌商标、人物姓名或未经原文支持的事实。
+不要返回正文、改写正文或图片位置偏移。优先选择封面主题、核心概念和具体场景，避免纯装饰。
+""".strip()
+    return [
+        {"role": "system", "content": rules},
+        {
+            "role": "user",
+            "content": "请为这些只读正文分块规划网络配图：\n"
+            + json.dumps(list(blocks), ensure_ascii=False, separators=(",", ":")),
+        },
     ]
 
 

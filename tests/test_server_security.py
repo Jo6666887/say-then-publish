@@ -4,6 +4,7 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from functools import partial
 from http.server import ThreadingHTTPServer
@@ -101,6 +102,89 @@ class FakeAILayoutService:
         )
 
 
+class FakeIllustrationService:
+    def __init__(self):
+        self.search_calls = []
+        self.import_calls = []
+        self.preview_calls = []
+
+    def status(self):
+        return {
+            "ok": True,
+            "enabled": True,
+            "providers": [
+                {
+                    "id": "wikimedia",
+                    "label": "Wikimedia Commons",
+                    "enabled": True,
+                    "requiresKey": False,
+                }
+            ],
+            "limits": {"maxImages": 3, "maxCandidates": 4, "maxImageBytes": 1024},
+            "ai": {"enabled": False, "model": None},
+            "message": "test",
+        }
+
+    def search(self, **kwargs):
+        self.search_calls.append(kwargs)
+        return {
+            "ok": True,
+            "plan": {
+                "source": "fallback",
+                "items": [
+                    {
+                        "blockId": "block-0",
+                        "query": "正文",
+                        "reason": "主题",
+                    }
+                ],
+            },
+            "candidates": [
+                {
+                    "id": "a" * 32,
+                    "blockId": "block-0",
+                    "provider": "wikimedia",
+                    "title": "候选",
+                    "thumbnailUrl": "/api/illustrations/candidates/" + "a" * 32 + "/preview",
+                    "previewUrl": "/api/illustrations/candidates/" + "a" * 32 + "/preview",
+                    "sourcePageUrl": "https://commons.wikimedia.org/wiki/File:Safe.jpg",
+                    "creator": "Alice",
+                    "license": "CC BY-SA 4.0",
+                    "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+                    "width": 100,
+                    "height": 80,
+                }
+            ],
+            "expiresAt": "2099-01-01T00:00:00+00:00",
+        }
+
+    def import_candidate(self, candidate_id, **kwargs):
+        self.import_calls.append((candidate_id, kwargs))
+        return {
+            "ok": True,
+            "blockId": "block-0",
+            "asset": {
+                "dataUrl": "data:image/png;base64,aW1hZ2U=",
+                "mimeType": "image/png",
+                "byteSize": 5,
+                "width": 1,
+                "height": 1,
+                "source": {
+                    "provider": "wikimedia",
+                    "title": "候选",
+                    "sourcePageUrl": "https://commons.wikimedia.org/wiki/File:Safe.jpg",
+                    "creator": "Alice",
+                    "license": "CC BY-SA 4.0",
+                    "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+                },
+            },
+        }
+
+    def preview(self, candidate_id):
+        self.preview_calls.append(candidate_id)
+        return b"image", "image/png"
+
+
 class StaticFileBoundaryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -183,6 +267,25 @@ class StaticFileBoundaryTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertIn("跨站", body.decode("utf-8"))
 
+    def test_dns_rebinding_host_is_rejected_for_reads_and_mutations(self):
+        port = urllib.parse.urlparse(self.base_url).port
+        headers = {
+            "Host": f"attacker.example:{port}",
+            "Origin": f"http://attacker.example:{port}",
+        }
+        status, body = self.request_status("/api/project-store", headers=headers)
+        self.assertEqual(status, 403)
+        self.assertIn("非本机", body.decode("utf-8"))
+
+        status, body = self.request_status(
+            "/api/illustrations/search",
+            method="POST",
+            headers={**headers, "Content-Type": "application/json"},
+            data=b"{}",
+        )
+        self.assertEqual(status, 403)
+        self.assertIn("非本机", body.decode("utf-8"))
+
     def test_ai_status_is_public_but_contains_no_credentials(self):
         fake_ai = FakeAILayoutService()
         with mock.patch.object(server, "AI_LAYOUT", fake_ai):
@@ -191,6 +294,249 @@ class StaticFileBoundaryTests(unittest.TestCase):
         payload = json.loads(body.decode("utf-8"))
         self.assertEqual(payload, {"enabled": True, "model": "test-model", "reason": None})
         self.assertNotIn("key", body.decode("utf-8").lower())
+
+    def test_illustration_status_is_public_but_contains_no_credentials(self):
+        fake_service = FakeIllustrationService()
+        with mock.patch.object(server, "ILLUSTRATIONS", fake_service):
+            status, body = self.request_status("/api/illustrations/status")
+        self.assertEqual(status, 200)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertTrue(payload["enabled"])
+        self.assertNotIn("apiKey", body.decode("utf-8"))
+        self.assertNotIn("secret", body.decode("utf-8").lower())
+
+    def test_illustration_search_requires_exact_saved_revision_and_never_writes_store(self):
+        fake_service = FakeIllustrationService()
+        store = {
+            "activeId": "project-image",
+            "projects": [
+                {
+                    "id": "project-image",
+                    "updatedAt": 456789,
+                    "data": {"content": "# 正文"},
+                }
+            ],
+        }
+        request_payload = {
+            "projectId": "project-image",
+            "baseUpdatedAt": 456789,
+            "content": "# 正文",
+            "blocks": [{"blockId": "block-0", "text": "# 正文"}],
+            "provider": "wikimedia",
+            "maxImages": 1,
+            "maxCandidates": 2,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            store_file = Path(temporary) / "project-store.json"
+            store_file.write_text(json.dumps(store), encoding="utf-8")
+            with (
+                mock.patch.object(server, "STORE_FILE", store_file),
+                mock.patch.object(server, "ILLUSTRATIONS", fake_service),
+            ):
+                status, body = self.request_status(
+                    "/api/illustrations/search",
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                    data=json.dumps(request_payload).encode("utf-8"),
+                )
+                saved_after = json.loads(store_file.read_text(encoding="utf-8"))
+        self.assertEqual(status, 200)
+        response = json.loads(body.decode("utf-8"))
+        self.assertEqual(response["baseUpdatedAt"], 456789)
+        self.assertEqual(response["candidates"][0]["blockId"], "block-0")
+        self.assertEqual(saved_after, store)
+        self.assertEqual(fake_service.search_calls[0]["content"], "# 正文")
+
+    def test_illustration_search_rejects_stale_content_before_provider_call(self):
+        fake_service = FakeIllustrationService()
+        store = {
+            "activeId": "project-image",
+            "projects": [
+                {
+                    "id": "project-image",
+                    "updatedAt": 20,
+                    "data": {"content": "服务器新版"},
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            store_file = Path(temporary) / "project-store.json"
+            store_file.write_text(json.dumps(store), encoding="utf-8")
+            with (
+                mock.patch.object(server, "STORE_FILE", store_file),
+                mock.patch.object(server, "ILLUSTRATIONS", fake_service),
+            ):
+                status, body = self.request_status(
+                    "/api/illustrations/search",
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                    data=json.dumps(
+                        {
+                            "projectId": "project-image",
+                            "baseUpdatedAt": 20,
+                            "content": "浏览器旧版",
+                            "blocks": [{"blockId": "block-0", "text": "浏览器旧版"}],
+                        }
+                    ).encode("utf-8"),
+                )
+        self.assertEqual(status, 409)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(payload["error"]["code"], "DRAFT_VERSION_CONFLICT")
+        self.assertEqual(fake_service.search_calls, [])
+
+    def test_illustration_import_returns_data_only_and_never_writes_store(self):
+        fake_service = FakeIllustrationService()
+        store = {
+            "activeId": "project-image",
+            "projects": [
+                {
+                    "id": "project-image",
+                    "updatedAt": 30,
+                    "data": {"content": "正文"},
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            store_file = Path(temporary) / "project-store.json"
+            store_file.write_text(json.dumps(store), encoding="utf-8")
+            with (
+                mock.patch.object(server, "STORE_FILE", store_file),
+                mock.patch.object(server, "ILLUSTRATIONS", fake_service),
+            ):
+                status, body = self.request_status(
+                    "/api/illustrations/import",
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                    data=json.dumps(
+                        {
+                            "projectId": "project-image",
+                            "baseUpdatedAt": 30,
+                            "content": "正文",
+                            "candidateId": "a" * 32,
+                        }
+                    ).encode("utf-8"),
+                )
+                saved_after = json.loads(store_file.read_text(encoding="utf-8"))
+        self.assertEqual(status, 200)
+        response = json.loads(body.decode("utf-8"))
+        self.assertTrue(response["asset"]["dataUrl"].startswith("data:image/png;base64,"))
+        self.assertEqual(saved_after, store)
+        self.assertEqual(fake_service.import_calls[0][0], "a" * 32)
+
+    def test_illustration_import_rechecks_revision_after_remote_download(self):
+        store = {
+            "activeId": "project-image",
+            "projects": [
+                {
+                    "id": "project-image",
+                    "updatedAt": 30,
+                    "data": {"content": "正文"},
+                }
+            ],
+        }
+        newer_store = {
+            "activeId": "project-image",
+            "projects": [
+                {
+                    "id": "project-image",
+                    "updatedAt": 31,
+                    "data": {"content": "另一台浏览器保存的新正文"},
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            store_file = Path(temporary) / "project-store.json"
+            store_file.write_text(json.dumps(store), encoding="utf-8")
+
+            class RacingIllustrationService(FakeIllustrationService):
+                def import_candidate(self, candidate_id, **kwargs):
+                    result = super().import_candidate(candidate_id, **kwargs)
+                    store_file.write_text(json.dumps(newer_store), encoding="utf-8")
+                    return result
+
+            fake_service = RacingIllustrationService()
+            with (
+                mock.patch.object(server, "STORE_FILE", store_file),
+                mock.patch.object(server, "ILLUSTRATIONS", fake_service),
+            ):
+                status, body = self.request_status(
+                    "/api/illustrations/import",
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                    data=json.dumps(
+                        {
+                            "projectId": "project-image",
+                            "baseUpdatedAt": 30,
+                            "content": "正文",
+                            "candidateId": "a" * 32,
+                        }
+                    ).encode("utf-8"),
+                )
+
+        self.assertEqual(status, 409)
+        response = json.loads(body.decode("utf-8"))
+        self.assertEqual(response["error"]["code"], "DRAFT_VERSION_CONFLICT")
+        self.assertNotIn("dataUrl", response)
+
+    def test_illustration_preview_is_same_origin_nosniff_content(self):
+        fake_service = FakeIllustrationService()
+        with mock.patch.object(server, "ILLUSTRATIONS", fake_service):
+            request = urllib.request.Request(
+                f"{self.base_url}/api/illustrations/candidates/{'a' * 32}/preview"
+            )
+            with urllib.request.urlopen(request, timeout=3) as response:
+                body = response.read()
+                headers = response.headers
+        self.assertEqual(body, b"image")
+        self.assertEqual(headers.get("X-Content-Type-Options"), "nosniff")
+        self.assertEqual(headers.get("Cross-Origin-Resource-Policy"), "same-origin")
+        self.assertEqual(fake_service.preview_calls, ["a" * 32])
+
+    def test_illustration_provider_error_does_not_leak_remote_url_or_query(self):
+        class FailingIllustrationService(FakeIllustrationService):
+            def search(self, **kwargs):
+                del kwargs
+                raise server.IllustrationProviderError(
+                    "图片搜索服务暂时不可用",
+                    code="IMAGE_SEARCH_UNAVAILABLE",
+                )
+
+        fake_service = FailingIllustrationService()
+        secret_content = "private-query-secret"
+        store = {
+            "activeId": "project-image",
+            "projects": [
+                {
+                    "id": "project-image",
+                    "updatedAt": 40,
+                    "data": {"content": secret_content},
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            store_file = Path(temporary) / "project-store.json"
+            store_file.write_text(json.dumps(store), encoding="utf-8")
+            with (
+                mock.patch.object(server, "STORE_FILE", store_file),
+                mock.patch.object(server, "ILLUSTRATIONS", fake_service),
+            ):
+                status, body = self.request_status(
+                    "/api/illustrations/search",
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                    data=json.dumps(
+                        {
+                            "projectId": "project-image",
+                            "baseUpdatedAt": 40,
+                            "content": secret_content,
+                            "blocks": [{"blockId": "block-0", "text": secret_content}],
+                        }
+                    ).encode("utf-8"),
+                )
+        self.assertEqual(status, 502)
+        rendered = body.decode("utf-8")
+        self.assertNotIn(secret_content, rendered)
+        self.assertNotIn("http", rendered.lower())
 
     def test_ai_preview_requires_exact_saved_project_version_and_never_writes_result(self):
         fake_ai = FakeAILayoutService()
@@ -489,6 +835,74 @@ class StaticFileBoundaryTests(unittest.TestCase):
         self.assertTrue(response["saveMeta"]["saved"])
         self.assertEqual(response["saveMeta"]["savedUpdatedAt"], 201)
         self.assertEqual(response["projects"][0]["data"]["content"], "新正文")
+        schedule.assert_called_once()
+
+    def test_conditional_project_store_put_requires_the_expected_base_revision(self):
+        fake_cloud = FakeCloudStore()
+        current = {
+            "activeId": "project-1",
+            "projects": [
+                {"id": "project-1", "updatedAt": 200, "data": {"content": "基础正文"}}
+            ],
+        }
+        incoming = {
+            "activeId": "project-1",
+            "projects": [
+                {"id": "project-1", "updatedAt": 202, "data": {"content": "插入配图后的正文"}}
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            store_file = Path(temporary) / "project-store.json"
+            with (
+                mock.patch.object(server, "STORE_FILE", store_file),
+                mock.patch.object(server, "CLOUD", fake_cloud),
+                mock.patch.dict(server.CLOUD_STATUS, enabled_cloud_status(), clear=True),
+                mock.patch.object(server, "schedule_cloud_sync") as schedule,
+            ):
+                store_file.write_text(json.dumps(current), encoding="utf-8")
+                status, _ = self.request_status(
+                    "/api/project-store",
+                    method="PUT",
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-WTP-Expected-Project-Id": "project-1",
+                        "X-WTP-Expected-Project-Updated-At": "200",
+                    },
+                    data=json.dumps(incoming).encode("utf-8"),
+                )
+                self.assertEqual(status, 200)
+
+                store_file.write_text(
+                    json.dumps(
+                        {
+                            "activeId": "project-1",
+                            "projects": [
+                                {
+                                    "id": "project-1",
+                                    "updatedAt": 201,
+                                    "data": {"content": "另一台浏览器的新正文"},
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                status, body = self.request_status(
+                    "/api/project-store",
+                    method="PUT",
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-WTP-Expected-Project-Id": "project-1",
+                        "X-WTP-Expected-Project-Updated-At": "200",
+                    },
+                    data=json.dumps(incoming).encode("utf-8"),
+                )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(
+            json.loads(body.decode("utf-8"))["code"],
+            "DRAFT_VERSION_CONFLICT",
+        )
         schedule.assert_called_once()
 
     def test_project_delete_persists_tombstone_and_keeps_a_valid_active_project(self):

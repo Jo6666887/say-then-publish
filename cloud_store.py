@@ -33,6 +33,28 @@ TOS_DELETED_PREFIX = "tos-deleted://"
 PROJECT_TOMBSTONE_FIELD = "__writeThenPublishDeletedAt"
 
 
+def _safe_asset_source(image: dict[str, Any]) -> dict[str, str] | None:
+    source = image.get("source") if isinstance(image, dict) else None
+    if not isinstance(source, dict) or source.get("kind") != "web":
+        return None
+    limits = {
+        "provider": 40,
+        "title": 240,
+        "sourcePageUrl": 1000,
+        "creator": 240,
+        "license": 160,
+        "licenseUrl": 1000,
+        "query": 240,
+        "fetchedAt": 80,
+    }
+    normalized = {"kind": "web"}
+    for field, maximum in limits.items():
+        value = source.get(field)
+        if isinstance(value, str) and value.strip():
+            normalized[field] = value.strip()[:maximum]
+    return normalized
+
+
 class CloudStoreError(RuntimeError):
     pass
 
@@ -404,6 +426,55 @@ class CloudStore:
             raise CloudStoreError("Supabase 未返回新资源记录")
         return rows[0]
 
+    def _backfill_asset_metadata(self, asset: dict, metadata: dict) -> dict:
+        """Add missing provenance fields to a deduplicated cloud asset."""
+
+        current = (
+            copy.deepcopy(asset.get("metadata"))
+            if isinstance(asset.get("metadata"), dict)
+            else {}
+        )
+        merged = copy.deepcopy(current)
+        for key, value in metadata.items():
+            if value in (None, "", {}, []):
+                continue
+            if key == "source" and isinstance(value, dict):
+                existing_source = (
+                    merged.get("source")
+                    if isinstance(merged.get("source"), dict)
+                    else {}
+                )
+                next_source = copy.deepcopy(existing_source)
+                for source_key, source_value in value.items():
+                    if source_value not in (None, "") and not next_source.get(source_key):
+                        next_source[source_key] = source_value
+                if next_source:
+                    merged["source"] = next_source
+            elif key not in merged:
+                merged[key] = copy.deepcopy(value)
+        if merged == current:
+            return asset
+
+        rows = self.rest.request(
+            "PATCH",
+            "/rest/v1/write_then_publish_assets",
+            query={
+                "workspace_id": f"eq.{self.config.workspace_id}",
+                "asset_id": f"eq.{asset['asset_id']}",
+                "deleted_at": "is.null",
+                "delete_pending_at": "is.null",
+            },
+            payload={"metadata": merged},
+            prefer="return=representation",
+        )
+        if isinstance(rows, list) and rows:
+            updated = rows[0]
+            asset.clear()
+            asset.update(updated)
+        else:
+            asset["metadata"] = merged
+        return asset
+
     def _ensure_asset(
         self,
         image: dict,
@@ -420,13 +491,14 @@ class CloudStore:
             if existing and (existing.get("deleted_at") or existing.get("delete_pending_at")):
                 return None
             if existing:
-                return existing
+                return self._backfill_asset_metadata(existing, metadata)
 
         src = image.get("src")
         if not isinstance(src, str):
             return None
         if src.startswith(TOS_ASSET_PREFIX):
-            return known_by_id.get(src[len(TOS_ASSET_PREFIX) :])
+            existing = known_by_id.get(src[len(TOS_ASSET_PREFIX) :])
+            return self._backfill_asset_metadata(existing, metadata) if existing else None
         parsed = self._parse_data_uri(src)
         if not parsed:
             return None
@@ -436,7 +508,7 @@ class CloudStore:
         sha256 = hashlib.sha256(raw).hexdigest()
         existing = known_by_sha.get(sha256)
         if existing:
-            return existing
+            return self._backfill_asset_metadata(existing, metadata)
 
         extension = self._extension(mime_type, original_name)
         object_key = f"{self.config.tos_key_prefix}{sha256[:2]}/{sha256}{extension}"
@@ -499,13 +571,21 @@ class CloudStore:
             if not isinstance(cloud_image, dict):
                 cloud_image = copy.deepcopy(local_image)
                 cloud_images[image_id] = cloud_image
+            asset_metadata = {
+                "kind": "content",
+                "firstProjectId": project.get("id"),
+                "firstImageId": image_id,
+            }
+            source_metadata = _safe_asset_source(local_image)
+            if source_metadata:
+                asset_metadata["source"] = source_metadata
             asset = self._ensure_asset(
                 local_image,
                 original_name=str(local_image.get("name") or local_image.get("sourcePath") or image_id),
                 known_by_sha=known_by_sha,
                 known_by_id=known_by_id,
                 all_by_id=all_by_id,
-                metadata={"kind": "content", "firstProjectId": project.get("id"), "firstImageId": image_id},
+                metadata=asset_metadata,
             )
             if asset:
                 asset_id = str(asset["asset_id"])
@@ -844,6 +924,8 @@ class CloudStore:
     @staticmethod
     def _public_asset(asset: dict, reference_count: int) -> dict:
         asset_id = str(asset["asset_id"])
+        metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+        source = metadata.get("source") if isinstance(metadata.get("source"), dict) else None
         return {
             "assetId": asset_id,
             "originalName": asset.get("original_name") or "image",
@@ -854,6 +936,7 @@ class CloudStore:
             "referenceCount": reference_count,
             "previewUrl": f"/api/assets/{quote(asset_id)}/content",
             "cloudObjectKey": asset.get("object_key"),
+            **({"source": source} if source else {}),
         }
 
     def list_assets(self, local_store: dict) -> list[dict]:
