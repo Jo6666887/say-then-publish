@@ -10,6 +10,8 @@ const OBSIDIAN_VAULT_STORE = "settings";
 const OBSIDIAN_VAULT_KEY = "directoryHandle";
 const STORAGE_KEY = "graphicTextLayoutState.v1";
 const PROJECTS_STORAGE_KEY = "graphicTextLayoutProjects.v1";
+const ACTIVE_PROJECT_STORAGE_KEY = "writeThenPublishActiveProject.v1";
+const PENDING_PROJECT_DELETIONS_STORAGE_KEY = "writeThenPublishPendingProjectDeletions.v1";
 const PANEL_LAYOUT_STORAGE_KEY = "writeThenPublishPanelLayout.v1";
 const EXPORT_SCALE_STORAGE_KEY = "writeThenPublishExportScale.v1";
 const UI_THEME_STORAGE_KEY = "writeThenPublishUiTheme.v1";
@@ -18,6 +20,7 @@ const PROJECT_BACKUP_VERSION = 1;
 const LOCAL_DATABASE_NAME = "writeThenPublishLocal.v1";
 const LOCAL_DATABASE_STORE = "snapshots";
 const LOCAL_DATABASE_PROJECTS_KEY = "projects";
+const LOCAL_DATABASE_PENDING_PROJECT_DELETIONS_KEY = "pendingProjectDeletions";
 const LOCAL_ASSET_DIRECTORY_KEY = "assetLibraryDirectoryHandle";
 const LOCAL_STATE_SAVE_DELAY = 450;
 const LOCAL_STATE_SAVE_MAX_WAIT = 5000;
@@ -334,6 +337,7 @@ const state = {
   articleColor: "#0f766e",
   currentProjectId: null,
   projects: [],
+  deletedProjects: [],
   historyFilter: "all",
   exportScale: 2,
   localDatabaseHydrated: false,
@@ -346,6 +350,8 @@ const state = {
 
 let localDatabaseSaveTimer = 0;
 let localDatabaseSaveChain = Promise.resolve(true);
+let pendingProjectDeletionSaveChain = Promise.resolve({ saved: true, deletions: [] });
+let pendingProjectDeletionsCache = null;
 let legacyStateLocalStorageUnavailable = false;
 let projectStoreLocalStorageUnavailable = false;
 let sharedProjectStoreAvailable = null;
@@ -399,7 +405,6 @@ function defaultFormState() {
     articleFont: "sans",
     articleSize: "normal",
     articleColor: "#0f766e",
-    uiTheme: "light",
     avatar: sampleAvatar,
     avatarCrop: null,
     images: defaultImages(),
@@ -1226,6 +1231,7 @@ function saveState() {
 function loadState() {
   const store = loadProjectStore();
   state.projects = store.projects;
+  state.deletedProjects = store.deletedProjects || [];
   state.currentProjectId = store.activeId || store.projects[0]?.id || GUIDE_CARDS_PROJECT_ID;
   return findHistoryProject(state.currentProjectId)?.data || findHistoryProject(GUIDE_CARDS_PROJECT_ID)?.data || defaultFormState();
 }
@@ -1247,6 +1253,8 @@ function migrateStoredState(data) {
   data.articleFont = normalizeArticleFont(data.articleFont);
   data.articleSize = normalizeArticleSize(data.articleSize);
   data.articleColor = normalizeArticleColor(data.articleColor);
+  // UI appearance is a browser preference, not part of a publishable project.
+  delete data.uiTheme;
   data.images = normalizeImagesForContent(data.content, data.images);
   return data;
 }
@@ -1283,6 +1291,7 @@ function projectStoreSnapshot() {
   return {
     activeId: state.currentProjectId,
     projects: state.projects.filter((project) => !isBuiltInProject(project)).slice(0, MAX_PROJECTS),
+    deletedProjects: normalizeProjectDeletions(state.deletedProjects),
   };
 }
 
@@ -1366,6 +1375,52 @@ async function saveProjectStoreToIndexedDb(snapshot) {
   });
 }
 
+async function savePendingProjectDeletionsToIndexedDb(deletions) {
+  const database = await openLocalDatabase();
+  if (!database) return false;
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(LOCAL_DATABASE_STORE, "readwrite");
+    transaction.objectStore(LOCAL_DATABASE_STORE).put(
+      normalizeProjectDeletions(deletions),
+      LOCAL_DATABASE_PENDING_PROJECT_DELETIONS_KEY,
+    );
+    transaction.oncomplete = () => {
+      database.close();
+      resolve(true);
+    };
+    transaction.onerror = () => {
+      const error = transaction.error || new Error("待重试删除记录写入失败");
+      database.close();
+      reject(error);
+    };
+  });
+}
+
+async function loadPendingProjectDeletionsFromIndexedDb() {
+  const database = await openLocalDatabase();
+  if (!database) return [];
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(LOCAL_DATABASE_STORE, "readonly");
+    const request = transaction.objectStore(LOCAL_DATABASE_STORE).get(
+      LOCAL_DATABASE_PENDING_PROJECT_DELETIONS_KEY,
+    );
+    let deletions = [];
+    request.onsuccess = () => {
+      deletions = normalizeProjectDeletions(request.result);
+    };
+    request.onerror = () => reject(request.error || new Error("待重试删除记录读取失败"));
+    transaction.oncomplete = () => {
+      database.close();
+      resolve(deletions);
+    };
+    transaction.onerror = () => {
+      const error = transaction.error || new Error("待重试删除记录读取失败");
+      database.close();
+      reject(error);
+    };
+  });
+}
+
 async function loadProjectStoreFromSharedServer() {
   try {
     const response = await fetch(SHARED_PROJECT_STORE_URL, { cache: "no-store" });
@@ -1395,16 +1450,22 @@ async function saveProjectStoreToSharedServer(snapshot) {
     const confirmedProject = responseStore?.projects?.find((project) => project.id === snapshot.activeId);
     const targetUpdatedAt = Number(targetProject?.updatedAt || 0);
     const confirmedUpdatedAt = Number(payload?.saveMeta?.savedUpdatedAt || payload?.save?.updatedAt || confirmedProject?.updatedAt || 0);
-    if (
-      payload?.saveMeta?.saved !== true
-      || payload.saveMeta.projectId !== snapshot.activeId
-      || !targetUpdatedAt
-      || confirmedUpdatedAt !== targetUpdatedAt
-    ) {
+    const activeRevisionConfirmed = Boolean(
+      targetProject
+      && payload?.saveMeta?.projectId === snapshot.activeId
+      && targetUpdatedAt
+      && confirmedUpdatedAt === targetUpdatedAt,
+    );
+    if (payload?.saveMeta?.saved !== true || payload?.saveMeta?.snapshotSaved !== true || (targetProject && !activeRevisionConfirmed)) {
       throw new Error("本机服务没有精确确认当前草稿版本");
     }
     sharedProjectStoreAvailable = true;
-    return { saved: true, confirmedUpdatedAt, responseStore };
+    return {
+      saved: true,
+      confirmedUpdatedAt,
+      responseStore,
+      deletedProjects: payload.saveMeta.deletedProjects || [],
+    };
   } catch (error) {
     sharedProjectStoreAvailable = false;
     console.warn("共享草稿库写入失败，已保留浏览器本地副本", error);
@@ -1477,11 +1538,10 @@ async function saveCurrentProjectTextToSharedServer({ keepalive = false } = {}) 
 }
 
 function scheduleCurrentProjectTextSave() {
-  if (!state.localDatabaseHydrated || isBuiltInProjectId(state.currentProjectId)) return;
+  // Full project snapshots are the only publishable revisions. A text-only
+  // revision can otherwise outrank the matching images/layout after refresh.
   window.clearTimeout(sharedTextSaveTimer);
-  sharedTextSaveTimer = window.setTimeout(() => {
-    void saveCurrentProjectTextToSharedServer();
-  }, 320);
+  sharedTextSaveTimer = 0;
 }
 
 async function flushProjectStoreToIndexedDb() {
@@ -1571,17 +1631,176 @@ async function loadProjectStoreFromIndexedDb() {
   });
 }
 
-function mergeProjectLists(existingProjects, incomingProjects) {
+function mergeProjectLists(existingProjects, incomingProjects, { preferIncomingOnEqual = false } = {}) {
   const merged = new Map();
   for (const source of [...(existingProjects || []), ...(incomingProjects || [])]) {
     const project = normalizeProject(source);
     if (!project) continue;
     const current = merged.get(project.id);
-    if (!current || project.updatedAt >= current.updatedAt) merged.set(project.id, project);
+    if (
+      !current
+      || project.updatedAt > current.updatedAt
+      || (preferIncomingOnEqual && project.updatedAt === current.updatedAt && !projectRevisionMatches(project, current))
+    ) {
+      merged.set(project.id, project);
+    }
   }
   return [...merged.values()]
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .slice(0, MAX_PROJECTS);
+}
+
+function projectDeletionTimestamp(deletion) {
+  const value = Number(deletion?.deletedAt || 0);
+  return Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
+function normalizeProjectDeletions(source) {
+  const merged = new Map();
+  for (const deletion of Array.isArray(source) ? source : []) {
+    const id = typeof deletion?.id === "string" ? deletion.id : "";
+    const deletedAt = projectDeletionTimestamp(deletion);
+    if (!id || !deletedAt || isBuiltInProjectId(id)) continue;
+    const previous = merged.get(id);
+    if (!previous || deletedAt > previous.deletedAt) merged.set(id, { id, deletedAt });
+  }
+  return [...merged.values()].sort((a, b) => b.deletedAt - a.deletedAt);
+}
+
+function mergeProjectDeletions(...sources) {
+  return normalizeProjectDeletions(sources.flatMap((source) => Array.isArray(source) ? source : []));
+}
+
+function promoteLocalDeletionIntents(deletions, projects) {
+  const liveById = new Map((projects || []).map((project) => [project.id, project]));
+  return normalizeProjectDeletions(deletions).map((deletion) => {
+    const live = liveById.get(deletion.id);
+    return live && deletion.deletedAt <= Number(live.updatedAt || 0)
+      ? { ...deletion, deletedAt: Number(live.updatedAt || 0) + 1 }
+      : deletion;
+  });
+}
+
+function stableJsonValue(value) {
+  if (Array.isArray(value)) return value.map(stableJsonValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value).sort().map((key) => [key, stableJsonValue(value[key])]),
+    );
+  }
+  return value;
+}
+
+function stableJsonStringify(value) {
+  return JSON.stringify(stableJsonValue(value));
+}
+
+function resolveProjectDeletionWinners(projects, deletions) {
+  const liveById = new Map((projects || []).map((project) => [project.id, project]));
+  const winningDeletions = normalizeProjectDeletions(deletions).filter((deletion) => {
+    const live = liveById.get(deletion.id);
+    return !live || deletion.deletedAt >= Number(live.updatedAt || 0);
+  });
+  const deletedIds = new Set(winningDeletions.map((deletion) => deletion.id));
+  return {
+    projects: (projects || []).filter((project) => !deletedIds.has(project.id)),
+    deletedProjects: winningDeletions,
+  };
+}
+
+function rememberActiveProject(projectId) {
+  if (typeof projectId !== "string" || !projectId) return false;
+  try {
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, projectId);
+    return true;
+  } catch (error) {
+    console.warn("当前打开项目记录失败", error);
+    return false;
+  }
+}
+
+function loadRememberedActiveProject() {
+  try {
+    return localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+
+function loadPendingProjectDeletionsFromLocalStorage() {
+  try {
+    return normalizeProjectDeletions(JSON.parse(localStorage.getItem(PENDING_PROJECT_DELETIONS_STORAGE_KEY) || "[]"));
+  } catch {
+    return [];
+  }
+}
+
+function loadPendingProjectDeletions() {
+  if (pendingProjectDeletionsCache === null) {
+    pendingProjectDeletionsCache = loadPendingProjectDeletionsFromLocalStorage();
+  }
+  return [...pendingProjectDeletionsCache];
+}
+
+function savePendingProjectDeletionsToLocalStorage(deletions) {
+  try {
+    localStorage.setItem(
+      PENDING_PROJECT_DELETIONS_STORAGE_KEY,
+      JSON.stringify(normalizeProjectDeletions(deletions)),
+    );
+    return true;
+  } catch (error) {
+    console.warn("待重试删除记录保存失败", error);
+    return false;
+  }
+}
+
+function updatePendingProjectDeletions(transform) {
+  const queuedUpdate = pendingProjectDeletionSaveChain
+    .catch(() => ({ saved: false, deletions: loadPendingProjectDeletions() }))
+    .then(async () => {
+      let indexedDbDeletions = [];
+      try {
+        indexedDbDeletions = await loadPendingProjectDeletionsFromIndexedDb();
+      } catch (error) {
+        console.warn("IndexedDB 待重试删除记录读取失败", error);
+      }
+      const current = mergeProjectDeletions(
+        loadPendingProjectDeletions(),
+        loadPendingProjectDeletionsFromLocalStorage(),
+        indexedDbDeletions,
+      );
+      const next = normalizeProjectDeletions(transform(current));
+      pendingProjectDeletionsCache = next;
+      const localStorageSaved = savePendingProjectDeletionsToLocalStorage(next);
+      let indexedDbSaved = false;
+      try {
+        indexedDbSaved = await savePendingProjectDeletionsToIndexedDb(next);
+      } catch (error) {
+        console.warn("IndexedDB 待重试删除记录写入失败", error);
+      }
+      return {
+        saved: localStorageSaved || indexedDbSaved,
+        deletions: [...next],
+      };
+    });
+  pendingProjectDeletionSaveChain = queuedUpdate;
+  return queuedUpdate;
+}
+
+async function markPendingProjectDeletion(deletion) {
+  const result = await updatePendingProjectDeletions((current) =>
+    mergeProjectDeletions(current, [deletion]),
+  );
+  return result.saved;
+}
+
+async function clearPendingProjectDeletion(projectIds) {
+  const ids = new Set(Array.isArray(projectIds) ? projectIds : [projectIds]);
+  const result = await updatePendingProjectDeletions((current) =>
+    current.filter((deletion) => !ids.has(deletion.id)),
+  );
+  return result.saved;
 }
 
 function projectRevisionMatches(first, second) {
@@ -1595,21 +1814,38 @@ function projectRevisionMatches(first, second) {
   }
   if (first.data === second.data) return true;
   try {
-    return JSON.stringify(first.data) === JSON.stringify(second.data);
+    return stableJsonStringify(first.data) === stableJsonStringify(second.data);
   } catch {
     return false;
   }
 }
 
-function restoreImportedProjects(existingProjects, incomingProjects) {
+function restoreImportedProjects(existingProjects, incomingProjects, deletedProjects = []) {
   const normalizedIncoming = (incomingProjects || []).map(normalizeProject).filter(Boolean);
   const importedIds = new Set(normalizedIncoming.map((project) => project.id));
-  const restoredAt = Date.now();
-  const restoredProjects = normalizedIncoming.map((project, index) => ({
-    ...project,
-    // 用户明确确认导入时，所选备份就是恢复源；更新时间必须晚于当前缓存。
-    updatedAt: restoredAt + index,
-  }));
+  const existingById = new Map(
+    (existingProjects || []).map((project) => [project.id, project]),
+  );
+  const deletionById = new Map(
+    normalizeProjectDeletions(deletedProjects).map((deletion) => [deletion.id, deletion]),
+  );
+  let nextRestoredAt = Date.now();
+  const restoredProjects = normalizedIncoming.map((project) => {
+    const existing = existingById.get(project.id);
+    const deletion = deletionById.get(project.id);
+    const updatedAt = Math.max(
+      nextRestoredAt,
+      Number(project.updatedAt || 0) + 1,
+      Number(existing?.updatedAt || 0) + 1,
+      Number(deletion?.deletedAt || 0) + 1,
+    );
+    nextRestoredAt = updatedAt + 1;
+    return {
+      ...project,
+      // 用户明确确认导入时，备份必须同时胜过本机旧版本与任何未来时钟墓碑。
+      updatedAt,
+    };
+  });
   const untouchedProjects = (existingProjects || [])
     .map(normalizeProject)
     .filter((project) => project && !importedIds.has(project.id));
@@ -1620,24 +1856,68 @@ function restoreImportedProjects(existingProjects, incomingProjects) {
 
 async function hydrateProjectStoreFromIndexedDb() {
   try {
-    const [stored, shared] = await Promise.all([loadProjectStoreFromIndexedDb(), loadProjectStoreFromSharedServer()]);
+    const [stored, shared, indexedDbPendingDeletions] = await Promise.all([
+      loadProjectStoreFromIndexedDb(),
+      loadProjectStoreFromSharedServer(),
+      loadPendingProjectDeletionsFromIndexedDb().catch((error) => {
+        console.warn("IndexedDB 待重试删除记录恢复失败", error);
+        return [];
+      }),
+    ]);
     const storedProjects = stored && Array.isArray(stored.projects) ? stored.projects : [];
     const sharedProjects = shared && Array.isArray(shared.projects) ? shared.projects : [];
     const projectsBeforeHydration = state.projects;
     const activeBeforeHydration = projectsBeforeHydration.find((project) => project.id === state.currentProjectId);
-    const merged = mergeProjectLists(mergeProjectLists(state.projects, storedProjects), sharedProjects);
+    const mergedCandidates = mergeProjectLists(
+      mergeProjectLists(state.projects, storedProjects),
+      sharedProjects,
+      { preferIncomingOnEqual: true },
+    );
+    const localDeletionIntents = promoteLocalDeletionIntents(
+      mergeProjectDeletions(
+        loadPendingProjectDeletions(),
+        indexedDbPendingDeletions,
+      ),
+      mergedCandidates,
+    );
+    if (localDeletionIntents.length) {
+      await updatePendingProjectDeletions((current) =>
+        mergeProjectDeletions(current, localDeletionIntents),
+      );
+    }
+    const sharedDeletions = normalizeProjectDeletions(shared?.deletedProjects);
+    const resolved = resolveProjectDeletionWinners(
+      mergedCandidates,
+      mergeProjectDeletions(
+        state.deletedProjects,
+        stored?.deletedProjects,
+        localDeletionIntents,
+        sharedDeletions,
+      ),
+    );
+    const merged = resolved.projects;
     const changed =
       merged.length !== state.projects.length ||
-      merged.some((project, index) => !projectRevisionMatches(project, state.projects[index]));
+      merged.some((project, index) => !projectRevisionMatches(project, state.projects[index])) ||
+      JSON.stringify(resolved.deletedProjects) !== JSON.stringify(state.deletedProjects);
+    state.deletedProjects = resolved.deletedProjects;
     if (changed) {
       state.projects = merged;
       const mergedActive = state.projects.find((project) => project.id === state.currentProjectId);
-      const preferredActiveId = shared?.activeId || stored?.activeId;
+      // The current browser selection is UI state, not a shared/cloud choice.
+      // Only fall back when that project was actually deleted or is unavailable.
+      const rememberedActiveId = loadRememberedActiveProject();
+      const preferredActiveId = rememberedActiveId || stored?.activeId || shared?.activeId;
       const storedActive = state.projects.find((project) => project.id === preferredActiveId);
       const activeWasReplaced = mergedActive && !projectRevisionMatches(mergedActive, activeBeforeHydration);
-      const projectToApply = activeWasReplaced ? mergedActive : !mergedActive ? storedActive : null;
+      const projectToApply = activeWasReplaced
+        ? mergedActive
+        : !mergedActive && (!isBuiltInProjectId(state.currentProjectId) || !isBuiltInProjectId(rememberedActiveId))
+          ? storedActive || state.projects[0] || findHistoryProject(GUIDE_CARDS_PROJECT_ID)
+          : null;
       if (projectToApply) {
         state.currentProjectId = projectToApply.id;
+        rememberActiveProject(projectToApply.id);
         applyForm(projectToApply.data);
         syncGuideReadOnlyMode();
         resetTextHistory();
@@ -1647,6 +1927,18 @@ async function hydrateProjectStoreFromIndexedDb() {
     }
     state.localDatabaseHydrated = true;
     saveProjectStore();
+    const sharedDeletionById = new Map(sharedDeletions.map((deletion) => [deletion.id, deletion]));
+    const pendingDeletionIntents = localDeletionIntents.filter((deletion) => {
+      const confirmed = sharedDeletionById.get(deletion.id);
+      return !confirmed || confirmed.deletedAt < deletion.deletedAt;
+    });
+    const confirmedDeletionIds = localDeletionIntents
+      .filter((deletion) => !pendingDeletionIntents.some((pending) => pending.id === deletion.id))
+      .map((deletion) => deletion.id);
+    if (confirmedDeletionIds.length) {
+      await clearPendingProjectDeletion(confirmedDeletionIds);
+    }
+    if (pendingDeletionIntents.length) void retryPendingProjectDeletions(pendingDeletionIntents);
     void refreshPersistenceMode();
     if (sharedProjectStoreAvailable) {
       els.status.textContent = "已连接共享草稿库，Codex 与 Chrome 刷新后会读取同一版本";
@@ -1666,30 +1958,43 @@ function loadProjectStore() {
       const projects = Array.isArray(parsed.projects)
         ? parsed.projects.map(normalizeProject).filter(Boolean).slice(0, MAX_PROJECTS)
         : [];
-      const activeId = isBuiltInProjectId(parsed.activeId)
-        ? parsed.activeId
-        : projects.some((project) => project.id === parsed.activeId)
-          ? parsed.activeId
-          : projects[0]?.id || GUIDE_CARDS_PROJECT_ID;
-      return { activeId, projects };
+      const resolved = resolveProjectDeletionWinners(projects, parsed.deletedProjects);
+      const rememberedActiveId = loadRememberedActiveProject();
+      const preferredActiveId = rememberedActiveId || parsed.activeId;
+      const activeId = isBuiltInProjectId(preferredActiveId)
+        ? preferredActiveId
+        : resolved.projects.some((project) => project.id === preferredActiveId)
+          ? preferredActiveId
+          : resolved.projects[0]?.id || GUIDE_CARDS_PROJECT_ID;
+      return { activeId, projects: resolved.projects, deletedProjects: resolved.deletedProjects };
     }
 
     const legacyRaw = localStorage.getItem(STORAGE_KEY);
-    if (!legacyRaw) return { activeId: GUIDE_CARDS_PROJECT_ID, projects: [] };
+    if (!legacyRaw) return { activeId: GUIDE_CARDS_PROJECT_ID, projects: [], deletedProjects: [] };
 
     const legacyData = JSON.parse(legacyRaw);
     const project = createProject(legacyData);
-    return { activeId: project.id, projects: [project] };
+    return { activeId: project.id, projects: [project], deletedProjects: [] };
   } catch {
-    return { activeId: GUIDE_CARDS_PROJECT_ID, projects: [] };
+    return { activeId: GUIDE_CARDS_PROJECT_ID, projects: [], deletedProjects: [] };
   }
 }
 
 function normalizeProject(project) {
   if (!project || typeof project !== "object") return null;
   if (isBuiltInProjectId(project.id)) return null;
-  const data = migrateStoredState({ ...defaultFormState(), ...(project.data || {}) });
-  const updatedAt = Number(project.updatedAt) || Date.now();
+  const sourceData = project.data && typeof project.data === "object" ? project.data : {};
+  const data = migrateStoredState({ ...defaultFormState(), ...sourceData });
+  const sourceUpdatedAt = Number(project.updatedAt) || Date.now();
+  let normalizedChanged = false;
+  try {
+    normalizedChanged = stableJsonStringify(sourceData) !== stableJsonStringify(data);
+  } catch {
+    normalizedChanged = true;
+  }
+  // A migration changes the whole project snapshot. Give it a real revision so
+  // the server never has to accept different data under an identical timestamp.
+  const updatedAt = normalizedChanged ? sourceUpdatedAt + 1 : sourceUpdatedAt;
   return {
     id: project.id || `project_${updatedAt.toString(36)}`,
     title: normalizeProjectTitle(project.title) || projectTitleFromData(data),
@@ -1700,6 +2005,7 @@ function normalizeProject(project) {
 
 function saveProjectStore() {
   const snapshot = projectStoreSnapshot();
+  rememberActiveProject(snapshot.activeId);
   let localStorageSaved = !projectStoreLocalStorageUnavailable;
   if (!projectStoreLocalStorageUnavailable) {
     try {
@@ -2062,8 +2368,11 @@ async function importProjectBackupPayload(payload) {
 
   saveState();
   const beforeById = new Map(state.projects.map((project) => [project.id, project]));
-  state.projects = restoreImportedProjects(state.projects, importedProjects);
+  state.projects = restoreImportedProjects(state.projects, importedProjects, state.deletedProjects);
   const importedIds = new Set(importedProjects.map((project) => project.id));
+  state.deletedProjects = normalizeProjectDeletions(state.deletedProjects)
+    .filter((deletion) => !importedIds.has(deletion.id));
+  await clearPendingProjectDeletion([...importedIds]);
   const addedCount = importedProjects.filter((project) => !beforeById.has(project.id)).length;
   const updatedCount = importedProjects.filter((project) => beforeById.has(project.id)).length;
 
@@ -2218,7 +2527,6 @@ function updateCurrentProjectTitle() {
   if (!current) return;
   current.title = normalizeProjectTitle(els.projectTitle?.value) || projectTitleFromData(current.data);
   updateProjectHistory();
-  scheduleCurrentProjectTextSave();
   scheduleStateSave();
 }
 
@@ -2318,14 +2626,58 @@ async function openProject(projectId) {
   const project = findHistoryProject(projectId);
   if (!project) return;
   state.currentProjectId = project.id;
+  rememberActiveProject(project.id);
   state.scrollOffset = 0;
   applyForm(project.data);
   syncGuideReadOnlyMode();
-  if (isBuiltInProject(project)) saveProjectStore();
+  saveProjectStore();
   resetTextHistory();
   updateProjectHistory();
   await render();
   els.status.textContent = isBuiltInProject(project) ? `已打开内置说明书：${project.title}` : `已打开：${project.title || "未命名图文"}`;
+}
+
+async function deleteProjectFromSharedServer(projectId, deletedAt, activeId) {
+  const response = await fetch(`${SHARED_PROJECT_STORE_URL}/${encodeURIComponent(projectId)}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: true, deletedAt, activeId }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload?.ok !== true || payload?.deletionMeta?.localSaved !== true) {
+    throw new Error(payload?.error || `删除保存失败（${response.status}）`);
+  }
+  return payload;
+}
+
+async function retryPendingProjectDeletions(deletions) {
+  let changed = false;
+  for (const deletion of normalizeProjectDeletions(deletions)) {
+    try {
+      const payload = await deleteProjectFromSharedServer(
+        deletion.id,
+        deletion.deletedAt,
+        state.currentProjectId,
+      );
+      state.deletedProjects = mergeProjectDeletions(
+        state.deletedProjects,
+        [{ id: deletion.id, deletedAt: Number(payload.deletionMeta.deletedAt || deletion.deletedAt) }],
+      );
+      state.projects = state.projects.filter((project) => project.id !== deletion.id);
+      await clearPendingProjectDeletion(deletion.id);
+      changed = true;
+    } catch (error) {
+      console.warn(`项目 ${deletion.id} 的离线删除仍待重试`, error);
+    }
+  }
+  if (!changed) return;
+  saveProjectStore();
+  updateProjectHistory();
+  try {
+    await saveProjectStoreToIndexedDb(projectStoreSnapshot());
+  } catch (error) {
+    console.warn("删除重试结果写入 IndexedDB 失败", error);
+  }
 }
 
 async function deleteProject(projectId) {
@@ -2336,6 +2688,16 @@ async function deleteProject(projectId) {
   const project = state.projects.find((item) => item.id === projectId);
   if (!project) return;
   const deletingCurrent = project.id === state.currentProjectId;
+  const deletedAt = Math.max(Date.now(), Number(project.updatedAt || 0) + 1);
+  const deletionIntentSaved = await markPendingProjectDeletion({ id: project.id, deletedAt });
+  if (!deletionIntentSaved) {
+    els.status.textContent = "删除未执行：浏览器无法保存删除记录，请先导出 JSON 备份并释放存储空间";
+    return;
+  }
+  state.deletedProjects = mergeProjectDeletions(
+    state.deletedProjects,
+    [{ id: project.id, deletedAt }],
+  );
   state.projects = state.projects.filter((item) => item.id !== project.id);
 
   if (!state.projects.length) {
@@ -2346,14 +2708,7 @@ async function deleteProject(projectId) {
     applyForm(guideProject?.data || defaultFormState());
     syncGuideReadOnlyMode();
     resetTextHistory();
-    saveProjectStore();
-    updateProjectHistory();
-    await render();
-    els.status.textContent = "已删除全部草稿，已回到图文卡片说明书";
-    return;
-  }
-
-  if (deletingCurrent) {
+  } else if (deletingCurrent) {
     const nextProject = state.projects[0];
     state.currentProjectId = nextProject.id;
     state.mode = "auto";
@@ -2361,16 +2716,38 @@ async function deleteProject(projectId) {
     applyForm(nextProject.data);
     syncGuideReadOnlyMode();
     resetTextHistory();
-    saveProjectStore();
-    updateProjectHistory();
-    await render();
-    els.status.textContent = `已删除并打开：${nextProject.title || "未命名图文"}`;
-    return;
   }
 
+  rememberActiveProject(state.currentProjectId);
   saveProjectStore();
   updateProjectHistory();
-  els.status.textContent = `已删除：${project.title || "未命名图文"}`;
+  if (deletingCurrent) await render({ persist: false });
+  els.status.textContent = `正在永久删除：${project.title || "未命名图文"}…`;
+
+  try {
+    const payload = await deleteProjectFromSharedServer(project.id, deletedAt, state.currentProjectId);
+    const confirmedDeletedAt = Number(payload.deletionMeta.deletedAt || deletedAt);
+    if (confirmedDeletedAt > deletedAt) {
+      state.deletedProjects = mergeProjectDeletions(
+        state.deletedProjects,
+        [{ id: project.id, deletedAt: confirmedDeletedAt }],
+      );
+      saveProjectStore();
+    }
+    await clearPendingProjectDeletion(project.id);
+    if (state.localDatabaseHydrated) await flushProjectStoreToIndexedDb();
+    els.status.textContent = payload.deletionMeta.cloudDeleted
+      ? `已永久删除：${project.title || "未命名图文"}`
+      : `已从本机删除：${project.title || "未命名图文"}；云端恢复后会自动重试`;
+  } catch (error) {
+    console.warn("项目删除尚未得到本机服务确认", error);
+    try {
+      if (state.localDatabaseHydrated) await saveProjectStoreToIndexedDb(projectStoreSnapshot());
+    } catch (databaseError) {
+      console.warn("删除墓碑写入 IndexedDB 失败", databaseError);
+    }
+    els.status.textContent = `已在当前浏览器删除并保留删除记录；本机服务恢复后会重试（${error?.message || "未确认"}）`;
+  }
 }
 
 async function createNewProject() {
@@ -2378,6 +2755,7 @@ async function createNewProject() {
   const project = createProject(blankFormState());
   state.projects = [project, ...state.projects.filter((item) => item.id !== project.id)].slice(0, MAX_PROJECTS);
   state.currentProjectId = project.id;
+  rememberActiveProject(project.id);
   state.mode = "auto";
   state.scrollOffset = 0;
   applyForm(project.data);
@@ -6713,7 +7091,6 @@ function bindEvents() {
     scheduleCurrentProjectTextSave();
     if (imageReferencesChanged) {
       flushStateSave();
-      void saveCurrentProjectTextToSharedServer();
       void render({ persist: false });
       return;
     }

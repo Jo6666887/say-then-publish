@@ -153,6 +153,76 @@ class CloudStoreTests(unittest.TestCase):
 
         self.assertEqual(events, ["db:pending", "tos:delete", "db:error"])
 
+    def test_merge_stores_tombstone_prevents_deleted_project_resurrection(self):
+        local = {
+            "activeId": "project-live",
+            "projects": [
+                {
+                    "id": "project-live",
+                    "updatedAt": 300,
+                    "data": {"content": "保留"},
+                }
+            ],
+            "deletedProjects": [{"id": "project-deleted", "deletedAt": 200}],
+        }
+        remote = {
+            "activeId": "project-deleted",
+            "projects": [
+                {
+                    "id": "project-deleted",
+                    "updatedAt": 100,
+                    "data": {"content": "旧云端副本"},
+                }
+            ],
+        }
+
+        merged = CloudStore._merge_stores(local, remote)
+
+        self.assertEqual(
+            [project["id"] for project in merged["projects"]],
+            ["project-live"],
+        )
+        self.assertEqual(merged["activeId"], "project-live")
+        self.assertEqual(
+            merged["deletedProjects"],
+            [{"id": "project-deleted", "deletedAt": 200}],
+        )
+
+    def test_merge_stores_cloud_tombstone_beats_stale_local_cache(self):
+        local = {
+            "activeId": "project-deleted",
+            "projects": [
+                {
+                    "id": "project-deleted",
+                    "updatedAt": 100,
+                    "data": {"content": "浏览器旧缓存"},
+                }
+            ],
+        }
+        remote = {
+            "activeId": "project-live",
+            "projects": [
+                {
+                    "id": "project-live",
+                    "updatedAt": 300,
+                    "data": {"content": "云端保留"},
+                }
+            ],
+            "deletedProjects": [{"id": "project-deleted", "deletedAt": 200}],
+        }
+
+        merged = CloudStore._merge_stores(local, remote)
+
+        self.assertEqual(
+            [project["id"] for project in merged["projects"]],
+            ["project-live"],
+        )
+        self.assertEqual(merged["activeId"], "project-live")
+        self.assertEqual(
+            merged["deletedProjects"],
+            [{"id": "project-deleted", "deletedAt": 200}],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -20,6 +20,7 @@ class FakeCloudStore:
 
     def __init__(self):
         self.calls = 0
+        self.deleted_projects = []
         self.config = SimpleNamespace(
             workspace_id="test-workspace",
             supabase_secret_key="supabase-test-secret",
@@ -30,6 +31,10 @@ class FakeCloudStore:
     def sync_store(self, store):
         self.calls += 1
         return json.loads(json.dumps(store))
+
+    def delete_project(self, project_id, deleted_at, *, active_id=None):
+        self.deleted_projects.append((project_id, deleted_at, active_id))
+        return deleted_at
 
 
 class BlockingCloudStore(FakeCloudStore):
@@ -131,6 +136,14 @@ class StaticFileBoundaryTests(unittest.TestCase):
                 status, body = self.request_status(path)
                 self.assertEqual(status, 200)
                 self.assertTrue(body)
+
+    def test_health_endpoint_identifies_this_service(self):
+        status, body = self.request_status("/api/health")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(body.decode("utf-8")),
+            {"ok": True, "service": "write-then-publish", "schema": 1},
+        )
 
     def test_sensitive_project_files_are_not_served(self):
         for path in (
@@ -437,6 +450,113 @@ class StaticFileBoundaryTests(unittest.TestCase):
         self.assertEqual(response["projects"][0]["data"]["content"], "新正文")
         schedule.assert_called_once()
 
+    def test_project_delete_persists_tombstone_and_keeps_a_valid_active_project(self):
+        fake_cloud = FakeCloudStore()
+        project_a = {
+            "id": "project-a",
+            "title": "A",
+            "updatedAt": 100,
+            "data": {"content": "正文 A"},
+        }
+        project_b = {
+            "id": "project-b",
+            "title": "B",
+            "updatedAt": 200,
+            "data": {"content": "正文 B"},
+        }
+        cases = (
+            (
+                "current project",
+                {"activeId": "project-a", "projects": [project_a, project_b]},
+                "project-a",
+                ["project-b"],
+                "project-b",
+            ),
+            (
+                "non-current project",
+                {"activeId": "project-a", "projects": [project_a, project_b]},
+                "project-b",
+                ["project-a"],
+                "project-a",
+            ),
+            (
+                "last project",
+                {"activeId": "project-a", "projects": [project_a]},
+                "project-a",
+                [],
+                None,
+            ),
+        )
+
+        for case_index, (
+            label,
+            current,
+            target_id,
+            expected_ids,
+            expected_active_id,
+        ) in enumerate(cases):
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as temporary:
+                store_file = Path(temporary) / "project-store.json"
+                store_file.write_text(json.dumps(current), encoding="utf-8")
+                deleted_at = 10_000 + case_index
+                with (
+                    mock.patch.object(server, "STORE_FILE", store_file),
+                    mock.patch.object(server, "CLOUD", fake_cloud),
+                    mock.patch.object(server.time, "time", return_value=5.0),
+                    mock.patch.dict(
+                        server.CLOUD_STATUS,
+                        enabled_cloud_status(),
+                        clear=True,
+                    ),
+                    mock.patch.object(server, "schedule_cloud_sync") as schedule,
+                ):
+                    status, body = self.request_status(
+                        f"/api/project-store/{target_id}",
+                        method="DELETE",
+                        headers={"Content-Type": "application/json"},
+                        data=json.dumps(
+                            {
+                                "confirm": True,
+                                "deletedAt": deleted_at,
+                                "activeId": expected_active_id,
+                            }
+                        ).encode("utf-8"),
+                    )
+                    saved = json.loads(store_file.read_text(encoding="utf-8"))
+
+                self.assertEqual(status, 200)
+                response = json.loads(body.decode("utf-8"))
+                self.assertTrue(response["ok"])
+                self.assertEqual(
+                    [project["id"] for project in saved["projects"]],
+                    expected_ids,
+                )
+                self.assertEqual(saved["activeId"], expected_active_id)
+                self.assertEqual(
+                    saved["deletedProjects"],
+                    [{"id": target_id, "deletedAt": deleted_at}],
+                )
+                self.assertEqual(response["store"], saved)
+                self.assertEqual(
+                    {
+                        "projectId": response["deletionMeta"]["projectId"],
+                        "deletedAt": response["deletionMeta"]["deletedAt"],
+                        "localSaved": response["deletionMeta"]["localSaved"],
+                        "cloudDeleted": response["deletionMeta"]["cloudDeleted"],
+                    },
+                    {
+                        "projectId": target_id,
+                        "deletedAt": deleted_at,
+                        "localSaved": True,
+                        "cloudDeleted": True,
+                    },
+                )
+                self.assertEqual(
+                    fake_cloud.deleted_projects[-1],
+                    (target_id, deleted_at, expected_active_id),
+                )
+                schedule.assert_called_once()
+
     def test_current_text_patch_rejects_conflicts_and_accepts_newer_revision(self):
         fake_cloud = FakeCloudStore()
         current = {
@@ -498,7 +618,7 @@ class StaticFileBoundaryTests(unittest.TestCase):
         self.assertEqual(response["saveMeta"]["savedUpdatedAt"], 201)
         self.assertEqual(saved["projects"][0]["updatedAt"], 201)
         self.assertEqual(saved["projects"][0]["data"]["content"], "真正新正文")
-        schedule.assert_called_once()
+        schedule.assert_not_called()
 
     def test_cloud_asset_error_response_redacts_credentials(self):
         leaked = "supabase-test-secret tos-test-access tos-test-secret"
@@ -671,6 +791,70 @@ class CloudCheckpointTests(unittest.TestCase):
         self.assertNotIn("tos-test-access", status["lastError"])
         self.assertNotIn("tos-test-secret", status["lastError"])
         self.assertIn("[REDACTED]", status["lastError"])
+
+
+class ProjectStoreMergeTests(unittest.TestCase):
+    def test_tombstone_prevents_an_older_project_from_resurrecting(self):
+        current = {
+            "activeId": "project-live",
+            "projects": [
+                {
+                    "id": "project-live",
+                    "updatedAt": 300,
+                    "data": {"content": "保留"},
+                }
+            ],
+            "deletedProjects": [{"id": "project-deleted", "deletedAt": 200}],
+        }
+        incoming = {
+            "activeId": "project-deleted",
+            "projects": [
+                {
+                    "id": "project-deleted",
+                    "updatedAt": 100,
+                    "data": {"content": "旧浏览器缓存"},
+                }
+            ],
+        }
+
+        merged = server.merge_store(current, incoming)
+
+        self.assertEqual(
+            [project["id"] for project in merged["projects"]],
+            ["project-live"],
+        )
+        self.assertEqual(merged["activeId"], "project-live")
+        self.assertEqual(
+            merged["deletedProjects"],
+            [{"id": "project-deleted", "deletedAt": 200}],
+        )
+
+    def test_equal_timestamp_does_not_replace_a_different_complete_project(self):
+        current_project = {
+            "id": "project-1",
+            "title": "当前标题",
+            "updatedAt": 200,
+            "data": {
+                "content": "相同正文",
+                "images": {"image-new": {"name": "new.png"}},
+            },
+        }
+        incoming_project = {
+            "id": "project-1",
+            "title": "旧标题",
+            "updatedAt": 200,
+            "data": {
+                "content": "相同正文",
+                "images": {"image-old": {"name": "old.png"}},
+            },
+        }
+
+        merged = server.merge_store(
+            {"activeId": "project-1", "projects": [current_project]},
+            {"activeId": "project-1", "projects": [incoming_project]},
+        )
+
+        self.assertEqual(merged["projects"], [current_project])
 
 
 if __name__ == "__main__":

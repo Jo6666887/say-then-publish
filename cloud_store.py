@@ -30,6 +30,7 @@ DATA_URI_RE = re.compile(r"^data:([^,]*?),(.*)$", re.DOTALL)
 IMAGE_TOKEN_RE = re.compile(r"\[\[image:([^\]]+)\]\]")
 TOS_ASSET_PREFIX = "tos://"
 TOS_DELETED_PREFIX = "tos-deleted://"
+PROJECT_TOMBSTONE_FIELD = "__writeThenPublishDeletedAt"
 
 
 class CloudStoreError(RuntimeError):
@@ -219,6 +220,55 @@ class CloudStore:
             },
         )
         return rows if isinstance(rows, list) else []
+
+    def _select_project(self, project_id: str) -> dict | None:
+        self._require_enabled()
+        rows = self.rest.request(
+            "GET",
+            "/rest/v1/write_then_publish_projects",
+            query={
+                "workspace_id": f"eq.{self.config.workspace_id}",
+                "project_id": f"eq.{project_id}",
+                "select": "workspace_id,project_id,title,project_data,updated_at_ms,is_active",
+                "limit": "1",
+            },
+        )
+        return rows[0] if isinstance(rows, list) and rows else None
+
+    @staticmethod
+    def _deletion_timestamp(deletion: dict) -> int:
+        try:
+            value = float(deletion.get("deletedAt") or 0)
+        except (AttributeError, TypeError, ValueError):
+            return 0
+        return int(value) if value > 0 and value.is_integer() else 0
+
+    @classmethod
+    def _normalize_deletions(cls, store: dict) -> list[dict]:
+        merged: dict[str, dict] = {}
+        source = store.get("deletedProjects") if isinstance(store, dict) else None
+        for deletion in source if isinstance(source, list) else []:
+            project_id = deletion.get("id") if isinstance(deletion, dict) else None
+            deleted_at = cls._deletion_timestamp(deletion)
+            if not isinstance(project_id, str) or not project_id or not deleted_at:
+                continue
+            previous = merged.get(project_id)
+            if previous is None or deleted_at > cls._deletion_timestamp(previous):
+                merged[project_id] = {"id": project_id, "deletedAt": deleted_at}
+        return sorted(merged.values(), key=cls._deletion_timestamp, reverse=True)
+
+    @staticmethod
+    def _row_deletion(row: dict) -> dict | None:
+        data = row.get("project_data") if isinstance(row, dict) else None
+        deleted_at = data.get(PROJECT_TOMBSTONE_FIELD) if isinstance(data, dict) else None
+        try:
+            deleted_at = int(float(deleted_at or 0))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        project_id = row.get("project_id") if isinstance(row, dict) else None
+        if not isinstance(project_id, str) or not project_id or deleted_at <= 0:
+            return None
+        return {"id": project_id, "deletedAt": deleted_at}
 
     def _select_assets(self, *, include_deleted: bool = False) -> list[dict]:
         self._require_enabled()
@@ -496,32 +546,153 @@ class CloudStore:
             "data": data,
         }
 
+    def _store_from_rows(self, rows: list[dict], assets_by_id: dict[str, dict]) -> dict:
+        projects = []
+        deletions = []
+        for row in rows:
+            deletion = self._row_deletion(row)
+            if deletion:
+                deletions.append(deletion)
+            else:
+                projects.append(self._decode_project(row, assets_by_id))
+        active_id = next(
+            (
+                row["project_id"]
+                for row in rows
+                if row.get("is_active") and self._row_deletion(row) is None
+            ),
+            None,
+        )
+        return {
+            "activeId": active_id,
+            "projects": projects,
+            "deletedProjects": self._normalize_deletions({"deletedProjects": deletions}),
+        }
+
     @staticmethod
-    def _merge_stores(local: dict, remote: dict) -> dict:
+    def _project_timestamp(project: dict | None) -> int:
+        try:
+            return int(float(project.get("updatedAt") or 0)) if project else 0
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return 0
+
+    @classmethod
+    def _logical_project_value(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            derived_keys = {
+                "cloudAssetId",
+                "cloudObjectKey",
+                "localAssetId",
+                "localAssetName",
+            }
+            return {
+                key: cls._logical_project_value(item)
+                for key, item in value.items()
+                if key not in derived_keys
+            }
+        if isinstance(value, list):
+            return [cls._logical_project_value(item) for item in value]
+        if isinstance(value, str):
+            parsed = cls._parse_data_uri(value)
+            if parsed:
+                _, raw = parsed
+                # Historical browser imports sometimes labelled PNG bytes as
+                # image/jpeg. The bytes, not that advisory label, define identity.
+                return f"data-sha256:{hashlib.sha256(raw).hexdigest()}"
+        return value
+
+    @classmethod
+    def _project_payload(cls, project: dict) -> str:
+        return json.dumps(
+            cls._logical_project_value(project),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @classmethod
+    def _merge_stores(cls, local: dict, remote: dict) -> dict:
+        remote_projects = {
+            project["id"]: project
+            for project in remote.get("projects") or []
+            if isinstance(project, dict) and isinstance(project.get("id"), str)
+        }
+        local_projects = {
+            project["id"]: project
+            for project in local.get("projects") or []
+            if isinstance(project, dict) and isinstance(project.get("id"), str)
+        }
         merged: dict[str, dict] = {}
-        for project in [*(remote.get("projects") or []), *(local.get("projects") or [])]:
-            if not isinstance(project, dict) or not isinstance(project.get("id"), str):
+        for project_id in remote_projects.keys() | local_projects.keys():
+            remote_project = remote_projects.get(project_id)
+            local_project = local_projects.get(project_id)
+            if remote_project is None:
+                merged[project_id] = local_project
                 continue
-            previous = merged.get(project["id"])
-            timestamp = int(float(project.get("updatedAt") or 0))
-            previous_timestamp = int(float(previous.get("updatedAt") or 0)) if previous else -1
-            if previous is None or timestamp >= previous_timestamp:
-                merged[project["id"]] = project
-        projects = sorted(merged.values(), key=lambda project: int(float(project.get("updatedAt") or 0)), reverse=True)[:24]
+            if local_project is None:
+                merged[project_id] = remote_project
+                continue
+            remote_timestamp = cls._project_timestamp(remote_project)
+            local_timestamp = cls._project_timestamp(local_project)
+            if local_timestamp > remote_timestamp:
+                merged[project_id] = local_project
+            elif remote_timestamp > local_timestamp:
+                merged[project_id] = remote_project
+            elif cls._project_payload(local_project) == cls._project_payload(remote_project):
+                merged[project_id] = local_project
+            else:
+                raise CloudStoreError(f"项目 {project_id} 存在同版本不同内容，请重新保存后再同步")
+
+        remote_deletions = {item["id"]: item for item in cls._normalize_deletions(remote)}
+        local_deletions = {item["id"]: item for item in cls._normalize_deletions(local)}
+        # A local tombstone is an explicit offline delete intent. If cloud has a
+        # later live cache, advance the tombstone once so reconnect cannot revive it.
+        for project_id, deletion in local_deletions.items():
+            remote_project = remote_projects.get(project_id)
+            if remote_project and cls._deletion_timestamp(deletion) <= cls._project_timestamp(remote_project):
+                deletion = dict(deletion)
+                deletion["deletedAt"] = cls._project_timestamp(remote_project) + 1
+                local_deletions[project_id] = deletion
+
+        deletions: dict[str, dict] = {}
+        for project_id in remote_deletions.keys() | local_deletions.keys():
+            remote_deletion = remote_deletions.get(project_id)
+            local_deletion = local_deletions.get(project_id)
+            deletions[project_id] = max(
+                (item for item in (remote_deletion, local_deletion) if item is not None),
+                key=cls._deletion_timestamp,
+            )
+
+        winning_deletions = {
+            project_id: deletion
+            for project_id, deletion in deletions.items()
+            if project_id not in merged
+            or cls._deletion_timestamp(deletion) >= cls._project_timestamp(merged[project_id])
+        }
+        projects = [
+            project for project_id, project in merged.items() if project_id not in winning_deletions
+        ]
+        projects = sorted(projects, key=cls._project_timestamp, reverse=True)[:24]
         project_ids = {project["id"] for project in projects}
         active_id = local.get("activeId") if local.get("activeId") in project_ids else remote.get("activeId")
         if active_id not in project_ids:
             active_id = projects[0]["id"] if projects else None
-        return {"activeId": active_id, "projects": projects}
+        return {
+            "activeId": active_id,
+            "projects": projects,
+            "deletedProjects": sorted(
+                winning_deletions.values(),
+                key=cls._deletion_timestamp,
+                reverse=True,
+            ),
+        }
 
     def fetch_store(self) -> dict:
         with self._lock:
             assets = self._select_assets()
             assets_by_id = {str(asset["asset_id"]): asset for asset in assets}
             rows = self._select_projects()
-            projects = [self._decode_project(row, assets_by_id) for row in rows]
-            active_id = next((row["project_id"] for row in rows if row.get("is_active")), None)
-            return {"activeId": active_id, "projects": projects}
+            return self._store_from_rows(rows, assets_by_id)
 
     def sync_store(self, local_store: dict) -> dict:
         with self._lock:
@@ -533,10 +704,7 @@ class CloudStore:
             known_by_id = {str(asset["asset_id"]): asset for asset in active_assets}
             all_by_id = {str(asset["asset_id"]): asset for asset in all_assets}
             rows = self._select_projects()
-            remote_store = {
-                "activeId": next((row["project_id"] for row in rows if row.get("is_active")), None),
-                "projects": [self._decode_project(row, known_by_id) for row in rows],
-            }
+            remote_store = self._store_from_rows(rows, known_by_id)
             merged = self._merge_stores(local_store, remote_store)
             cloud_rows = []
             enriched_projects = []
@@ -559,6 +727,21 @@ class CloudStore:
                         "synced_at": datetime.now(timezone.utc).isoformat(),
                     }
                 )
+            for deletion in merged.get("deletedProjects") or []:
+                deleted_at = self._deletion_timestamp(deletion)
+                if not deleted_at:
+                    continue
+                cloud_rows.append(
+                    {
+                        "workspace_id": self.config.workspace_id,
+                        "project_id": deletion["id"],
+                        "title": "",
+                        "project_data": {PROJECT_TOMBSTONE_FIELD: deleted_at},
+                        "updated_at_ms": deleted_at,
+                        "is_active": False,
+                        "synced_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
             if cloud_rows:
                 self.rest.request(
                     "POST",
@@ -569,7 +752,63 @@ class CloudStore:
                         "p_projects": cloud_rows,
                     },
                 )
-            return {"activeId": merged.get("activeId"), "projects": enriched_projects}
+                verified_rows = {row["project_id"]: row for row in self._select_projects()}
+                for expected in cloud_rows:
+                    actual = verified_rows.get(expected["project_id"])
+                    if (
+                        actual is None
+                        or int(actual.get("updated_at_ms") or 0) != expected["updated_at_ms"]
+                        or (actual.get("title") or "") != expected["title"]
+                        or (actual.get("project_data") or {}) != expected["project_data"]
+                    ):
+                        raise CloudStoreError(
+                            f"Supabase 未精确确认项目 {expected['project_id']} 的完整版本"
+                        )
+                active_rows = [
+                    row["project_id"]
+                    for row in verified_rows.values()
+                    if row.get("is_active") and self._row_deletion(row) is None
+                ]
+                if active_rows != ([merged.get("activeId")] if merged.get("activeId") else []):
+                    raise CloudStoreError("Supabase 未精确确认当前项目")
+            return {
+                "activeId": merged.get("activeId"),
+                "projects": enriched_projects,
+                "deletedProjects": merged.get("deletedProjects") or [],
+            }
+
+    def delete_project(self, project_id: str, deleted_at: int, *, active_id: str | None = None) -> int:
+        with self._lock:
+            self._require_enabled()
+            existing = self._select_project(project_id)
+            remote_updated_at = int(existing.get("updated_at_ms") or 0) if existing else 0
+            confirmed_deleted_at = max(int(deleted_at), remote_updated_at + 1)
+            tombstone = {
+                "workspace_id": self.config.workspace_id,
+                "project_id": project_id,
+                "title": "",
+                "project_data": {PROJECT_TOMBSTONE_FIELD: confirmed_deleted_at},
+                "updated_at_ms": confirmed_deleted_at,
+                "is_active": False,
+                "synced_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self.rest.request(
+                "POST",
+                "/rest/v1/rpc/sync_write_then_publish_projects",
+                payload={
+                    "p_workspace_id": self.config.workspace_id,
+                    "p_active_id": active_id,
+                    "p_projects": [tombstone],
+                },
+            )
+            verified = self._select_project(project_id)
+            if (
+                verified is None
+                or int(verified.get("updated_at_ms") or 0) != confirmed_deleted_at
+                or self._row_deletion(verified) != {"id": project_id, "deletedAt": confirmed_deleted_at}
+            ):
+                raise CloudStoreError("Supabase 未确认项目删除")
+            return confirmed_deleted_at
 
     @staticmethod
     def _src_sha256(src: Any) -> str | None:

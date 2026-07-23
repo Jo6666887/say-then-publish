@@ -7,6 +7,7 @@ import json
 import os
 import logging
 import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -42,6 +43,8 @@ MAX_TEXT_PATCH_BYTES = 2 * 1024 * 1024
 MAX_AI_TEXT_BYTES = 2 * 1024 * 1024
 STORE_LOCK = threading.Lock()
 APP_URL = "http://127.0.0.1:5173/"
+APP_SERVICE = "write-then-publish"
+APP_HEALTH_SCHEMA = 1
 CLOUD = CloudStore.from_root(ROOT)
 AI_LAYOUT = AILayoutService.from_env()
 LOCAL_ASSETS = LocalAssetStore(ROOT, data_dir=DATA_DIR)
@@ -52,6 +55,12 @@ CLOUD_SYNC_TIMER: threading.Timer | None = None
 CLOUD_SYNC_PENDING = False
 CLOUD_SYNC_WORKER_ACTIVE = False
 CLOUD_SYNC_WAIT_SECONDS = 30.0
+CLOUD_INITIAL_SYNC_WAIT_SECONDS = 5.0
+CLOUD_INITIAL_SYNC_DONE = threading.Event()
+# Module imports (including tests and embedded use) must never block API reads.
+# The standalone launcher clears this immediately before it starts the initial
+# background cloud reconciliation.
+CLOUD_INITIAL_SYNC_DONE.set()
 CLOUD_STATUS = {
     "enabled": CLOUD.enabled,
     "workspaceId": CLOUD.config.workspace_id,
@@ -72,7 +81,7 @@ PUBLIC_STATIC_SUFFIXES = {".css", ".gif", ".jpeg", ".jpg", ".js", ".png", ".svg"
 
 
 def empty_store() -> dict:
-    return {"activeId": None, "projects": []}
+    return {"activeId": None, "projects": [], "deletedProjects": []}
 
 
 def read_store() -> dict:
@@ -92,6 +101,37 @@ def project_timestamp(project: dict) -> float:
         return float(project.get("updatedAt") or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def deletion_timestamp(deletion: dict) -> int:
+    try:
+        value = float(deletion.get("deletedAt") or 0)
+    except (AttributeError, TypeError, ValueError):
+        return 0
+    return int(value) if value > 0 and value.is_integer() else 0
+
+
+def normalized_deletions(store: dict) -> list[dict]:
+    deletions: dict[str, dict] = {}
+    source = store.get("deletedProjects") if isinstance(store, dict) else None
+    for deletion in source if isinstance(source, list) else []:
+        project_id = deletion.get("id") if isinstance(deletion, dict) else None
+        deleted_at = deletion_timestamp(deletion)
+        if not isinstance(project_id, str) or not project_id or not deleted_at:
+            continue
+        previous = deletions.get(project_id)
+        if previous is None or deleted_at > deletion_timestamp(previous):
+            deletions[project_id] = {"id": project_id, "deletedAt": deleted_at}
+    return sorted(deletions.values(), key=deletion_timestamp, reverse=True)
+
+
+def find_deletion(store: dict, project_id: str | None) -> dict | None:
+    if not isinstance(project_id, str) or not project_id:
+        return None
+    return next(
+        (deletion for deletion in normalized_deletions(store) if deletion["id"] == project_id),
+        None,
+    )
 
 
 def project_checkpoint(store: dict, project_id: str | None = None) -> dict:
@@ -173,6 +213,32 @@ def project_revision_matches(
     )
 
 
+def project_payload_matches(first: dict | None, second: dict | None) -> bool:
+    if not isinstance(first, dict) or not isinstance(second, dict):
+        return False
+    try:
+        # Storage backends enrich an otherwise immutable revision with derived
+        # cloud/local asset indexes. Compare the logical project (including image
+        # bytes and layout), not those transport-only keys.
+        return CloudStore._project_payload(first) == CloudStore._project_payload(second)
+    except (CloudStoreError, TypeError, ValueError):
+        return False
+
+
+def store_confirms_snapshot(current: dict, incoming: dict) -> bool:
+    incoming_projects = incoming.get("projects") if isinstance(incoming, dict) else None
+    for project in incoming_projects if isinstance(incoming_projects, list) else []:
+        if not isinstance(project, dict) or not isinstance(project.get("id"), str):
+            return False
+        if not project_payload_matches(find_project(current, project["id"]), project):
+            return False
+    for deletion in normalized_deletions(incoming):
+        confirmed = find_deletion(current, deletion["id"])
+        if confirmed is None or deletion_timestamp(confirmed) < deletion_timestamp(deletion):
+            return False
+    return True
+
+
 def save_conflict_payload(project: dict | None) -> dict:
     return {
         "error": "本机已有不同版本，请刷新后再保存",
@@ -190,15 +256,42 @@ def merge_store(current: dict, incoming: dict) -> dict:
         if not isinstance(project, dict) or not isinstance(project.get("id"), str):
             continue
         previous = merged.get(project["id"])
-        if previous is None or project_timestamp(project) >= project_timestamp(previous):
+        # Equal revisions are immutable. Keeping the existing complete object avoids
+        # a late text-only/cache response replacing images or layout at the same time.
+        if previous is None or project_timestamp(project) > project_timestamp(previous):
             merged[project["id"]] = project
 
-    projects = sorted(merged.values(), key=project_timestamp, reverse=True)[:24]
+    deletions: dict[str, dict] = {}
+    for deletion in [*normalized_deletions(current), *normalized_deletions(incoming)]:
+        previous = deletions.get(deletion["id"])
+        if previous is None or deletion_timestamp(deletion) > deletion_timestamp(previous):
+            deletions[deletion["id"]] = deletion
+
+    winning_deletions = {
+        project_id: deletion
+        for project_id, deletion in deletions.items()
+        if project_id not in merged
+        or deletion_timestamp(deletion) >= project_timestamp(merged[project_id])
+    }
+    projects = [
+        project
+        for project_id, project in merged.items()
+        if project_id not in winning_deletions
+    ]
+    projects = sorted(projects, key=project_timestamp, reverse=True)[:24]
     project_ids = {project["id"] for project in projects}
     incoming_active = incoming.get("activeId")
     current_active = current.get("activeId")
     active_id = incoming_active if incoming_active in project_ids else current_active if current_active in project_ids else (projects[0]["id"] if projects else None)
-    return {"activeId": active_id, "projects": projects}
+    return {
+        "activeId": active_id,
+        "projects": projects,
+        "deletedProjects": sorted(
+            winning_deletions.values(),
+            key=deletion_timestamp,
+            reverse=True,
+        ),
+    }
 
 
 def write_store(payload: dict) -> None:
@@ -332,7 +425,8 @@ def sync_cloud_store(
         merged = CLOUD.sync_store(local_store)
         synced = project_checkpoint(merged, target_project_id or target["projectId"])
         with STORE_LOCK:
-            write_store(merge_store(read_store(), merged))
+            current_store = read_store()
+            write_store(merged if current_store == local_store else merge_store(current_store, merged))
         with CLOUD_STATUS_LOCK:
             CLOUD_STATUS["lastSuccessAt"] = datetime_now_iso()
             CLOUD_STATUS["projectId"] = synced["projectId"]
@@ -352,7 +446,8 @@ def sync_cloud_store(
         try:
             merged = LOCAL_ASSETS.sync_store(local_store)
             with STORE_LOCK:
-                write_store(merge_store(read_store(), merged))
+                current_store = read_store()
+                write_store(merged if current_store == local_store else merge_store(current_store, merged))
         except LocalAssetStoreError:
             LOGGER.exception("Local asset fallback sync failed")
         return False
@@ -510,7 +605,18 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
         path = urlparse(self.path).path
+        if path == "/api/health":
+            self.send_json(
+                {
+                    "ok": True,
+                    "service": APP_SERVICE,
+                    "schema": APP_HEALTH_SCHEMA,
+                }
+            )
+            return
         if path == "/api/project-store":
+            if CLOUD.enabled and not CLOUD_INITIAL_SYNC_DONE.is_set():
+                CLOUD_INITIAL_SYNC_DONE.wait(timeout=CLOUD_INITIAL_SYNC_WAIT_SECONDS)
             with STORE_LOCK:
                 payload = read_store()
             self.send_json(payload)
@@ -635,7 +741,7 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
                     incoming_updated_at < current_updated_at
                     or (
                         incoming_updated_at == current_updated_at
-                        and project_content(current_project) != incoming_content
+                        and not project_payload_matches(current_project, incoming_project)
                     )
                 )
             ):
@@ -650,7 +756,8 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
             try:
                 enriched = LOCAL_ASSETS.sync_store(merged)
                 with STORE_LOCK:
-                    response_store = merge_store(read_store(), enriched)
+                    current_store = read_store()
+                    response_store = enriched if current_store == merged else merge_store(current_store, enriched)
                     write_store(response_store)
             except LocalAssetStoreError:
                 # A missing/unwritable asset folder must never block draft persistence.
@@ -663,26 +770,23 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
             incoming_project is not None
             and incoming_updated_at is not None
             and incoming_content is not None
-            and project_revision_matches(
-                confirmed_project,
-                project_id=incoming_project_id,
-                updated_at=incoming_updated_at,
-                content=incoming_content,
-            )
+            and project_payload_matches(confirmed_project, incoming_project)
         )
-        if incoming_project is not None and not revision_confirmed:
-            schedule_cloud_sync()
+        snapshot_confirmed = store_confirms_snapshot(response_store, incoming)
+        if not snapshot_confirmed:
             self.send_json(save_conflict_payload(confirmed_project), HTTPStatus.CONFLICT)
             return
 
         schedule_cloud_sync()
         response_payload = dict(response_store)
         response_payload["saveMeta"] = {
-            "saved": revision_confirmed,
+            "saved": snapshot_confirmed,
+            "snapshotSaved": snapshot_confirmed,
             "destination": "local-server",
             "savedAt": datetime_now_iso(),
             "projectId": incoming_project_id if revision_confirmed else None,
             "savedUpdatedAt": incoming_updated_at if revision_confirmed else None,
+            "deletedProjects": normalized_deletions(incoming),
             "cloudSyncScheduled": CLOUD.enabled,
         }
         self.send_json(response_payload)
@@ -753,7 +857,11 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
                 return
 
             projects = sorted(projects, key=project_timestamp, reverse=True)[:24]
-            store = {"activeId": project_id, "projects": projects}
+            store = {
+                "activeId": project_id,
+                "projects": projects,
+                "deletedProjects": normalized_deletions(store),
+            }
             write_store(store)
 
         confirmed_project = find_project(store, project_id)
@@ -765,7 +873,8 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
         ):
             self.send_json(save_conflict_payload(confirmed_project), HTTPStatus.CONFLICT)
             return
-        schedule_cloud_sync()
+        # Do not publish a text-only object as a complete cloud revision. The
+        # debounced full-store PUT carries text, images and layout atomically.
         self.send_json(
             {
                 "ok": True,
@@ -905,6 +1014,81 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
         if self.reject_cross_origin_mutation():
             return
         path = urlparse(self.path).path
+        if path.startswith("/api/project-store/") and "/" not in path.removeprefix("/api/project-store/"):
+            payload = self.read_json_body(maximum=4096)
+            if not payload or payload.get("confirm") is not True:
+                self.send_json({"error": "必须明确确认删除"}, HTTPStatus.BAD_REQUEST)
+                return
+            project_id = unquote(path.removeprefix("/api/project-store/"))
+            if not project_id or project_id.startswith("guide_"):
+                self.send_json({"error": "该项目不可删除"}, HTTPStatus.BAD_REQUEST)
+                return
+
+            requested_deleted_at = parse_updated_at(payload.get("deletedAt")) or 0
+            with STORE_LOCK:
+                current = read_store()
+                project = find_project(current, project_id)
+                previous_deletion = find_deletion(current, project_id)
+                deleted_at = max(
+                    int(time.time() * 1000),
+                    requested_deleted_at,
+                    int(project_timestamp(project)) + 1 if project else 0,
+                    deletion_timestamp(previous_deletion) if previous_deletion else 0,
+                )
+                incoming = {
+                    "activeId": payload.get("activeId"),
+                    "projects": [],
+                    "deletedProjects": [{"id": project_id, "deletedAt": deleted_at}],
+                }
+                store = merge_store(current, incoming)
+                write_store(store)
+
+            cloud_deleted = False
+            cloud_error = None
+            if CLOUD.enabled:
+                try:
+                    confirmed_deleted_at = CLOUD.delete_project(
+                        project_id,
+                        deleted_at,
+                        active_id=store.get("activeId"),
+                    )
+                    if confirmed_deleted_at > deleted_at:
+                        with STORE_LOCK:
+                            store = merge_store(
+                                read_store(),
+                                {
+                                    "activeId": store.get("activeId"),
+                                    "projects": [],
+                                    "deletedProjects": [
+                                        {"id": project_id, "deletedAt": confirmed_deleted_at}
+                                    ],
+                                },
+                            )
+                            write_store(store)
+                        deleted_at = confirmed_deleted_at
+                    cloud_deleted = True
+                except Exception as error:
+                    LOGGER.exception("Cloud project deletion failed")
+                    record_cloud_failure(error)
+                    cloud_error = safe_cloud_error(error)
+
+            # A single tombstone confirmation does not prove the complete store
+            # is healthy. Reconcile the whole snapshot before clearing cloud errors.
+            schedule_cloud_sync()
+            self.send_json(
+                {
+                    "ok": True,
+                    "store": store,
+                    "deletionMeta": {
+                        "projectId": project_id,
+                        "deletedAt": deleted_at,
+                        "localSaved": True,
+                        "cloudDeleted": cloud_deleted,
+                        "cloudError": cloud_error,
+                    },
+                }
+            )
+            return
         if not path.startswith("/api/assets/") or "/" in path.removeprefix("/api/assets/"):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
@@ -941,11 +1125,16 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
 
 def existing_app_is_healthy() -> bool:
     try:
-        with urllib.request.urlopen(f"{APP_URL}api/project-store", timeout=2) as response:
+        with urllib.request.urlopen(f"{APP_URL}api/health", timeout=2) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (OSError, urllib.error.URLError, UnicodeDecodeError, json.JSONDecodeError):
         return False
-    return isinstance(payload, dict) and isinstance(payload.get("projects"), list)
+    return (
+        isinstance(payload, dict)
+        and payload.get("ok") is True
+        and payload.get("service") == APP_SERVICE
+        and payload.get("schema") == APP_HEALTH_SCHEMA
+    )
 
 
 if __name__ == "__main__":
@@ -963,8 +1152,19 @@ if __name__ == "__main__":
     print(f"Write Then Publish: {APP_URL}", flush=True)
     print(f"共享草稿库: {STORE_FILE}", flush=True)
     if CLOUD.enabled:
-        print("Supabase + TOS 云端副本正在后台同步……", flush=True)
-        threading.Thread(target=sync_cloud_store, name="cloud-sync-startup", daemon=True).start()
+        print("正在后台核对 Supabase + TOS 云端版本……", flush=True)
+        CLOUD_INITIAL_SYNC_DONE.clear()
+
+        def initial_cloud_sync() -> None:
+            try:
+                if sync_cloud_store(wait_for_existing=True, wait_timeout=None):
+                    print("云端版本核对完成。", flush=True)
+                else:
+                    print("云端暂不可用，已降级为本机副本。", flush=True)
+            finally:
+                CLOUD_INITIAL_SYNC_DONE.set()
+
+        threading.Thread(target=initial_cloud_sync, name="cloud-sync-startup", daemon=True).start()
     else:
         print(f"云同步未启用：{CLOUD.disabled_reason}", flush=True)
     threading.Timer(0.4, webbrowser.open, args=(APP_URL,)).start()
