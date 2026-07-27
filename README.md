@@ -233,6 +233,55 @@ AI 返回结果必须通过服务端校验：图片标记的数量和顺序不�
 - 草稿和历史记录使用浏览器本地存储保存。
 - 纯前端模式可继续使用 Vercel 静态站点配置；团队云端模式还需部署 Python 服务。
 
+## 独立服务器部署
+
+无域名、直接使用服务器 IP 时，推荐使用仓库内的隔离部署结构：
+
+```text
+/opt/write-then-publish/
+├── releases/<40 位 Git SHA>/
+└── current -> releases/<当前 SHA>
+
+/etc/write-then-publish/
+├── app.env                 # Supabase、TOS、AI 等服务端密钥，0600
+├── server.env              # 监听、Host 白名单、独立访问密码
+├── tls.crt
+└── tls.key
+
+/var/lib/write-then-publish/
+├── runtime-data/
+├── assets/
+└── backups/
+```
+
+服务名固定为 `write-then-publish.service`，不会复用或重启其他项目的 systemd unit。服务器版本目录是只读发布物；草稿、资源、密钥和备份全部在版本目录外，更新或回滚不会覆盖它们。
+
+直接公网访问时必须配置精确的 `WTP_ALLOWED_HOSTS` 和独立 Basic Auth。首次安装脚本默认启用自签 HTTPS；如果明确选择 `http` 模式，脚本才会设置 `WTP_ALLOW_INSECURE_HTTP=1`。纯 HTTP 仍校验账号密码，但正文、图片和密码在网络中都不加密，只适合你已经接受该风险的场景。端口必须先确认未被其他程序占用。
+
+服务器不需要访问 GitHub。以后更新在本地完成：
+
+1. 本地完成修改、测试并提交，保持工作区干净。
+2. `scripts/deploy-server.zsh` 使用 `git archive` 打包当前精确提交，不包含 `.env`、`.git`、`.venv`、`runtime-data` 或 `backups`。
+3. 部署包经 SSH/SCP 上传，远端校验 SHA256 和压缩包路径后，在 `releases/<SHA>` 创建独立 Linux 虚拟环境。
+4. 使用同文件系统的 `current.next` 原子切换，只重启 `write-then-publish.service`。
+5. 健康检查失败会自动切回上一版本；持久数据不会随代码回滚。
+
+```bash
+WTP_DEPLOY_HOST=root@服务器IP ./scripts/deploy-server.zsh
+```
+
+首次安装可选择传输模式：
+
+```bash
+# 默认：自签 HTTPS
+bash deploy/bootstrap-server.sh 服务器IP 8517 https
+
+# 明确选择：纯 HTTP（无传输加密）
+bash deploy/bootstrap-server.sh 服务器IP 8517 http
+```
+
+部署脚本不会保存 SSH 密码。长期使用应配置独立 SSH Key；不要把服务器密码、`app.env` 或访问密码提交到 Git。
+
 ## 项目结构
 
 ```text
@@ -244,7 +293,12 @@ AI 返回结果必须通过服务端校验：图片标记的数量和顺序不�
 ├── local_asset_store.py
 ├── server.py
 ├── requirements.txt
+├── deploy
+│   ├── activate-release.sh
+│   ├── bootstrap-server.sh
+│   └── write-then-publish.service
 ├── scripts
+│   ├── deploy-server.zsh
 │   └── start-server.zsh
 ├── sql
 │   ├── 20260722_write_then_publish_cloud.sql

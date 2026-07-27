@@ -3,20 +3,27 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import ipaddress
 import json
 import os
 import logging
+import secrets
+import ssl
 import threading
 import time
 import urllib.error
 import urllib.request
 import uuid
 import webbrowser
+from dataclasses import dataclass
 from errno import EADDRINUSE
 from functools import partial
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Mapping
 from urllib.parse import unquote, urlparse
 
 from cloud_store import AssetInUseError, CloudStore, CloudStoreError
@@ -50,10 +57,274 @@ MAX_BODY_BYTES = 64 * 1024 * 1024
 MAX_TEXT_PATCH_BYTES = 2 * 1024 * 1024
 MAX_AI_TEXT_BYTES = 2 * 1024 * 1024
 STORE_LOCK = threading.Lock()
-APP_URL = "http://127.0.0.1:5173/"
 APP_SERVICE = "write-then-publish"
 APP_HEALTH_SCHEMA = 1
 CLOUD = CloudStore.from_root(ROOT)
+
+
+@dataclass(frozen=True)
+class ServerRuntimeConfig:
+    bind_host: str
+    port: int
+    allowed_hosts: tuple[str, ...]
+    allowed_hosts_explicit: bool
+    open_browser: bool
+    basic_auth_user: str
+    basic_auth_password: str
+    tls_cert_file: Path | None
+    tls_key_file: Path | None
+    allow_insecure_http: bool
+
+    @classmethod
+    def from_env(
+        cls,
+        environ: Mapping[str, str] | None = None,
+    ) -> "ServerRuntimeConfig":
+        values = os.environ if environ is None else environ
+        bind_host = str(values.get("WTP_BIND_HOST") or "127.0.0.1").strip()
+        port = _read_server_port(values.get("WTP_PORT"))
+        raw_allowed_hosts = values.get("WTP_ALLOWED_HOSTS")
+        allowed_hosts_explicit = bool(
+            isinstance(raw_allowed_hosts, str) and raw_allowed_hosts.strip()
+        )
+        allowed_hosts = (
+            _parse_allowed_hosts(raw_allowed_hosts)
+            if allowed_hosts_explicit
+            else ("127.0.0.1", "localhost", "::1")
+        )
+        cert_setting = str(values.get("WTP_TLS_CERT_FILE") or "").strip()
+        key_setting = str(values.get("WTP_TLS_KEY_FILE") or "").strip()
+        return cls(
+            bind_host=bind_host,
+            port=port,
+            allowed_hosts=allowed_hosts,
+            allowed_hosts_explicit=allowed_hosts_explicit,
+            open_browser=_read_server_boolean(
+                values.get("WTP_OPEN_BROWSER"),
+                default=True,
+                name="WTP_OPEN_BROWSER",
+            ),
+            basic_auth_user=str(values.get("WTP_BASIC_AUTH_USER") or "").strip(),
+            basic_auth_password=str(values.get("WTP_BASIC_AUTH_PASSWORD") or ""),
+            tls_cert_file=_resolve_server_path(cert_setting) if cert_setting else None,
+            tls_key_file=_resolve_server_path(key_setting) if key_setting else None,
+            allow_insecure_http=_read_server_boolean(
+                values.get("WTP_ALLOW_INSECURE_HTTP"),
+                default=False,
+                name="WTP_ALLOW_INSECURE_HTTP",
+            ),
+        )
+
+    @property
+    def bind_is_loopback(self) -> bool:
+        return _host_is_loopback(self.bind_host)
+
+    @property
+    def tls_enabled(self) -> bool:
+        return self.tls_cert_file is not None and self.tls_key_file is not None
+
+    @property
+    def basic_auth_enabled(self) -> bool:
+        return bool(self.basic_auth_user and self.basic_auth_password)
+
+    @property
+    def scheme(self) -> str:
+        return "https" if self.tls_enabled else "http"
+
+    @property
+    def public_host(self) -> str:
+        normalized_bind = _normalize_allowed_host(self.bind_host)
+        if normalized_bind not in {"0.0.0.0", "::"}:
+            return normalized_bind
+        return next(
+            (
+                host
+                for host in self.allowed_hosts
+                if not _host_is_loopback(host) and host not in {"0.0.0.0", "::"}
+            ),
+            "127.0.0.1",
+        )
+
+    @property
+    def local_health_host(self) -> str:
+        normalized_bind = _normalize_allowed_host(self.bind_host)
+        if normalized_bind == "0.0.0.0":
+            return "127.0.0.1"
+        if normalized_bind == "::":
+            return "::1"
+        return normalized_bind
+
+    @property
+    def app_url(self) -> str:
+        return _server_url(self.scheme, self.public_host, self.port)
+
+    @property
+    def health_url(self) -> str:
+        return (
+            _server_url(self.scheme, self.local_health_host, self.port)
+            + "api/health"
+        )
+
+    @property
+    def health_host_header(self) -> str:
+        return _format_host_header(self.public_host, self.port)
+
+    def validate(self) -> None:
+        normalized_bind = _normalize_allowed_host(self.bind_host)
+        if not normalized_bind:
+            raise ValueError("WTP_BIND_HOST 无效")
+        if bool(self.tls_cert_file) != bool(self.tls_key_file):
+            raise ValueError("WTP_TLS_CERT_FILE 与 WTP_TLS_KEY_FILE 必须同时配置")
+        for path, label in (
+            (self.tls_cert_file, "WTP_TLS_CERT_FILE"),
+            (self.tls_key_file, "WTP_TLS_KEY_FILE"),
+        ):
+            if path is not None and not path.is_file():
+                raise ValueError(f"{label} 指向的文件不存在")
+        if bool(self.basic_auth_user) != bool(self.basic_auth_password):
+            raise ValueError(
+                "WTP_BASIC_AUTH_USER 与 WTP_BASIC_AUTH_PASSWORD 必须同时配置"
+            )
+        if ":" in self.basic_auth_user:
+            raise ValueError("WTP_BASIC_AUTH_USER 不能包含冒号")
+        if (
+            normalized_bind not in {"0.0.0.0", "::"}
+            and normalized_bind not in self.allowed_hosts
+        ):
+            raise ValueError("WTP_ALLOWED_HOSTS 必须包含 WTP_BIND_HOST")
+        if self.bind_is_loopback:
+            return
+        if not self.allowed_hosts_explicit:
+            raise ValueError("非本机监听必须显式配置 WTP_ALLOWED_HOSTS")
+        deploy_hosts = [
+            host
+            for host in self.allowed_hosts
+            if not _host_is_loopback(host) and host not in {"0.0.0.0", "::"}
+        ]
+        if not deploy_hosts:
+            raise ValueError("WTP_ALLOWED_HOSTS 必须包含精确的部署 IP 或主机名")
+        if not self.basic_auth_enabled:
+            raise ValueError("非本机监听必须配置 HTTP Basic Auth")
+        if not self.tls_enabled and not self.allow_insecure_http:
+            raise ValueError(
+                "非本机监听必须配置 TLS；受限测试网络可显式设置 "
+                "WTP_ALLOW_INSECURE_HTTP=1"
+            )
+
+
+def _read_server_port(value: object) -> int:
+    raw = "5173" if value in (None, "") else str(value).strip()
+    try:
+        port = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError("WTP_PORT 必须是 1-65535 的整数") from None
+    if not 1 <= port <= 65535:
+        raise ValueError("WTP_PORT 必须是 1-65535 的整数")
+    return port
+
+
+def _read_server_boolean(value: object, *, default: bool, name: str) -> bool:
+    if value in (None, ""):
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} 必须是 1 或 0")
+
+
+def _resolve_server_path(value: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    return path.resolve()
+
+
+def _normalize_allowed_host(value: object) -> str:
+    host = str(value or "").strip().lower().rstrip(".")
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    if (
+        not host
+        or any(character.isspace() or ord(character) < 32 for character in host)
+        or any(token in host for token in ("*", "/", "\\", "@", ","))
+    ):
+        return ""
+    try:
+        return ipaddress.ip_address(host).compressed.lower()
+    except ValueError:
+        pass
+    try:
+        ascii_host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return ""
+    labels = ascii_host.split(".")
+    if any(
+        not label
+        or len(label) > 63
+        or label.startswith("-")
+        or label.endswith("-")
+        or not all(character.isalnum() or character == "-" for character in label)
+        for label in labels
+    ):
+        return ""
+    return ascii_host
+
+
+def _parse_allowed_hosts(value: object) -> tuple[str, ...]:
+    entries = str(value or "").split(",")
+    normalized = []
+    for entry in entries:
+        host = _normalize_allowed_host(entry)
+        if not host:
+            raise ValueError("WTP_ALLOWED_HOSTS 包含无效主机名")
+        if host not in normalized:
+            normalized.append(host)
+    if not normalized:
+        raise ValueError("WTP_ALLOWED_HOSTS 不能为空")
+    return tuple(normalized)
+
+
+def _host_is_loopback(value: object) -> bool:
+    host = _normalize_allowed_host(value)
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _format_host_header(host: str, port: int) -> str:
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
+def _server_url(scheme: str, host: str, port: int) -> str:
+    return f"{scheme}://{_format_host_header(host, port)}/"
+
+
+def client_address_is_loopback(client_address: object) -> bool:
+    host = (
+        client_address[0]
+        if isinstance(client_address, (tuple, list)) and client_address
+        else ""
+    )
+    try:
+        return ipaddress.ip_address(str(host)).is_loopback
+    except ValueError:
+        return False
+
+
+class _NoHealthRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never forward an internal health probe or its Basic credentials."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+RUNTIME_CONFIG = ServerRuntimeConfig.from_env()
+APP_URL = RUNTIME_CONFIG.app_url
 AI_LAYOUT = AILayoutService.from_env()
 ILLUSTRATIONS = WebImageSearchService.from_env(ai_layout=AI_LAYOUT)
 LOCAL_ASSETS = LocalAssetStore(ROOT, data_dir=DATA_DIR)
@@ -640,38 +911,111 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
                 return True
         return False
 
+    def runtime_config(self) -> ServerRuntimeConfig:
+        config = getattr(self.server, "runtime_config", None)
+        return config if isinstance(config, ServerRuntimeConfig) else RUNTIME_CONFIG
+
     def reject_untrusted_host(self) -> bool:
         """Reject DNS-rebinding requests before any local data is read."""
 
         raw_host = self.headers.get("Host", "").strip()
+        parsed = None
         try:
             parsed = urlparse(f"//{raw_host}")
-            hostname = (parsed.hostname or "").lower().rstrip(".")
+            hostname = _normalize_allowed_host(parsed.hostname)
             port = parsed.port
         except ValueError:
             hostname = ""
             port = None
         expected_port = int(getattr(self.server, "server_port", 0) or 0)
+        config = self.runtime_config()
         if (
-            hostname not in {"127.0.0.1", "localhost", "::1"}
-            or (port is not None and expected_port and port != expected_port)
+            not raw_host
+            or parsed is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or hostname not in config.allowed_hosts
+            or port is None
+            or (expected_port and port != expected_port)
         ):
-            self.send_json({"error": "已拒绝非本机请求"}, HTTPStatus.FORBIDDEN)
+            self.send_json({"error": "已拒绝未授权的 Host 请求"}, HTTPStatus.FORBIDDEN)
             return True
         return False
+
+    def reject_unauthenticated(self, path: str) -> bool:
+        config = self.runtime_config()
+        if not config.basic_auth_enabled:
+            return False
+        if (
+            path == "/api/health"
+            and self.command in {"GET", "HEAD"}
+            and client_address_is_loopback(self.client_address)
+        ):
+            return False
+        authorization = self.headers.get("Authorization", "")
+        supplied_user = ""
+        supplied_password = ""
+        if authorization.startswith("Basic "):
+            encoded = authorization[6:].strip()
+            try:
+                decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+                supplied_user, supplied_password = decoded.split(":", 1)
+            except (binascii.Error, UnicodeDecodeError, ValueError):
+                supplied_user = ""
+                supplied_password = ""
+        authorized = secrets.compare_digest(
+            supplied_user.encode("utf-8"),
+            config.basic_auth_user.encode("utf-8"),
+        ) & secrets.compare_digest(
+            supplied_password.encode("utf-8"),
+            config.basic_auth_password.encode("utf-8"),
+        )
+        if authorized:
+            return False
+        payload = json.dumps(
+            {"error": "需要身份验证"},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.send_response(HTTPStatus.UNAUTHORIZED)
+        self.send_header(
+            "WWW-Authenticate",
+            'Basic realm="Write Then Publish", charset="UTF-8"',
+        )
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(payload)
+        return True
+
+    def send_health(self, *, include_body: bool) -> None:
+        encoded = json.dumps(
+            {
+                "ok": True,
+                "service": APP_SERVICE,
+                "schema": APP_HEALTH_SCHEMA,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if include_body:
+            self.wfile.write(encoded)
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
         if self.reject_untrusted_host():
             return
         path = urlparse(self.path).path
+        if self.reject_unauthenticated(path):
+            return
         if path == "/api/health":
-            self.send_json(
-                {
-                    "ok": True,
-                    "service": APP_SERVICE,
-                    "schema": APP_HEALTH_SCHEMA,
-                }
-            )
+            self.send_health(include_body=True)
             return
         if path == "/api/project-store":
             if CLOUD.enabled and not CLOUD_INITIAL_SYNC_DONE.is_set():
@@ -765,6 +1109,11 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
         if self.reject_untrusted_host():
             return
         path = urlparse(self.path).path
+        if self.reject_unauthenticated(path):
+            return
+        if path == "/api/health":
+            self.send_health(include_body=False)
+            return
         if path.startswith("/api/") or not public_static_path(path):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
@@ -773,9 +1122,12 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
     def do_PUT(self) -> None:  # noqa: N802 - stdlib handler API
         if self.reject_untrusted_host():
             return
+        path = urlparse(self.path).path
+        if self.reject_unauthenticated(path):
+            return
         if self.reject_cross_origin_mutation():
             return
-        if urlparse(self.path).path != "/api/project-store":
+        if path != "/api/project-store":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         try:
@@ -898,9 +1250,12 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
     def do_PATCH(self) -> None:  # noqa: N802 - stdlib handler API
         if self.reject_untrusted_host():
             return
+        path = urlparse(self.path).path
+        if self.reject_unauthenticated(path):
+            return
         if self.reject_cross_origin_mutation():
             return
-        if urlparse(self.path).path != "/api/project-store/current-text":
+        if path != "/api/project-store/current-text":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         try:
@@ -999,9 +1354,11 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
         if self.reject_untrusted_host():
             return
+        path = urlparse(self.path).path
+        if self.reject_unauthenticated(path):
+            return
         if self.reject_cross_origin_mutation():
             return
-        path = urlparse(self.path).path
         if path == "/api/ai/optimize-layout":
             payload = self.read_json_body(maximum=MAX_AI_TEXT_BYTES)
             if not payload:
@@ -1309,9 +1666,11 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
     def do_DELETE(self) -> None:  # noqa: N802 - stdlib handler API
         if self.reject_untrusted_host():
             return
+        path = urlparse(self.path).path
+        if self.reject_unauthenticated(path):
+            return
         if self.reject_cross_origin_mutation():
             return
-        path = urlparse(self.path).path
         if path.startswith("/api/project-store/") and "/" not in path.removeprefix("/api/project-store/"):
             payload = self.read_json_body(maximum=4096)
             if not payload or payload.get("confirm") is not True:
@@ -1421,9 +1780,32 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
         self.send_json({"ok": True})
 
 
-def existing_app_is_healthy() -> bool:
+def existing_app_is_healthy(
+    config: ServerRuntimeConfig | None = None,
+) -> bool:
+    config = config or RUNTIME_CONFIG
+    headers = {"Host": config.health_host_header}
+    if config.basic_auth_enabled:
+        token = base64.b64encode(
+            f"{config.basic_auth_user}:{config.basic_auth_password}".encode("utf-8")
+        ).decode("ascii")
+        headers["Authorization"] = f"Basic {token}"
+    request = urllib.request.Request(config.health_url, headers=headers)
+    handlers: list[object] = [
+        urllib.request.ProxyHandler({}),
+        _NoHealthRedirectHandler(),
+    ]
+    if config.tls_enabled:
+        # This is a process-local liveness probe only.  User-facing clients must
+        # still validate or explicitly trust the configured certificate.
+        handlers.append(
+            urllib.request.HTTPSHandler(
+                context=ssl._create_unverified_context(),
+            )
+        )
+    opener = urllib.request.build_opener(*handlers)
     try:
-        with urllib.request.urlopen(f"{APP_URL}api/health", timeout=2) as response:
+        with opener.open(request, timeout=2) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (OSError, urllib.error.URLError, UnicodeDecodeError, json.JSONDecodeError):
         return False
@@ -1435,16 +1817,40 @@ def existing_app_is_healthy() -> bool:
     )
 
 
+def create_runtime_server(
+    config: ServerRuntimeConfig,
+    handler: object,
+) -> ThreadingHTTPServer:
+    config.validate()
+    server = ThreadingHTTPServer((config.bind_host, config.port), handler)
+    server.runtime_config = config
+    if not config.tls_enabled:
+        return server
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    try:
+        context.load_cert_chain(
+            certfile=str(config.tls_cert_file),
+            keyfile=str(config.tls_key_file),
+        )
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+    except Exception:
+        server.server_close()
+        raise
+    return server
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    RUNTIME_CONFIG.validate()
     handler = partial(WriteThenPublishHandler, directory=str(ROOT))
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", 5173), handler)
+        server = create_runtime_server(RUNTIME_CONFIG, handler)
     except OSError as error:
-        if error.errno == EADDRINUSE and existing_app_is_healthy():
+        if error.errno == EADDRINUSE and existing_app_is_healthy(RUNTIME_CONFIG):
             print(f"写了就发已经在运行：{APP_URL}", flush=True)
-            print("正在打开浏览器……", flush=True)
-            webbrowser.open(APP_URL)
+            if RUNTIME_CONFIG.open_browser:
+                print("正在打开浏览器……", flush=True)
+                webbrowser.open(APP_URL)
             raise SystemExit(0)
         raise
     print(f"Write Then Publish: {APP_URL}", flush=True)
@@ -1465,5 +1871,6 @@ if __name__ == "__main__":
         threading.Thread(target=initial_cloud_sync, name="cloud-sync-startup", daemon=True).start()
     else:
         print(f"云同步未启用：{CLOUD.disabled_reason}", flush=True)
-    threading.Timer(0.4, webbrowser.open, args=(APP_URL,)).start()
+    if RUNTIME_CONFIG.open_browser:
+        threading.Timer(0.4, webbrowser.open, args=(APP_URL,)).start()
     server.serve_forever()

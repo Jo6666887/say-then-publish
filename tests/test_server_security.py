@@ -1,3 +1,4 @@
+import base64
 import json
 import tempfile
 import threading
@@ -6,6 +7,7 @@ import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from functools import partial
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -185,6 +187,374 @@ class FakeIllustrationService:
         return b"image", "image/png"
 
 
+@contextmanager
+def running_configured_server(config):
+    handler = partial(server.WriteThenPublishHandler, directory=str(server.ROOT))
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.runtime_config = config
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    host, port = httpd.server_address
+    try:
+        yield httpd, f"http://{host}:{port}"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=2)
+
+
+def basic_auth_header(username="editor", password="correct horse"):
+    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    return {"Authorization": f"Basic {token}"}
+
+
+class RuntimeSecurityConfigurationTests(unittest.TestCase):
+    def test_default_runtime_keeps_current_loopback_behavior(self):
+        config = server.ServerRuntimeConfig.from_env({})
+
+        config.validate()
+        self.assertEqual(config.bind_host, "127.0.0.1")
+        self.assertEqual(config.port, 5173)
+        self.assertEqual(config.allowed_hosts, ("127.0.0.1", "localhost", "::1"))
+        self.assertEqual(config.app_url, "http://127.0.0.1:5173/")
+        self.assertTrue(config.open_browser)
+        self.assertFalse(config.basic_auth_enabled)
+        self.assertFalse(config.tls_enabled)
+
+    def test_non_loopback_requires_explicit_host_auth_and_tls(self):
+        cases = (
+            (
+                {
+                    "WTP_BIND_HOST": "0.0.0.0",
+                    "WTP_BASIC_AUTH_USER": "editor",
+                    "WTP_BASIC_AUTH_PASSWORD": "secret",
+                    "WTP_ALLOW_INSECURE_HTTP": "1",
+                },
+                "WTP_ALLOWED_HOSTS",
+            ),
+            (
+                {
+                    "WTP_BIND_HOST": "0.0.0.0",
+                    "WTP_ALLOWED_HOSTS": "203.0.113.8",
+                    "WTP_ALLOW_INSECURE_HTTP": "1",
+                },
+                "Basic Auth",
+            ),
+            (
+                {
+                    "WTP_BIND_HOST": "0.0.0.0",
+                    "WTP_ALLOWED_HOSTS": "203.0.113.8",
+                    "WTP_BASIC_AUTH_USER": "editor",
+                    "WTP_BASIC_AUTH_PASSWORD": "secret",
+                },
+                "TLS",
+            ),
+        )
+        for environ, expected in cases:
+            with self.subTest(expected=expected):
+                with self.assertRaisesRegex(ValueError, expected):
+                    server.ServerRuntimeConfig.from_env(environ).validate()
+
+    def test_explicit_insecure_override_is_allowed_only_with_host_and_auth(self):
+        config = server.ServerRuntimeConfig.from_env(
+            {
+                "WTP_BIND_HOST": "0.0.0.0",
+                "WTP_PORT": "8517",
+                "WTP_ALLOWED_HOSTS": "203.0.113.8",
+                "WTP_BASIC_AUTH_USER": "editor",
+                "WTP_BASIC_AUTH_PASSWORD": "secret",
+                "WTP_ALLOW_INSECURE_HTTP": "1",
+                "WTP_OPEN_BROWSER": "0",
+            }
+        )
+
+        config.validate()
+        self.assertEqual(config.port, 8517)
+        self.assertEqual(config.app_url, "http://203.0.113.8:8517/")
+        self.assertEqual(config.health_url, "http://127.0.0.1:8517/api/health")
+        self.assertFalse(config.open_browser)
+
+    def test_specific_public_bind_must_appear_in_allowed_hosts(self):
+        config = server.ServerRuntimeConfig.from_env(
+            {
+                "WTP_BIND_HOST": "203.0.113.8",
+                "WTP_ALLOWED_HOSTS": "app.example.test",
+                "WTP_BASIC_AUTH_USER": "editor",
+                "WTP_BASIC_AUTH_PASSWORD": "secret",
+                "WTP_ALLOW_INSECURE_HTTP": "1",
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "WTP_BIND_HOST"):
+            config.validate()
+
+    def test_tls_files_must_be_paired_and_exist(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            cert = Path(temporary) / "server.crt"
+            key = Path(temporary) / "server.key"
+            cert.write_text("certificate", encoding="utf-8")
+            key.write_text("key", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "同时配置"):
+                server.ServerRuntimeConfig.from_env(
+                    {"WTP_TLS_CERT_FILE": str(cert)}
+                ).validate()
+
+            config = server.ServerRuntimeConfig.from_env(
+                {
+                    "WTP_BIND_HOST": "0.0.0.0",
+                    "WTP_PORT": "8517",
+                    "WTP_ALLOWED_HOSTS": "203.0.113.8",
+                    "WTP_BASIC_AUTH_USER": "editor",
+                    "WTP_BASIC_AUTH_PASSWORD": "secret",
+                    "WTP_TLS_CERT_FILE": str(cert),
+                    "WTP_TLS_KEY_FILE": str(key),
+                }
+            )
+            config.validate()
+            self.assertEqual(config.app_url, "https://203.0.113.8:8517/")
+            self.assertEqual(config.health_url, "https://127.0.0.1:8517/api/health")
+
+    def test_invalid_ports_booleans_and_wildcard_hosts_are_rejected(self):
+        for environ in (
+            {"WTP_PORT": "0"},
+            {"WTP_PORT": "not-a-port"},
+            {"WTP_OPEN_BROWSER": "sometimes"},
+            {"WTP_ALLOWED_HOSTS": "*"},
+            {"WTP_ALLOWED_HOSTS": "example.test:8517"},
+        ):
+            with self.subTest(environ=environ):
+                with self.assertRaises(ValueError):
+                    server.ServerRuntimeConfig.from_env(environ)
+
+    def test_create_runtime_server_uses_configured_bind_port_and_tls_context(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            cert = Path(temporary) / "server.crt"
+            key = Path(temporary) / "server.key"
+            cert.write_text("certificate", encoding="utf-8")
+            key.write_text("key", encoding="utf-8")
+            config = server.ServerRuntimeConfig.from_env(
+                {
+                    "WTP_BIND_HOST": "0.0.0.0",
+                    "WTP_PORT": "8517",
+                    "WTP_ALLOWED_HOSTS": "203.0.113.8",
+                    "WTP_BASIC_AUTH_USER": "editor",
+                    "WTP_BASIC_AUTH_PASSWORD": "secret",
+                    "WTP_TLS_CERT_FILE": str(cert),
+                    "WTP_TLS_KEY_FILE": str(key),
+                }
+            )
+            fake_httpd = SimpleNamespace(socket=object(), runtime_config=None)
+            fake_context = mock.Mock()
+            fake_context.wrap_socket.return_value = "tls-socket"
+            with (
+                mock.patch.object(
+                    server,
+                    "ThreadingHTTPServer",
+                    return_value=fake_httpd,
+                ) as factory,
+                mock.patch.object(
+                    server.ssl,
+                    "SSLContext",
+                    return_value=fake_context,
+                ) as context_factory,
+            ):
+                result = server.create_runtime_server(config, object())
+
+        self.assertIs(result, fake_httpd)
+        factory.assert_called_once_with(("0.0.0.0", 8517), mock.ANY)
+        context_factory.assert_called_once_with(server.ssl.PROTOCOL_TLS_SERVER)
+        fake_context.load_cert_chain.assert_called_once_with(
+            certfile=str(config.tls_cert_file),
+            keyfile=str(config.tls_key_file),
+        )
+        fake_context.wrap_socket.assert_called_once_with(mock.ANY, server_side=True)
+        self.assertEqual(fake_httpd.socket, "tls-socket")
+        self.assertIs(fake_httpd.runtime_config, config)
+
+    def test_configured_https_health_probe_uses_port_host_auth_and_local_context(self):
+        config = server.ServerRuntimeConfig(
+            bind_host="0.0.0.0",
+            port=8517,
+            allowed_hosts=("203.0.113.8",),
+            allowed_hosts_explicit=True,
+            open_browser=False,
+            basic_auth_user="editor",
+            basic_auth_password="secret",
+            tls_cert_file=Path("/test/server.crt"),
+            tls_key_file=Path("/test/server.key"),
+            allow_insecure_http=False,
+        )
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(
+            {"ok": True, "service": "write-then-publish", "schema": 1}
+        ).encode("utf-8")
+        context = object()
+        opener = mock.Mock()
+        opener.open.return_value = response
+        https_handler = object()
+        with (
+            mock.patch.object(
+                server.ssl,
+                "_create_unverified_context",
+                return_value=context,
+            ),
+            mock.patch.object(
+                server.urllib.request,
+                "HTTPSHandler",
+                return_value=https_handler,
+            ) as handler_factory,
+            mock.patch.object(
+                server.urllib.request,
+                "build_opener",
+                return_value=opener,
+            ) as build_opener,
+        ):
+            healthy = server.existing_app_is_healthy(config)
+
+        self.assertTrue(healthy)
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, "https://127.0.0.1:8517/api/health")
+        self.assertEqual(request.get_header("Host"), "203.0.113.8:8517")
+        self.assertTrue(request.get_header("Authorization").startswith("Basic "))
+        handler_factory.assert_called_once_with(context=context)
+        self.assertIn(
+            https_handler,
+            build_opener.call_args.args,
+        )
+        self.assertEqual(opener.open.call_args.kwargs["timeout"], 2)
+
+    def test_basic_auth_protects_static_and_api_but_loopback_health_is_exempt(self):
+        config = self.authenticated_loopback_config()
+        with running_configured_server(config) as (_, base_url):
+            for path, method, data in (
+                ("/", "GET", None),
+                ("/api/project-store", "GET", None),
+                ("/api/cloud-sync", "POST", b"{}"),
+            ):
+                request = urllib.request.Request(
+                    f"{base_url}{path}",
+                    method=method,
+                    data=data,
+                    headers={"Content-Type": "application/json"} if data else {},
+                )
+                with self.subTest(path=path):
+                    with self.assertRaises(urllib.error.HTTPError) as caught:
+                        urllib.request.urlopen(request, timeout=3)
+                    self.assertEqual(caught.exception.code, 401)
+                    self.assertIn(
+                        "Basic",
+                        caught.exception.headers.get("WWW-Authenticate", ""),
+                    )
+
+            authenticated = urllib.request.Request(
+                f"{base_url}/",
+                headers=basic_auth_header(),
+            )
+            with urllib.request.urlopen(authenticated, timeout=3) as response:
+                self.assertEqual(response.status, 200)
+
+            for method in ("GET", "HEAD"):
+                health = urllib.request.Request(
+                    f"{base_url}/api/health",
+                    method=method,
+                )
+                with urllib.request.urlopen(health, timeout=3) as response:
+                    self.assertEqual(response.status, 200)
+                    if method == "HEAD":
+                        self.assertEqual(response.read(), b"")
+
+    def test_remote_health_requires_auth_and_malformed_basic_never_leaks_credentials(self):
+        config = self.authenticated_loopback_config()
+        with (
+            running_configured_server(config) as (_, base_url),
+            mock.patch.object(
+                server,
+                "client_address_is_loopback",
+                return_value=False,
+            ),
+        ):
+            for authorization in (
+                "",
+                "Basic !!!",
+                "Basic " + base64.b64encode(b"editor:wrong").decode(),
+                "Basic "
+                + base64.b64encode("编辑者:错误".encode("utf-8")).decode("ascii"),
+            ):
+                request = urllib.request.Request(
+                    f"{base_url}/api/health",
+                    headers={"Authorization": authorization} if authorization else {},
+                )
+                with self.subTest(authorization=authorization):
+                    with self.assertRaises(urllib.error.HTTPError) as caught:
+                        urllib.request.urlopen(request, timeout=3)
+                    body = caught.exception.read().decode("utf-8")
+                    self.assertEqual(caught.exception.code, 401)
+                    self.assertNotIn("editor", body)
+                    self.assertNotIn("correct horse", body)
+
+            request = urllib.request.Request(
+                f"{base_url}/api/health",
+                headers=basic_auth_header(),
+            )
+            with urllib.request.urlopen(request, timeout=3) as response:
+                self.assertEqual(response.status, 200)
+
+    def test_strict_host_allows_exact_entry_and_rejects_missing_or_wrong_port(self):
+        config = server.ServerRuntimeConfig(
+            bind_host="127.0.0.1",
+            port=5173,
+            allowed_hosts=("public.example.test",),
+            allowed_hosts_explicit=True,
+            open_browser=False,
+            basic_auth_user="editor",
+            basic_auth_password="correct horse",
+            tls_cert_file=None,
+            tls_key_file=None,
+            allow_insecure_http=False,
+        )
+        with running_configured_server(config) as (httpd, base_url):
+            port = httpd.server_port
+            valid_headers = {
+                **basic_auth_header(),
+                "Host": f"public.example.test:{port}",
+            }
+            request = urllib.request.Request(f"{base_url}/", headers=valid_headers)
+            with urllib.request.urlopen(request, timeout=3) as response:
+                self.assertEqual(response.status, 200)
+
+            for host in (
+                "public.example.test",
+                f"public.example.test:{port + 1}",
+                f"attacker.example:{port}",
+                f"user@public.example.test:{port}",
+                "[invalid-ipv6",
+            ):
+                request = urllib.request.Request(
+                    f"{base_url}/",
+                    headers={**basic_auth_header(), "Host": host},
+                )
+                with self.subTest(host=host):
+                    with self.assertRaises(urllib.error.HTTPError) as caught:
+                        urllib.request.urlopen(request, timeout=3)
+                    self.assertEqual(caught.exception.code, 403)
+
+    @staticmethod
+    def authenticated_loopback_config():
+        return server.ServerRuntimeConfig(
+            bind_host="127.0.0.1",
+            port=5173,
+            allowed_hosts=("127.0.0.1",),
+            allowed_hosts_explicit=True,
+            open_browser=False,
+            basic_auth_user="editor",
+            basic_auth_password="correct horse",
+            tls_cert_file=None,
+            tls_key_file=None,
+            allow_insecure_http=False,
+        )
+
+
 class StaticFileBoundaryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -275,7 +645,7 @@ class StaticFileBoundaryTests(unittest.TestCase):
         }
         status, body = self.request_status("/api/project-store", headers=headers)
         self.assertEqual(status, 403)
-        self.assertIn("非本机", body.decode("utf-8"))
+        self.assertIn("Host", body.decode("utf-8"))
 
         status, body = self.request_status(
             "/api/illustrations/search",
@@ -284,7 +654,7 @@ class StaticFileBoundaryTests(unittest.TestCase):
             data=b"{}",
         )
         self.assertEqual(status, 403)
-        self.assertIn("非本机", body.decode("utf-8"))
+        self.assertIn("Host", body.decode("utf-8"))
 
     def test_ai_status_is_public_but_contains_no_credentials(self):
         fake_ai = FakeAILayoutService()
