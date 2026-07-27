@@ -23,7 +23,7 @@ if [[ -z "$DEPLOY_HOST" ]]; then
   echo "必须显式设置 WTP_DEPLOY_HOST，例如 root@服务器IP。" >&2
   exit 1
 fi
-if [[ "$DEPLOY_HOST" != (#b)([A-Za-z0-9._-]##)@([A-Za-z0-9.-]##) ]]; then
+if ! print -r -- "$DEPLOY_HOST" | grep -Eq '^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+$'; then
   echo "WTP_DEPLOY_HOST 格式无效，应为 用户名@主机名或IP。" >&2
   exit 1
 fi

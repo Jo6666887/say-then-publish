@@ -55,6 +55,7 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn("git -C \"$PROJECT_DIR\" archive", script)
         self.assertIn("status --porcelain", script)
         self.assertIn('DEPLOY_HOST="${WTP_DEPLOY_HOST:-}"', script)
+        self.assertIn("grep -Eq '^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+$'", script)
         self.assertIn("scp ", script)
         self.assertNotIn("115.190.212.2", script)
         self.assertNotIn("git pull", script)
