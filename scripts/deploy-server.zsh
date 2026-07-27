@@ -16,6 +16,7 @@ cleanup() {
       [[ -d "$TEMP_DIR" ]] && rm -rf -- "$TEMP_DIR"
       ;;
   esac
+  return 0
 }
 trap cleanup EXIT
 
