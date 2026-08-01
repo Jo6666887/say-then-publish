@@ -6268,6 +6268,11 @@ function parseBlocks(content, images = {}) {
     const trimmedStart = lineOffsets[index] + leading;
 
     if (trimmed) {
+      if (trimmed === "[[pagebreak]]") {
+        flushParagraph();
+        blocks.push({ type: "pagebreak" });
+        continue;
+      }
       const imageId = resolveMarkdownImageBlock(trimmed, imageLookup);
       if (isMarkdownImageBlock(trimmed)) {
         flushParagraph();
@@ -6768,6 +6773,11 @@ async function buildPages(settings) {
   }
 
   for (const block of blocks) {
+    if (block.type === "pagebreak") {
+      finishPage();
+      continue;
+    }
+
     if (block.type === "spacer") {
       const spacerHeight = blankLineGap(settings);
       ensureSpace(spacerHeight, 0);
@@ -6889,6 +6899,10 @@ async function buildScrollPage(settings) {
   let previousBlockType = null;
 
   for (const block of blocks) {
+    if (block.type === "pagebreak") {
+      continue;
+    }
+
     if (block.type === "spacer") {
       y += blankLineGap(settings);
       previousBlockType = "spacer";
