@@ -98,8 +98,8 @@
           <div class="toolbar" aria-label="文字样式">
             <button type="button" class="tool-button" data-format="h1" title="大标题">H1</button>
             <button type="button" class="tool-button" data-format="h2" title="小标题">H2</button>
-            <button type="button" class="tool-button" data-format="bold" title="加粗"><strong>B</strong></button>
-            <button type="button" class="tool-button" data-format="italic" title="斜体"><em>I</em></button>
+            <button type="button" class="tool-button" data-format="bold" title="加粗；再次点击取消加粗"><strong>B</strong></button>
+            <button type="button" class="tool-button" data-format="italic" title="斜体；再次点击取消斜体"><em>I</em></button>
             <button type="button" class="tool-button" data-format="quote" title="重点引用"><i data-lucide="quote"></i></button>
             <button id="aiOptimizeBtn" class="ai-toolbar-button" type="button" title="让 AI 自动识别重点并优化当前排版">
               <i data-lucide="sparkles"></i>
@@ -138,13 +138,13 @@
               </div>
             </details>
             <details id="colorMenu" class="tool-menu">
-              <summary class="tool-button color-tool" title="选中文字颜色" aria-label="选中文字颜色">
+              <summary class="tool-button color-tool" title="选中文字颜色；启用后再次点击可退出" aria-label="选中文字颜色" aria-pressed="false">
                 <i data-lucide="paintbrush"></i>
               </summary>
               <div class="tool-popover color-popover">
                 <div id="colorGuide" class="color-guide">
                   <strong>文字上色</strong>
-                  <span>1. 选择颜色  2. 点确定  3. 在文本框里选中要上色的文字</span>
+                  <span>选择颜色并确定，再选中一段文字；应用一次后自动结束，也可再次点击工具退出</span>
                 </div>
                 <label>
                   字体颜色
@@ -158,13 +158,13 @@
             </details>
 
             <details id="bgColorMenu" class="tool-menu">
-              <summary class="tool-button bg-color-tool" title="选中文字背景色" aria-label="选中文字背景色">
+              <summary class="tool-button bg-color-tool" title="选中文字背景色；启用后再次点击可退出" aria-label="选中文字背景色" aria-pressed="false">
                 <i data-lucide="highlighter"></i>
               </summary>
               <div class="tool-popover color-popover">
                 <div class="color-guide">
                   <strong>背景上色</strong>
-                  <span>1. 选择背景色  2. 点确定  3. 连续选中文字刷底色，点取消结束</span>
+                  <span>选择背景色并确定，再选中一段文字；应用一次后自动结束，也可再次点击工具退出</span>
                 </div>
                 <label>
                   背景颜色
@@ -697,6 +697,6 @@
     <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/lucide@1.8.0/dist/umd/lucide.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
-    <script src="src/app.js?v=20260801-layout-only-v2"></script>
+    <script src="src/app.js?v=20260801-format-toggle-v1"></script>
   </body>
 </html>

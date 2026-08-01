@@ -1040,6 +1040,7 @@ function readForm() {
 
 function applyForm(data) {
   manualSaveGeneration += 1;
+  disableActiveBrushes();
   els.content.value = data.content ?? defaultText;
   els.displayName.value = data.displayName ?? "捏捏番茄（AI图文版）";
   els.handle.value = data.handle ?? "@heytomato";
@@ -4525,20 +4526,54 @@ function wrapSelection(kind) {
   const textarea = els.content;
   const start = textarea.selectionStart;
   const end = textarea.selectionEnd;
-  const selected = textarea.value.slice(start, end) || "文字";
+  const current = textarea.value;
+  const selected = current.slice(start, end) || "文字";
   let next = selected;
   let cursorOffset = null;
 
-  if (kind === "bold") {
-    next = `**${selected}**`;
-    cursorOffset = selected === "文字" ? 2 : null;
-  } else if (kind === "italic") {
-    next = `*${selected}*`;
-    cursorOffset = selected === "文字" ? 1 : null;
+  if (kind === "bold" || kind === "italic") {
+    const marker = kind === "bold" ? "**" : "*";
+    const markerLength = marker.length;
+    const italicMarkersAreStandalone =
+      kind !== "italic" ||
+      (!selected.startsWith("**") &&
+        !selected.endsWith("**") &&
+        current.slice(start - 2, start - 1) !== "*" &&
+        current.slice(end + 1, end + 2) !== "*");
+    const selectedHasMarkers =
+      italicMarkersAreStandalone &&
+      selected.length >= markerLength * 2 &&
+      selected.startsWith(marker) &&
+      selected.endsWith(marker);
+    const selectionIsWrapped =
+      italicMarkersAreStandalone &&
+      start >= markerLength &&
+      current.slice(start - markerLength, start) === marker &&
+      current.slice(end, end + markerLength) === marker;
+
+    if (selectedHasMarkers) {
+      const unwrapped = selected.slice(markerLength, -markerLength);
+      textarea.value = `${current.slice(0, start)}${unwrapped}${current.slice(end)}`;
+      textarea.focus();
+      textarea.setSelectionRange(start, start + unwrapped.length);
+    } else if (selectionIsWrapped) {
+      const unwrappedStart = start - markerLength;
+      textarea.value = `${current.slice(0, unwrappedStart)}${selected}${current.slice(end + markerLength)}`;
+      textarea.focus();
+      textarea.setSelectionRange(unwrappedStart, unwrappedStart + selected.length);
+    } else {
+      next = `${marker}${selected}${marker}`;
+      textarea.value = `${current.slice(0, start)}${next}${current.slice(end)}`;
+      textarea.focus();
+      textarea.setSelectionRange(start + markerLength, start + markerLength + selected.length);
+    }
+    commitTextHistory();
+    requestRender();
+    return;
   } else if (kind === "h1" || kind === "h2" || kind === "quote") {
     const prefix = kind === "h1" ? "# " : kind === "h2" ? "## " : "> ";
-    const lineStart = textarea.value.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
-    textarea.value = `${textarea.value.slice(0, lineStart)}${prefix}${textarea.value.slice(lineStart)}`;
+    const lineStart = current.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+    textarea.value = `${current.slice(0, lineStart)}${prefix}${current.slice(lineStart)}`;
     textarea.focus();
     textarea.setSelectionRange(start + prefix.length, end + prefix.length);
     commitTextHistory();
@@ -4546,7 +4581,7 @@ function wrapSelection(kind) {
     return;
   }
 
-  textarea.value = `${textarea.value.slice(0, start)}${next}${textarea.value.slice(end)}`;
+  textarea.value = `${current.slice(0, start)}${next}${current.slice(end)}`;
   if (cursorOffset !== null) {
     textarea.setSelectionRange(start + cursorOffset, start + cursorOffset + selected.length);
   } else {
@@ -4593,14 +4628,19 @@ function enableColorBrush() {
   document.documentElement.style.setProperty("--brush-color", els.inlineColor.value);
   els.colorTool?.classList.add("active");
   els.bgColorTool?.classList.remove("active");
+  els.colorTool?.setAttribute("aria-pressed", "true");
+  els.bgColorTool?.setAttribute("aria-pressed", "false");
   els.colorMenu.open = false;
+  els.bgColorMenu.open = false;
   els.status.textContent = "刷色已开启，选中一段文字即可上色";
 }
 
-function disableColorBrush() {
+function disableColorBrush(announce = false) {
   state.colorBrush = false;
   els.colorTool?.classList.remove("active");
+  els.colorTool?.setAttribute("aria-pressed", "false");
   els.colorMenu.open = false;
+  if (announce) els.status.textContent = "文字上色已退出";
 }
 
 function enableBackgroundBrush() {
@@ -4609,14 +4649,40 @@ function enableBackgroundBrush() {
   document.documentElement.style.setProperty("--text-bg-brush-color", els.inlineBgColor.value);
   els.bgColorTool?.classList.add("active");
   els.colorTool?.classList.remove("active");
+  els.bgColorTool?.setAttribute("aria-pressed", "true");
+  els.colorTool?.setAttribute("aria-pressed", "false");
   els.bgColorMenu.open = false;
+  els.colorMenu.open = false;
   els.status.textContent = "背景上色已开启，选中一段文字即可加底色";
 }
 
-function disableBackgroundBrush() {
+function disableBackgroundBrush(announce = false) {
   state.bgColorBrush = false;
   els.bgColorTool?.classList.remove("active");
+  els.bgColorTool?.setAttribute("aria-pressed", "false");
   els.bgColorMenu.open = false;
+  if (announce) els.status.textContent = "背景上色已退出";
+}
+
+function toggleActiveBrushFromTool(event, kind) {
+  const isActive = kind === "color" ? state.colorBrush : state.bgColorBrush;
+  if (isActive) {
+    event.preventDefault();
+    if (kind === "color") {
+      disableColorBrush(true);
+    } else {
+      disableBackgroundBrush(true);
+    }
+    return;
+  }
+
+  if (kind === "color") disableBackgroundBrush();
+  else disableColorBrush();
+}
+
+function disableActiveBrushes() {
+  disableColorBrush();
+  disableBackgroundBrush();
 }
 
 function applyColorBrushToSelection() {
@@ -4633,7 +4699,8 @@ function applyBackgroundBrushToSelection() {
   if (document.activeElement !== els.content) return;
   if (els.content.selectionStart === els.content.selectionEnd) return;
   wrapSelectionWithBackground();
-  els.status.textContent = "已应用背景色，可继续选中文字刷色，点取消结束";
+  disableBackgroundBrush();
+  els.status.textContent = "已应用背景色，工具已自动退出";
 }
 
 function applyActiveBrushToSelection() {
@@ -9154,7 +9221,10 @@ function bindEvents() {
   });
 
   document.querySelectorAll("[data-format]").forEach((button) => {
-    button.addEventListener("click", () => wrapSelection(button.dataset.format));
+    button.addEventListener("click", () => {
+      disableActiveBrushes();
+      wrapSelection(button.dataset.format);
+    });
   });
 
   els.modeButtons.forEach((button) => {
@@ -9239,7 +9309,8 @@ function bindEvents() {
   els.colorCancel.addEventListener("click", disableColorBrush);
   els.bgColorConfirm.addEventListener("click", enableBackgroundBrush);
   els.bgColorCancel.addEventListener("click", disableBackgroundBrush);
-  els.content.addEventListener("mouseup", applyActiveBrushToSelection);
+  els.colorTool?.addEventListener("click", (event) => toggleActiveBrushFromTool(event, "color"));
+  els.bgColorTool?.addEventListener("click", (event) => toggleActiveBrushFromTool(event, "background"));
   document.addEventListener("pointerup", applyActiveBrushToSelection);
   els.content.addEventListener("keyup", (event) => {
     if (event.key.startsWith("Arrow") || event.key === "Shift") {

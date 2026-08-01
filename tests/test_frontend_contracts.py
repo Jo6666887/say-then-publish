@@ -122,6 +122,37 @@ class PreviewDirectEditingContractTests(unittest.TestCase):
         self.assertNotIn("delete state.images", remove)
 
 
+class InlineFormattingInteractionContractTests(unittest.TestCase):
+    def test_bold_and_italic_buttons_toggle_existing_wrappers(self):
+        wrap = function_body("wrapSelection")
+
+        self.assertIn('const marker = kind === "bold" ? "**" : "*"', wrap)
+        self.assertIn("selectedHasMarkers", wrap)
+        self.assertIn("selectionIsWrapped", wrap)
+        self.assertIn("setSelectionRange(unwrappedStart", wrap)
+
+    def test_color_tools_can_exit_from_the_same_toolbar_button(self):
+        toggle = function_body("toggleActiveBrushFromTool")
+        bind = function_body("bindEvents")
+
+        self.assertIn("event.preventDefault()", toggle)
+        self.assertIn("disableColorBrush(true)", toggle)
+        self.assertIn("disableBackgroundBrush(true)", toggle)
+        self.assertIn('toggleActiveBrushFromTool(event, "color")', bind)
+        self.assertIn('toggleActiveBrushFromTool(event, "background")', bind)
+
+    def test_both_color_brushes_are_single_use_and_do_not_double_apply(self):
+        color = function_body("applyColorBrushToSelection")
+        background = function_body("applyBackgroundBrushToSelection")
+        bind = function_body("bindEvents")
+
+        self.assertIn("disableColorBrush()", color)
+        self.assertIn("disableBackgroundBrush()", background)
+        self.assertNotIn('els.content.addEventListener("mouseup", applyActiveBrushToSelection)', bind)
+        self.assertIn('document.addEventListener("pointerup", applyActiveBrushToSelection)', bind)
+        self.assertIn("应用一次后自动结束", HTML)
+
+
 class AiOptimizeInteractionContractTests(unittest.TestCase):
     def test_modal_starts_unselected_and_requires_explicit_generate(self):
         for element_id in ("aiModeLayout", "aiModePolish"):
