@@ -47,6 +47,7 @@ const PANEL_LIMITS = {
 };
 
 let previewEditorPin = null;
+let previewInlineEditor = null;
 let lastEditorImageReferenceSignature = "";
 let sharedTextSaveTimer = 0;
 let persistenceMode = "detecting";
@@ -7851,6 +7852,7 @@ async function render({ persist = true } = {}) {
 }
 
 function drawPreview(canvases) {
+  previewInlineEditor = null;
   els.pages.innerHTML = "";
   els.pages.className = "pages";
   els.pages.classList.toggle("scroll-mode", state.mode === "scroll");
@@ -7916,8 +7918,11 @@ function createImageEditLayer(canvas) {
     box.dataset.actualHeight = String(hit.actualHeight || hit.height);
     box.tabIndex = 0;
     box.setAttribute("role", "group");
-    box.setAttribute("aria-label", `图片 ${state.images[hit.imageId]?.name || hit.imageId}；可拖动调整顺序，Alt 加上下方向键也可移动`);
-    box.title = "拖左上角抓手调整上下顺序；右上角按钮逐项移动；拖右下角调整大小";
+    box.setAttribute("aria-label", `图片 ${state.images[hit.imageId]?.name || hit.imageId}；点击定位源码，可拖动调整顺序，Alt 加上下方向键也可移动`);
+    box.title = "点击定位左侧图片标记；悬浮后可移动、删除或调整大小";
+    if (previewEditorPin?.start === hit.sourceStart && previewEditorPin?.end === hit.sourceEnd) {
+      box.classList.add("is-source-linked");
+    }
     applyImageBoxStyle(box, hit);
 
     const dragHandle = document.createElement("button");
@@ -7944,6 +7949,16 @@ function createImageEditLayer(canvas) {
       orderBar.append(button);
     });
 
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "preview-image-delete";
+    deleteButton.title = "从正文删除（资源库仍保留）";
+    deleteButton.setAttribute("aria-label", "从正文删除这张图片，资源库仍保留");
+    deleteButton.innerHTML = '<i data-lucide="trash-2"></i>';
+    deleteButton.disabled = isBuiltInProjectId(state.currentProjectId);
+    deleteButton.addEventListener("click", deletePreviewImageReference);
+    orderBar.append(deleteButton);
+
     const alignBar = document.createElement("div");
     alignBar.className = "preview-image-align";
     [
@@ -7967,6 +7982,7 @@ function createImageEditLayer(canvas) {
     resize.addEventListener("pointerdown", startPreviewImageResize);
 
     box.addEventListener("keydown", handlePreviewImageOrderKeydown);
+    box.addEventListener("click", handlePreviewImageTarget);
     box.append(dragHandle, orderBar, alignBar, resize);
     layer.append(box);
   }
@@ -7996,7 +8012,7 @@ function createTextHitLayer(canvas) {
     target.style.height = `${(hit.height / CANVAS_HEIGHT) * 100}%`;
     target.dataset.start = String(hit.sourceStart);
     target.dataset.end = String(hit.sourceEnd);
-    target.title = "悬浮定位；点击后锁定编辑位置";
+    target.title = "点击定位源码并直接编辑卡片文字";
     if (previewEditorPin?.start === hit.sourceStart && previewEditorPin?.end === hit.sourceEnd) {
       target.classList.add("is-pinned");
       target.setAttribute("aria-pressed", "true");
@@ -8017,7 +8033,17 @@ function handlePreviewTextTarget(event) {
   if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) return;
   if (event.type === "pointerenter" && previewEditorPin) return;
   const shouldPin = event.type === "click";
+  if (shouldPin && previewInlineEditor?.target === event.currentTarget) {
+    previewInlineEditor.editable.focus({ preventScroll: true });
+    return;
+  }
+  if (shouldPin && previewInlineEditor?.dirty) {
+    els.status.textContent = "当前卡片文字尚未完成，请先点“完成”或按 Esc 取消";
+    previewInlineEditor.editable.focus({ preventScroll: true });
+    return;
+  }
   focusEditorRange(start, end, shouldPin);
+  if (shouldPin) openPreviewInlineEditor(event.currentTarget, start, end);
 }
 
 function focusEditorRange(start, end, pin = false) {
@@ -8027,6 +8053,10 @@ function focusEditorRange(start, end, pin = false) {
       const matches = Number(target.dataset.start) === start && Number(target.dataset.end) === end;
       target.classList.toggle("is-pinned", matches);
       target.setAttribute("aria-pressed", String(matches));
+    });
+    document.querySelectorAll(".preview-image-box").forEach((target) => {
+      const matches = Number(target.dataset.sourceStart) === start && Number(target.dataset.sourceEnd) === end;
+      target.classList.toggle("is-source-linked", matches);
     });
   }
   els.content.focus({ preventScroll: true });
@@ -8042,14 +8072,336 @@ function clearPreviewEditorPin() {
     target.classList.remove("is-pinned");
     target.setAttribute("aria-pressed", "false");
   });
+  document.querySelectorAll(".preview-image-box.is-source-linked").forEach((target) => {
+    target.classList.remove("is-source-linked");
+  });
 }
 
 function scrollTextareaToRange(index) {
-  const before = els.content.value.slice(0, index);
-  const lineIndex = before.split("\n").length - 1;
-  const lineHeight = Number.parseFloat(getComputedStyle(els.content).lineHeight) || 28;
-  const targetTop = Math.max(0, lineIndex * lineHeight - els.content.clientHeight / 2);
-  els.content.scrollTop = targetTop;
+  const textarea = els.content;
+  const computed = getComputedStyle(textarea);
+  const mirror = document.createElement("div");
+  const copiedProperties = [
+    "boxSizing", "fontFamily", "fontSize", "fontStyle", "fontWeight", "fontVariant",
+    "letterSpacing", "lineHeight", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+    "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth",
+    "wordBreak", "overflowWrap", "textTransform", "textIndent", "tabSize",
+  ];
+  mirror.className = "textarea-scroll-mirror";
+  mirror.style.width = `${textarea.offsetWidth}px`;
+  copiedProperties.forEach((property) => {
+    mirror.style[property] = computed[property];
+  });
+  mirror.append(document.createTextNode(textarea.value.slice(0, index)));
+  const marker = document.createElement("span");
+  marker.textContent = textarea.value.slice(index, index + 1) || "\u200b";
+  mirror.append(marker);
+  document.body.append(mirror);
+  const targetTop = marker.offsetTop - textarea.clientHeight * 0.38;
+  const maxScrollTop = Math.max(0, textarea.scrollHeight - textarea.clientHeight);
+  textarea.scrollTop = clamp(targetTop, 0, maxScrollTop);
+  mirror.remove();
+}
+
+function handlePreviewImageTarget(event) {
+  if (event.target.closest("button, [data-action='resize']")) return;
+  if (previewInlineEditor?.dirty) {
+    els.status.textContent = "当前卡片文字尚未完成，请先点“完成”或按 Esc 取消";
+    previewInlineEditor.editable.focus({ preventScroll: true });
+    return;
+  }
+  const box = event.currentTarget;
+  const start = Number(box.dataset.sourceStart);
+  const end = Number(box.dataset.sourceEnd);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return;
+  focusEditorRange(start, end, true);
+  els.status.textContent = "已定位左侧图片标记；可在图片右上角直接删除";
+}
+
+function sourceLineEditorModel(content, sourceIndex) {
+  const lineStart = content.lastIndexOf("\n", Math.max(0, sourceIndex - 1)) + 1;
+  const nextBreak = content.indexOf("\n", sourceIndex);
+  const lineEnd = nextBreak === -1 ? content.length : nextBreak;
+  const rawLine = content.slice(lineStart, lineEnd);
+  const leading = rawLine.match(/^\s*/)?.[0] || "";
+  const afterLeading = rawLine.slice(leading.length);
+  const markerMatch = afterLeading.match(/^(#{1,6}\s+|>\s+|(?:[-*+]|\d+[.)])\s+)/);
+  const marker = markerMatch?.[0] || "";
+  const body = afterLeading.slice(marker.length);
+  let blockType = "p";
+  if (/^#\s+$/.test(marker)) blockType = "h1";
+  else if (/^##\s+$/.test(marker)) blockType = "h2";
+  else if (/^#{3,6}\s+$/.test(marker)) blockType = "h3";
+  else if (/^>\s+$/.test(marker)) blockType = "quote";
+  else if (marker) blockType = "list";
+  return {
+    lineStart,
+    lineEnd,
+    leading,
+    marker,
+    body,
+    bodyStart: lineStart + leading.length + marker.length,
+    blockType,
+  };
+}
+
+function renderPreviewInlineEditorHtml(value) {
+  return parseInline(value)
+    .map((token) => {
+      let inner = escapeHtml(token.text);
+      if (token.bold) inner = `<strong>${inner}</strong>`;
+      if (token.italic) inner = `<em>${inner}</em>`;
+      if (token.color) inner = `<span data-inline-color="${escapeAttribute(token.color)}" style="color:${escapeAttribute(token.color)}">${inner}</span>`;
+      if (token.bgColor) inner = `<span data-inline-bg="${escapeAttribute(token.bgColor)}" style="background-color:${escapeAttribute(token.bgColor)}">${inner}</span>`;
+      return inner;
+    })
+    .join("");
+}
+
+function serializePreviewInlineNode(node) {
+  if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || "";
+  if (node.nodeType !== Node.ELEMENT_NODE) return "";
+  if (node.tagName === "BR") return " ";
+  let value = Array.from(node.childNodes, serializePreviewInlineNode).join("");
+  if (["STRONG", "B"].includes(node.tagName)) value = `**${value}**`;
+  if (["EM", "I"].includes(node.tagName)) value = `*${value}*`;
+  if (node.dataset.inlineColor) value = `{{color:${node.dataset.inlineColor}|${value}}}`;
+  if (node.dataset.inlineBg) value = `{{bg:${node.dataset.inlineBg}|${value}}}`;
+  return value;
+}
+
+function previewInlineVisibleRange(model, sourceStart, sourceEnd) {
+  let visibleOffset = 0;
+  let visibleStart = null;
+  let visibleEnd = null;
+  for (const token of parseInline(model.body, model.bodyStart)) {
+    if (visibleStart === null && sourceStart >= token.sourceStart && sourceStart <= token.sourceEnd) {
+      visibleStart = visibleOffset + clamp(sourceStart - token.sourceStart, 0, token.text.length);
+    }
+    if (visibleEnd === null && sourceEnd >= token.sourceStart && sourceEnd <= token.sourceEnd) {
+      visibleEnd = visibleOffset + clamp(sourceEnd - token.sourceStart, 0, token.text.length);
+    }
+    visibleOffset += token.text.length;
+  }
+  return {
+    start: visibleStart ?? visibleOffset,
+    end: visibleEnd ?? visibleStart ?? visibleOffset,
+  };
+}
+
+function setContentEditableSelection(root, start, end) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let offset = 0;
+  let startNode = null;
+  let endNode = null;
+  let startOffset = 0;
+  let endOffset = 0;
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const length = node.nodeValue?.length || 0;
+    if (!startNode && start <= offset + length) {
+      startNode = node;
+      startOffset = clamp(start - offset, 0, length);
+    }
+    if (!endNode && end <= offset + length) {
+      endNode = node;
+      endOffset = clamp(end - offset, 0, length);
+      break;
+    }
+    offset += length;
+  }
+  if (!startNode) return;
+  const range = document.createRange();
+  range.setStart(startNode, startOffset);
+  range.setEnd(endNode || startNode, endNode ? endOffset : startOffset);
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function closePreviewInlineEditor({ restoreFocus = false } = {}) {
+  const current = previewInlineEditor;
+  if (!current) return;
+  current.root.remove();
+  previewInlineEditor = null;
+  if (restoreFocus) current.target?.focus({ preventScroll: true });
+}
+
+function updatePreviewInlineBlockButtons() {
+  if (!previewInlineEditor) return;
+  previewInlineEditor.root.querySelectorAll("[data-preview-block]").forEach((button) => {
+    const active = button.dataset.previewBlock === previewInlineEditor.model.blockType;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
+function setPreviewInlineBlock(blockType) {
+  if (!previewInlineEditor) return;
+  const model = previewInlineEditor.model;
+  const requestedMarker = blockType === "h1" ? "# " : blockType === "h2" ? "## " : "";
+  if (model.blockType === blockType) {
+    model.blockType = "p";
+    model.marker = "";
+  } else {
+    model.blockType = blockType;
+    model.marker = requestedMarker;
+  }
+  previewInlineEditor.dirty = true;
+  previewInlineEditor.editable.className = `preview-inline-content is-${model.blockType}`;
+  updatePreviewInlineBlockButtons();
+  previewInlineEditor.editable.focus();
+}
+
+function applyPreviewInlineFormat(command) {
+  if (!previewInlineEditor || !["bold", "italic"].includes(command)) return;
+  previewInlineEditor.editable.focus();
+  document.execCommand(command, false, null);
+  previewInlineEditor.dirty = true;
+}
+
+async function finishPreviewInlineEditor() {
+  const current = previewInlineEditor;
+  if (!current || current.busy) return;
+  current.busy = true;
+  const serializedBody = Array.from(current.editable.childNodes, serializePreviewInlineNode).join("").replace(/\s*\n\s*/g, " ");
+  const nextLine = `${current.model.leading}${current.model.marker}${serializedBody}`;
+  const previousLine = els.content.value.slice(current.model.lineStart, current.model.lineEnd);
+  const nextContent = `${els.content.value.slice(0, current.model.lineStart)}${nextLine}${els.content.value.slice(current.model.lineEnd)}`;
+  const nextStart = current.model.lineStart + current.model.leading.length + current.model.marker.length;
+  closePreviewInlineEditor();
+  if (nextLine === previousLine) {
+    focusEditorRange(nextStart, nextStart + serializedBody.length, true);
+    els.status.textContent = "卡片文字未改动";
+    return;
+  }
+  const applied = await applyProgrammaticContent(nextContent, "卡片文字已更新");
+  if (applied) focusEditorRange(nextStart, Math.min(nextContent.length, nextStart + serializedBody.length), true);
+}
+
+function openPreviewInlineEditor(target, sourceStart, sourceEnd) {
+  if (isBuiltInProjectId(state.currentProjectId)) {
+    els.status.textContent = "内置说明书不可修改，请先复制或新建图文";
+    return;
+  }
+  if (previewInlineEditor?.target === target) return;
+  if (previewInlineEditor?.dirty) {
+    els.status.textContent = "当前卡片文字尚未完成，请先点“完成”或按 Esc 取消";
+    previewInlineEditor.editable.focus({ preventScroll: true });
+    return;
+  }
+  closePreviewInlineEditor();
+  const frame = target.closest(".page-frame");
+  if (!frame) return;
+  const model = sourceLineEditorModel(els.content.value, sourceStart);
+  if (!model.body.trim() || isMarkdownImageBlock(els.content.value.slice(model.lineStart, model.lineEnd).trim())) return;
+
+  const root = document.createElement("section");
+  root.className = "preview-inline-editor";
+  root.setAttribute("aria-label", "卡片内文字编辑器");
+  const toolbar = document.createElement("div");
+  toolbar.className = "preview-inline-toolbar";
+  toolbar.innerHTML = `
+    <span class="preview-inline-label"><i data-lucide="square-pen"></i> 卡片内编辑</span>
+    <span class="preview-inline-format-group">
+      <button type="button" data-preview-block="h1" aria-label="设为一级标题" aria-pressed="false">H1</button>
+      <button type="button" data-preview-block="h2" aria-label="设为二级标题" aria-pressed="false">H2</button>
+      <button type="button" data-preview-format="bold" aria-label="加粗"><strong>B</strong></button>
+      <button type="button" data-preview-format="italic" aria-label="斜体"><em>I</em></button>
+    </span>
+    <span class="preview-inline-actions">
+      <button type="button" data-preview-action="cancel" aria-label="取消编辑"><i data-lucide="x"></i></button>
+      <button type="button" class="preview-inline-done" data-preview-action="done"><i data-lucide="check"></i> 完成</button>
+    </span>`;
+  const editable = document.createElement("div");
+  editable.className = `preview-inline-content is-${model.blockType}`;
+  editable.contentEditable = "true";
+  editable.spellcheck = true;
+  editable.setAttribute("role", "textbox");
+  editable.setAttribute("aria-label", "直接编辑卡片文字；选中文字后可加粗或斜体");
+  editable.innerHTML = renderPreviewInlineEditorHtml(model.body);
+  root.append(toolbar, editable);
+  frame.append(root);
+
+  const targetRect = target.getBoundingClientRect();
+  const frameRect = frame.getBoundingClientRect();
+  const preferredTop = targetRect.bottom - frameRect.top + 8;
+  root.style.left = "12px";
+  root.style.right = "12px";
+  root.style.top = `${clamp(preferredTop, 12, Math.max(12, frameRect.height - 190))}px`;
+  previewInlineEditor = { root, target, editable, model, dirty: false, busy: false };
+
+  toolbar.querySelectorAll("button").forEach((button) => {
+    button.addEventListener("pointerdown", (event) => event.preventDefault());
+  });
+  toolbar.querySelectorAll("[data-preview-block]").forEach((button) => {
+    button.addEventListener("click", () => setPreviewInlineBlock(button.dataset.previewBlock));
+  });
+  toolbar.querySelectorAll("[data-preview-format]").forEach((button) => {
+    button.addEventListener("click", () => applyPreviewInlineFormat(button.dataset.previewFormat));
+  });
+  toolbar.querySelector("[data-preview-action='cancel']").addEventListener("click", () => closePreviewInlineEditor({ restoreFocus: true }));
+  toolbar.querySelector("[data-preview-action='done']").addEventListener("click", () => void finishPreviewInlineEditor());
+  editable.addEventListener("input", () => {
+    if (previewInlineEditor) previewInlineEditor.dirty = true;
+  });
+  editable.addEventListener("paste", (event) => {
+    event.preventDefault();
+    const text = (event.clipboardData?.getData("text/plain") || "").replace(/\s*\n+\s*/g, " ");
+    document.execCommand("insertText", false, text);
+  });
+  editable.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closePreviewInlineEditor({ restoreFocus: true });
+    } else if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void finishPreviewInlineEditor();
+    } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "b") {
+      event.preventDefault();
+      applyPreviewInlineFormat("bold");
+    }
+  });
+  updatePreviewInlineBlockButtons();
+  if (window.lucide) window.lucide.createIcons();
+  editable.focus({ preventScroll: true });
+  const visibleRange = previewInlineVisibleRange(model, sourceStart, sourceEnd);
+  setContentEditableSelection(editable, visibleRange.start, visibleRange.end);
+  els.status.textContent = "正在卡片内编辑；选中文字可加粗，按 Enter 完成，Esc 取消";
+}
+
+function removeContentLineAtRange(content, sourceStart, sourceEnd) {
+  let removeStart = content.lastIndexOf("\n", Math.max(0, sourceStart - 1)) + 1;
+  let removeEnd = content.indexOf("\n", Math.max(sourceEnd, sourceStart));
+  if (removeEnd === -1) {
+    removeEnd = content.length;
+    if (removeStart > 0) removeStart -= 1;
+  } else {
+    removeEnd += 1;
+  }
+  return {
+    content: `${content.slice(0, removeStart)}${content.slice(removeEnd)}`,
+    selection: removeStart,
+  };
+}
+
+function deletePreviewImageReference(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (imageReorderBusy || isBuiltInProjectId(state.currentProjectId)) return;
+  if (previewInlineEditor?.dirty) {
+    els.status.textContent = "当前卡片文字尚未完成，请先点“完成”或按 Esc 取消";
+    previewInlineEditor.editable.focus({ preventScroll: true });
+    return;
+  }
+  const box = event.currentTarget.closest(".preview-image-box");
+  const sourceStart = Number(box?.dataset.sourceStart);
+  const sourceEnd = Number(box?.dataset.sourceEnd);
+  if (!Number.isFinite(sourceStart) || !Number.isFinite(sourceEnd)) return;
+  const next = removeContentLineAtRange(els.content.value, sourceStart, sourceEnd);
+  closePreviewInlineEditor();
+  els.content.setSelectionRange(next.selection, next.selection);
+  void applyProgrammaticContent(next.content, "图片已从正文移除，资源库仍保留；可撤销");
 }
 
 function contentLineModel(content) {

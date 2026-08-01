@@ -65,6 +65,41 @@ class ProjectDuplicateContractTests(unittest.TestCase):
         self.assertIn("内置说明书不可复制", duplicate)
 
 
+class PreviewDirectEditingContractTests(unittest.TestCase):
+    def test_preview_text_uses_wrapping_aware_source_tracking(self):
+        focus = function_body("focusEditorRange")
+        scroll = function_body("scrollTextareaToRange")
+
+        self.assertIn("scrollTextareaToRange(start)", focus)
+        self.assertIn('mirror.className = "textarea-scroll-mirror"', scroll)
+        self.assertIn("marker.offsetTop", scroll)
+        self.assertNotIn('split("\\n").length', scroll)
+
+    def test_card_text_opens_a_visual_editor_and_serializes_formatting(self):
+        target = function_body("handlePreviewTextTarget")
+        editor = function_body("openPreviewInlineEditor")
+        finish = function_body("finishPreviewInlineEditor")
+        serialize = function_body("serializePreviewInlineNode")
+
+        self.assertIn("openPreviewInlineEditor", target)
+        self.assertIn('contentEditable = "true"', editor)
+        self.assertIn('data-preview-format="bold"', editor)
+        self.assertIn("applyProgrammaticContent", finish)
+        self.assertIn('value = `**${value}**`', serialize)
+
+    def test_preview_images_link_to_source_and_delete_only_the_reference(self):
+        image_layer = function_body("createImageEditLayer")
+        focus = function_body("handlePreviewImageTarget")
+        remove = function_body("deletePreviewImageReference")
+
+        self.assertIn('className = "preview-image-delete"', image_layer)
+        self.assertIn("handlePreviewImageTarget", image_layer)
+        self.assertIn("focusEditorRange(start, end, true)", focus)
+        self.assertIn("removeContentLineAtRange", remove)
+        self.assertIn("applyProgrammaticContent", remove)
+        self.assertNotIn("delete state.images", remove)
+
+
 class AiOptimizeInteractionContractTests(unittest.TestCase):
     def test_modal_starts_unselected_and_requires_explicit_generate(self):
         for element_id in ("aiModeLayout", "aiModePolish"):
