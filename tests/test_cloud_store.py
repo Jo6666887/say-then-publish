@@ -103,6 +103,59 @@ class CloudStoreTests(unittest.TestCase):
         self.assertEqual(raw, b"hello")
         self.assertEqual(CloudStore._data_uri(mime_type, raw), source)
 
+    def test_decode_project_keeps_content_images_lazy(self):
+        store = CloudStore(test_config())
+        store._download_object = lambda asset: self.fail("content image was downloaded eagerly")
+        project = store._decode_project(
+            {
+                "project_id": "project-1",
+                "title": "test",
+                "updated_at_ms": 1,
+                "project_data": {
+                    "content": "[[image:image-1]]",
+                    "images": {"image-1": {"src": "tos://asset-1"}},
+                },
+            },
+            {
+                "asset-1": {
+                    "asset_id": "asset-1",
+                    "object_key": "private/image.png",
+                    "mime_type": "image/png",
+                }
+            },
+        )
+
+        image = project["data"]["images"]["image-1"]
+        self.assertEqual(image["src"], "/api/assets/asset-1/content")
+        self.assertEqual(image["cloudAssetId"], "asset-1")
+
+    def test_embedded_and_lazy_cloud_asset_sources_compare_equally(self):
+        embedded = {
+            "data": {
+                "images": {
+                    "image-1": {
+                        "src": "data:image/png;base64,aGVsbG8=",
+                        "cloudAssetId": "asset-1",
+                    }
+                }
+            }
+        }
+        lazy = {
+            "data": {
+                "images": {
+                    "image-1": {
+                        "src": "/api/assets/asset-1/content",
+                        "cloudAssetId": "asset-1",
+                    }
+                }
+            }
+        }
+
+        self.assertEqual(
+            CloudStore._project_payload(embedded),
+            CloudStore._project_payload(lazy),
+        )
+
     def test_image_without_text_reference_is_still_encoded_for_cloud(self):
         store = RecordingCloudStore()
         project = {
