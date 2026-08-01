@@ -27,6 +27,8 @@ const LOCAL_STATE_SAVE_MAX_WAIT = 5000;
 const LOCAL_DATABASE_SAVE_DELAY = 1200;
 const SHARED_PROJECT_STORE_URL = "/api/project-store";
 const SHARED_PROJECT_TEXT_URL = "/api/project-store/current-text";
+const SHARED_SAVE_PROTOCOL_HEADER = "X-WTP-Save-Protocol";
+const SHARED_SAVE_PROTOCOL_VERSION = "2";
 const CLOUD_STATUS_URL = "/api/cloud-status";
 const CLOUD_SYNC_URL = "/api/cloud-sync";
 const AI_OPTIMIZE_STATUS_URL = "/api/ai/status";
@@ -736,6 +738,8 @@ let pendingProjectDeletionsCache = null;
 let legacyStateLocalStorageUnavailable = false;
 let projectStoreLocalStorageUnavailable = false;
 let sharedProjectStoreAvailable = null;
+const sharedProjectVersions = new Map();
+const sharedProjectIds = new Set();
 let localStateSaveTimer = 0;
 let localStateSaveMaxTimer = 0;
 let renderGeneration = 0;
@@ -1936,6 +1940,7 @@ async function loadProjectStoreFromSharedServer() {
     if (!response.ok) throw new Error(`共享草稿库读取失败（${response.status}）`);
     const payload = await response.json();
     if (!payload || !Array.isArray(payload.projects)) throw new Error("共享草稿库格式无效");
+    rememberSharedProjectVersions(payload);
     sharedProjectStoreAvailable = true;
     return payload;
   } catch (error) {
@@ -1950,10 +1955,19 @@ async function saveProjectStoreToSharedServer(
   { expectedProjectId = "", expectedUpdatedAt = 0 } = {},
 ) {
   try {
-    const headers = { "Content-Type": "application/json" };
+    const headers = {
+      "Content-Type": "application/json",
+      [SHARED_SAVE_PROTOCOL_HEADER]: SHARED_SAVE_PROTOCOL_VERSION,
+    };
+    const targetProject = snapshot.projects.find((project) => project.id === snapshot.activeId);
     if (expectedProjectId && Number(expectedUpdatedAt) > 0) {
       headers["X-WTP-Expected-Project-Id"] = expectedProjectId;
       headers["X-WTP-Expected-Project-Updated-At"] = String(Number(expectedUpdatedAt));
+    } else if (targetProject && sharedProjectIds.has(targetProject.id)) {
+      const sharedUpdatedAt = Number(sharedProjectVersions.get(targetProject.id) || 0);
+      if (!sharedUpdatedAt) throw new Error("尚未取得服务器基础版本，已停止覆盖保存");
+      headers["X-WTP-Expected-Project-Id"] = targetProject.id;
+      headers["X-WTP-Expected-Project-Updated-At"] = String(sharedUpdatedAt);
     }
     const response = await fetch(SHARED_PROJECT_STORE_URL, {
       method: "PUT",
@@ -1963,7 +1977,6 @@ async function saveProjectStoreToSharedServer(
     if (!response.ok) throw new Error(`共享草稿库写入失败（${response.status}）`);
     const payload = await response.json();
     const responseStore = payload?.store && Array.isArray(payload.store.projects) ? payload.store : payload;
-    const targetProject = snapshot.projects.find((project) => project.id === snapshot.activeId);
     const confirmedProject = responseStore?.projects?.find((project) => project.id === snapshot.activeId);
     const targetUpdatedAt = Number(targetProject?.updatedAt || 0);
     const confirmedUpdatedAt = Number(payload?.saveMeta?.savedUpdatedAt || payload?.save?.updatedAt || confirmedProject?.updatedAt || 0);
@@ -1976,6 +1989,7 @@ async function saveProjectStoreToSharedServer(
     if (payload?.saveMeta?.saved !== true || payload?.saveMeta?.snapshotSaved !== true || (targetProject && !activeRevisionConfirmed)) {
       throw new Error("本机服务没有精确确认当前草稿版本");
     }
+    rememberSharedProjectVersions(responseStore);
     sharedProjectStoreAvailable = true;
     return {
       saved: true,
@@ -2015,9 +2029,21 @@ async function saveCurrentProjectTextToSharedServer({ keepalive = false } = {}) 
   });
 
   try {
+    const sharedUpdatedAt = Number(sharedProjectVersions.get(current.id) || 0);
+    if (sharedProjectIds.has(current.id) && !sharedUpdatedAt) {
+      throw new Error("尚未取得服务器基础版本，已停止覆盖保存");
+    }
+    const headers = {
+      "Content-Type": "application/json",
+      [SHARED_SAVE_PROTOCOL_HEADER]: SHARED_SAVE_PROTOCOL_VERSION,
+    };
+    if (sharedUpdatedAt) {
+      headers["X-WTP-Expected-Project-Id"] = current.id;
+      headers["X-WTP-Expected-Project-Updated-At"] = String(sharedUpdatedAt);
+    }
     const response = await fetch(SHARED_PROJECT_TEXT_URL, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ id: current.id, title, content, updatedAt }),
       keepalive,
     });
@@ -2031,6 +2057,8 @@ async function saveCurrentProjectTextToSharedServer({ keepalive = false } = {}) 
       throw new Error("本机服务没有精确确认当前正文版本");
     }
     sharedProjectStoreAvailable = true;
+    sharedProjectIds.add(current.id);
+    sharedProjectVersions.set(current.id, updatedAt);
     updateProjectHistory();
     const stillCurrent = state.currentProjectId === current.id
       && Number(current.updatedAt) === updatedAt
@@ -2337,6 +2365,68 @@ function projectRevisionMatches(first, second) {
   }
 }
 
+function rememberSharedProjectVersions(store) {
+  if (!store || !Array.isArray(store.projects)) return;
+  sharedProjectIds.clear();
+  sharedProjectVersions.clear();
+  store.projects.forEach((project) => {
+    if (!project?.id) return;
+    sharedProjectIds.add(project.id);
+    const updatedAt = Number(project.updatedAt || 0);
+    if (updatedAt > 0) sharedProjectVersions.set(project.id, updatedAt);
+  });
+}
+
+function localConflictProject(project, occupiedIds) {
+  const suffix = Number(project.updatedAt || 0).toString(36);
+  const baseId = `${project.id}_local_conflict_${suffix}`;
+  let id = baseId;
+  let index = 2;
+  while (occupiedIds.has(id)) {
+    id = `${baseId}_${index}`;
+    index += 1;
+  }
+  occupiedIds.add(id);
+  const title = `${project.title || projectTitleFromData(project.data)} · 本地未同步副本`;
+  return {
+    ...project,
+    id,
+    title: title.slice(0, 40),
+    updatedAt: nextProjectTimestamp(project),
+    data: { ...project.data, __localConflictOf: project.id },
+  };
+}
+
+function reconcileLocalProjectsWithShared(localProjects, sharedProjects) {
+  const normalizedLocal = mergeProjectLists([], localProjects);
+  const normalizedShared = mergeProjectLists([], sharedProjects, { preferIncomingOnEqual: true });
+  if (!normalizedShared.length) return normalizedLocal;
+
+  const sharedById = new Map(normalizedShared.map((project) => [project.id, project]));
+  const occupiedIds = new Set([
+    ...normalizedLocal.map((project) => project.id),
+    ...normalizedShared.map((project) => project.id),
+  ]);
+  const localOnly = [];
+  const conflicts = [];
+  for (const localProject of normalizedLocal) {
+    const sharedProject = sharedById.get(localProject.id);
+    if (!sharedProject) {
+      localOnly.push(localProject);
+      continue;
+    }
+    if (
+      !projectRevisionMatches(localProject, sharedProject)
+      && Number(localProject.updatedAt || 0) > Number(sharedProject.updatedAt || 0)
+    ) {
+      conflicts.push(localConflictProject(localProject, occupiedIds));
+    }
+  }
+  return [...normalizedShared, ...conflicts, ...localOnly]
+    .sort((first, second) => Number(second.updatedAt || 0) - Number(first.updatedAt || 0))
+    .slice(0, MAX_PROJECTS);
+}
+
 function restoreImportedProjects(existingProjects, incomingProjects, deletedProjects = []) {
   const normalizedIncoming = (incomingProjects || []).map(normalizeProject).filter(Boolean);
   const importedIds = new Set(normalizedIncoming.map((project) => project.id));
@@ -2385,10 +2475,9 @@ async function hydrateProjectStoreFromIndexedDb() {
     const sharedProjects = shared && Array.isArray(shared.projects) ? shared.projects : [];
     const projectsBeforeHydration = state.projects;
     const activeBeforeHydration = projectsBeforeHydration.find((project) => project.id === state.currentProjectId);
-    const mergedCandidates = mergeProjectLists(
+    const mergedCandidates = reconcileLocalProjectsWithShared(
       mergeProjectLists(state.projects, storedProjects),
       sharedProjects,
-      { preferIncomingOnEqual: true },
     );
     const localDeletionIntents = promoteLocalDeletionIntents(
       mergeProjectDeletions(

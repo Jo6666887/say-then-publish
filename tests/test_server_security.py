@@ -1104,7 +1104,10 @@ class StaticFileBoundaryTests(unittest.TestCase):
                 status, body = self.request_status(
                     "/api/project-store",
                     method="PUT",
-                    headers={"Content-Type": "application/json"},
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-WTP-Save-Protocol": "2",
+                    },
                     data=json.dumps(payload).encode("utf-8"),
                 )
 
@@ -1117,6 +1120,49 @@ class StaticFileBoundaryTests(unittest.TestCase):
         self.assertEqual(response["saveMeta"]["destination"], "local-server")
         self.assertTrue(response["saveMeta"]["cloudSyncScheduled"])
         schedule.assert_called_once()
+
+    def test_legacy_page_cannot_overwrite_an_existing_project(self):
+        current = {
+            "activeId": "project-1",
+            "projects": [
+                {
+                    "id": "project-1",
+                    "title": "服务器恢复版",
+                    "updatedAt": 200,
+                    "data": {"content": "绿色版本"},
+                }
+            ],
+        }
+        incoming = {
+            "activeId": "project-1",
+            "projects": [
+                {
+                    "id": "project-1",
+                    "title": "浏览器旧缓存",
+                    "updatedAt": 999,
+                    "data": {"content": "蓝色旧版本"},
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            store_file = Path(temporary) / "project-store.json"
+            store_file.write_text(json.dumps(current), encoding="utf-8")
+            with mock.patch.object(server, "STORE_FILE", store_file):
+                status, body = self.request_status(
+                    "/api/project-store",
+                    method="PUT",
+                    headers={"Content-Type": "application/json"},
+                    data=json.dumps(incoming).encode("utf-8"),
+                )
+
+            saved = json.loads(store_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(status, 428)
+        self.assertEqual(
+            json.loads(body.decode("utf-8"))["code"],
+            "SAVE_PROTOCOL_REQUIRED",
+        )
+        self.assertEqual(saved, current)
 
     def test_project_store_put_rejects_older_or_equal_divergent_content(self):
         fake_cloud = FakeCloudStore()
@@ -1156,7 +1202,12 @@ class StaticFileBoundaryTests(unittest.TestCase):
                         status, body = self.request_status(
                             "/api/project-store",
                             method="PUT",
-                            headers={"Content-Type": "application/json"},
+                            headers={
+                                "Content-Type": "application/json",
+                                "X-WTP-Save-Protocol": "2",
+                                "X-WTP-Expected-Project-Id": "project-1",
+                                "X-WTP-Expected-Project-Updated-At": "200",
+                            },
                             data=json.dumps(incoming).encode("utf-8"),
                         )
                         self.assertEqual(status, 409)
@@ -1196,7 +1247,12 @@ class StaticFileBoundaryTests(unittest.TestCase):
                 status, body = self.request_status(
                     "/api/project-store",
                     method="PUT",
-                    headers={"Content-Type": "application/json"},
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-WTP-Save-Protocol": "2",
+                        "X-WTP-Expected-Project-Id": "project-1",
+                        "X-WTP-Expected-Project-Updated-At": "200",
+                    },
                     data=json.dumps(incoming).encode("utf-8"),
                 )
 
@@ -1235,6 +1291,7 @@ class StaticFileBoundaryTests(unittest.TestCase):
                     method="PUT",
                     headers={
                         "Content-Type": "application/json",
+                        "X-WTP-Save-Protocol": "2",
                         "X-WTP-Expected-Project-Id": "project-1",
                         "X-WTP-Expected-Project-Updated-At": "200",
                     },
@@ -1262,6 +1319,7 @@ class StaticFileBoundaryTests(unittest.TestCase):
                     method="PUT",
                     headers={
                         "Content-Type": "application/json",
+                        "X-WTP-Save-Protocol": "2",
                         "X-WTP-Expected-Project-Id": "project-1",
                         "X-WTP-Expected-Project-Updated-At": "200",
                     },
@@ -1404,7 +1462,10 @@ class StaticFileBoundaryTests(unittest.TestCase):
                         status, body = self.request_status(
                             "/api/project-store/current-text",
                             method="PATCH",
-                            headers={"Content-Type": "application/json"},
+                            headers={
+                                "Content-Type": "application/json",
+                                "X-WTP-Save-Protocol": "2",
+                            },
                             data=json.dumps(
                                 {
                                     "id": "project-1",
@@ -1427,7 +1488,10 @@ class StaticFileBoundaryTests(unittest.TestCase):
                 status, body = self.request_status(
                     "/api/project-store/current-text",
                     method="PATCH",
-                    headers={"Content-Type": "application/json"},
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-WTP-Save-Protocol": "2",
+                    },
                     data=json.dumps(
                         {
                             "id": "project-1",

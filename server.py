@@ -56,6 +56,8 @@ STORE_FILE = DATA_DIR / "project-store.json"
 MAX_BODY_BYTES = 64 * 1024 * 1024
 MAX_TEXT_PATCH_BYTES = 2 * 1024 * 1024
 MAX_AI_TEXT_BYTES = 2 * 1024 * 1024
+SAVE_PROTOCOL_HEADER = "X-WTP-Save-Protocol"
+SAVE_PROTOCOL_VERSION = "2"
 STORE_LOCK = threading.Lock()
 APP_SERVICE = "write-then-publish"
 APP_HEALTH_SCHEMA = 1
@@ -1146,6 +1148,15 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
         if path != "/api/project-store":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
+        if self.headers.get(SAVE_PROTOCOL_HEADER, "").strip() != SAVE_PROTOCOL_VERSION:
+            self.send_json(
+                {
+                    "error": "页面版本过旧，请刷新后再保存",
+                    "code": "SAVE_PROTOCOL_REQUIRED",
+                },
+                HTTPStatus.PRECONDITION_REQUIRED,
+            )
+            return
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
@@ -1206,6 +1217,15 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
                 current_project is None or current_updated_at != expected_updated_at
             ):
                 self.send_json(save_conflict_payload(current_project), HTTPStatus.CONFLICT)
+                return
+            if current_project is not None and not conditional_save_requested:
+                self.send_json(
+                    {
+                        "error": "缺少服务器基础版本，请刷新页面后重试",
+                        "code": "SAVE_BASE_REQUIRED",
+                    },
+                    HTTPStatus.PRECONDITION_REQUIRED,
+                )
                 return
             if incoming_project is not None and current_project is not None and (
                 current_updated_at is not None
@@ -1273,6 +1293,15 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
             return
         if path != "/api/project-store/current-text":
             self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        if self.headers.get(SAVE_PROTOCOL_HEADER, "").strip() != SAVE_PROTOCOL_VERSION:
+            self.send_json(
+                {
+                    "error": "页面版本过旧，请刷新后再保存",
+                    "code": "SAVE_PROTOCOL_REQUIRED",
+                },
+                HTTPStatus.PRECONDITION_REQUIRED,
+            )
             return
         try:
             content_length = int(self.headers.get("Content-Length", "0"))

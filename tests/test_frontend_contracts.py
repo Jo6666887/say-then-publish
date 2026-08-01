@@ -65,6 +65,28 @@ class ProjectDuplicateContractTests(unittest.TestCase):
         self.assertIn("内置说明书不可复制", duplicate)
 
 
+class SharedProjectConflictContractTests(unittest.TestCase):
+    def test_shared_revision_keeps_original_id_and_forks_newer_local_cache(self):
+        reconcile = function_body("reconcileLocalProjectsWithShared")
+        conflict = function_body("localConflictProject")
+
+        self.assertIn("normalizedShared", reconcile)
+        self.assertIn("projectRevisionMatches", reconcile)
+        self.assertIn("localConflictProject", reconcile)
+        self.assertIn("本地未同步副本", conflict)
+        self.assertIn("__localConflictOf", conflict)
+
+    def test_shared_saves_require_protocol_and_server_base_revision(self):
+        start = APP.index("async function saveProjectStoreToSharedServer(")
+        end = APP.index("function imageReferenceSignature", start)
+        save = APP[start:end]
+
+        self.assertIn("SHARED_SAVE_PROTOCOL_HEADER", save)
+        self.assertIn("SHARED_SAVE_PROTOCOL_VERSION", save)
+        self.assertIn("sharedProjectVersions.get", save)
+        self.assertIn('headers["X-WTP-Expected-Project-Updated-At"]', save)
+
+
 class PreviewDirectEditingContractTests(unittest.TestCase):
     def test_preview_text_uses_wrapping_aware_source_tracking(self):
         focus = function_body("focusEditorRange")
