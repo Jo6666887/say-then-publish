@@ -846,7 +846,8 @@ class CloudStore:
                         actual is None
                         or int(actual.get("updated_at_ms") or 0) != expected["updated_at_ms"]
                         or (actual.get("title") or "") != expected["title"]
-                        or (actual.get("project_data") or {}) != expected["project_data"]
+                        or self._logical_project_value(actual.get("project_data") or {})
+                        != self._logical_project_value(expected["project_data"])
                     ):
                         raise CloudStoreError(
                             f"Supabase 未精确确认项目 {expected['project_id']} 的完整版本"
