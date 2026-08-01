@@ -109,6 +109,7 @@ install -d -m 0700 -o "$SERVICE_USER" -g "$SERVICE_USER" "$BACKUP_DIR"
 BACKUP_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 PREVIOUS_SHA="$(basename "$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)")"
 [[ "$PREVIOUS_SHA" =~ ^[0-9a-f]{40}$ ]] || PREVIOUS_SHA="initial"
+PREVIOUS_RELEASE="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
 STATE_SNAPSHOT="$BACKUP_DIR/pre-release-${BACKUP_STAMP}-${PREVIOUS_SHA}"
 install -d -m 0700 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE_SNAPSHOT"
 if [[ -d "$STATE_DIR/runtime-data" ]]; then
@@ -166,9 +167,17 @@ else
     exit 1
   fi
   chown -R "$BUILD_USER:$BUILD_USER" "$RELEASE_DIR"
-  runuser -u "$BUILD_USER" -- \
-    env HOME="$RELEASE_DIR/.build-home" PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    python3 -m venv "$RELEASE_DIR/.venv"
+  if [[ "$PREVIOUS_RELEASE" == "$RELEASES_DIR/"* \
+      && -x "$PREVIOUS_RELEASE/.venv/bin/python" \
+      && -f "$PREVIOUS_RELEASE/requirements.txt" ]] \
+      && cmp -s "$PREVIOUS_RELEASE/requirements.txt" "$RELEASE_DIR/requirements.txt"; then
+    cp -a "$PREVIOUS_RELEASE/.venv" "$RELEASE_DIR/.venv"
+    chown -R "$BUILD_USER:$BUILD_USER" "$RELEASE_DIR/.venv"
+  else
+    runuser -u "$BUILD_USER" -- \
+      env HOME="$RELEASE_DIR/.build-home" PIP_DISABLE_PIP_VERSION_CHECK=1 \
+      python3 -m venv "$RELEASE_DIR/.venv"
+  fi
   runuser -u "$BUILD_USER" -- \
     env HOME="$RELEASE_DIR/.build-home" PIP_DISABLE_PIP_VERSION_CHECK=1 \
     "$RELEASE_DIR/.venv/bin/python" -m pip install \
@@ -264,7 +273,6 @@ wait_for_application() {
   return 1
 }
 
-PREVIOUS_RELEASE="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
 if [[ -L "$NEXT_LINK" ]]; then
   unlink "$NEXT_LINK"
 elif [[ -e "$NEXT_LINK" ]]; then
