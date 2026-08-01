@@ -42,6 +42,29 @@ def button_tag(element_id):
     return match.group(0)
 
 
+class ProjectDuplicateContractTests(unittest.TestCase):
+    def test_history_duplicate_creates_a_new_revision_and_persists_it(self):
+        history = function_body("updateProjectHistory")
+        duplicate = function_body("duplicateProject")
+
+        self.assertIn('class="history-duplicate"', history)
+        self.assertIn('data-lucide="copy-plus"', history)
+        self.assertIn("duplicateProject(project.id)", history)
+        self.assertIn("JSON.parse(JSON.stringify(source.data))", duplicate)
+        self.assertIn("createProject(copiedData)", duplicate)
+        self.assertIn("flushProjectStoreToIndexedDb()", duplicate)
+        self.assertIn('phase: "saving-local"', duplicate)
+
+    def test_builtin_guides_do_not_offer_duplicate_action(self):
+        history = function_body("updateProjectHistory")
+        duplicate = function_body("duplicateProject")
+
+        self.assertIn("builtIn", history)
+        self.assertIn("history-lock", history)
+        self.assertIn("isBuiltInProjectId(projectId)", duplicate)
+        self.assertIn("内置说明书不可复制", duplicate)
+
+
 class AiOptimizeInteractionContractTests(unittest.TestCase):
     def test_modal_starts_unselected_and_requires_explicit_generate(self):
         for element_id in ("aiModeLayout", "aiModePolish"):

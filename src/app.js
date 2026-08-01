@@ -3037,6 +3037,19 @@ function normalizeProjectTitle(value) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, 40);
 }
 
+function duplicateProjectTitle(title) {
+  const existingTitles = new Set(state.projects.map((project) => project.title));
+  const base = (normalizeProjectTitle(title) || "未命名图文")
+    .replace(/ · 副本(?: \d+)?$/, "");
+  let copyNumber = 1;
+  while (true) {
+    const suffix = copyNumber === 1 ? " · 副本" : ` · 副本 ${copyNumber}`;
+    const candidate = `${base.slice(0, Math.max(1, 40 - suffix.length))}${suffix}`;
+    if (!existingTitles.has(candidate)) return candidate;
+    copyNumber += 1;
+  }
+}
+
 function updateCurrentProjectTitle() {
   if (isBuiltInProjectId(state.currentProjectId)) return;
   const current = state.projects.find((project) => project.id === state.currentProjectId);
@@ -3099,12 +3112,21 @@ function updateProjectHistory() {
       ${
         builtIn
           ? '<span class="history-lock" title="内置说明书不可修改"><i data-lucide="lock"></i></span>'
-          : `<button type="button" class="history-delete" title="删除历史记录" aria-label="删除 ${escapeHtml(project.title || "未命名图文")}">
-              <i data-lucide="trash-2"></i>
-            </button>`
+          : `<span class="history-actions">
+              <button type="button" class="history-duplicate" title="复制一份" aria-label="复制 ${escapeHtml(project.title || "未命名图文")}">
+                <i data-lucide="copy-plus"></i>
+              </button>
+              <button type="button" class="history-delete" title="删除历史记录" aria-label="删除 ${escapeHtml(project.title || "未命名图文")}">
+                <i data-lucide="trash-2"></i>
+              </button>
+            </span>`
       }
     `;
     item.querySelector(".history-open").addEventListener("click", () => openProject(project.id));
+    item.querySelector(".history-duplicate")?.addEventListener("click", (event) => {
+      event.currentTarget.disabled = true;
+      void duplicateProject(project.id);
+    });
     item.querySelector(".history-delete")?.addEventListener("click", () => deleteProject(project.id));
     els.projectHistory.append(item);
   }
@@ -3280,6 +3302,54 @@ async function createNewProject() {
   updateProjectHistory();
   await render();
   els.status.textContent = "已新建图文，上一条已保存在历史记录";
+}
+
+async function duplicateProject(projectId) {
+  if (isBuiltInProjectId(projectId)) {
+    els.status.textContent = "内置说明书不可复制";
+    return;
+  }
+  saveState();
+  const source = state.projects.find((project) => project.id === projectId);
+  if (!source) {
+    els.status.textContent = "未找到要复制的草稿";
+    return;
+  }
+
+  const copiedData = JSON.parse(JSON.stringify(source.data));
+  const duplicate = createProject(copiedData);
+  duplicate.title = duplicateProjectTitle(source.title);
+  duplicate.updatedAt = Math.max(Date.now(), Number(source.updatedAt || 0) + 1);
+  state.projects = [duplicate, ...state.projects].slice(0, MAX_PROJECTS);
+  state.currentProjectId = duplicate.id;
+  rememberActiveProject(duplicate.id);
+  state.mode = "auto";
+  state.scrollOffset = 0;
+  applyForm(duplicate.data);
+  syncGuideReadOnlyMode();
+  resetTextHistory();
+  setSaveCheckpoint({
+    phase: "saving-local",
+    projectId: duplicate.id,
+    targetUpdatedAt: duplicate.updatedAt,
+    error: "",
+  });
+  saveProjectStore();
+  updateProjectHistory();
+  await render({ persist: false });
+
+  const persisted = state.localDatabaseHydrated
+    ? await flushProjectStoreToIndexedDb()
+    : null;
+  if (persisted?.sharedSaved) {
+    els.status.textContent = persistenceMode === "cloud"
+      ? `已复制：${duplicate.title}，正在同步云端`
+      : `已复制并保存到本机：${duplicate.title}`;
+  } else if (persisted?.localSaved) {
+    els.status.textContent = `已复制到本地数据库：${duplicate.title}；服务恢复后将继续同步`;
+  } else {
+    els.status.textContent = `已复制：${duplicate.title}；请点击保存确认落盘`;
+  }
 }
 
 function escapeHtml(value) {

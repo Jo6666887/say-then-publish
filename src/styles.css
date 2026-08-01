@@ -801,7 +801,7 @@ body[data-guide-readonly="true"] .editor-textarea:focus {
 
 .history-item {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 32px;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 6px;
   align-items: center;
   border: 1px solid var(--line);
@@ -888,6 +888,14 @@ body[data-guide-readonly="true"] .editor-textarea:focus {
   justify-content: stretch;
 }
 
+.history-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  overflow: visible !important;
+}
+
+.history-duplicate,
 .history-delete {
   width: 30px;
   height: 30px;
@@ -897,12 +905,19 @@ body[data-guide-readonly="true"] .editor-textarea:focus {
   opacity: 0.62;
 }
 
+.history-duplicate:hover {
+  background: color-mix(in srgb, var(--active-bg) 12%, transparent);
+  color: var(--active-border);
+  opacity: 1;
+}
+
 .history-delete:hover {
   background: rgba(239, 68, 68, 0.12);
   color: #ef4444;
   opacity: 1;
 }
 
+.history-duplicate svg,
 .history-delete svg {
   width: 16px;
   height: 16px;
