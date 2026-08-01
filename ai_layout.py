@@ -28,6 +28,9 @@ MAX_POLISH_TOKENS = 6144
 MAX_STREAMED_RESPONSE_CHARS = 4 * 1024 * 1024
 VALID_MODES = {"layout", "polish"}
 VALID_LAYOUT_STYLES = {"color", "bg", "bold"}
+MAX_LAYOUT_HIGHLIGHTS = 16
+MAX_LAYOUT_HIGHLIGHTS_PER_PARAGRAPH = 2
+LAYOUT_HIGHLIGHT_BACKGROUND = "#fff3a3"
 LOGGER = logging.getLogger("write-then-publish.ai-layout")
 
 _IMAGE_MARKER_RE = re.compile(r"\[\[image:([\w-]+)\]\]")
@@ -594,7 +597,7 @@ def parse_ai_layout_selection_response(raw_content: str) -> dict[str, Any]:
         )
 
     normalized = []
-    for item in highlights[:8]:
+    for item in highlights[:MAX_LAYOUT_HIGHLIGHTS]:
         if not isinstance(item, dict):
             continue
         text = item.get("text")
@@ -700,7 +703,8 @@ def apply_ai_layout_highlights(
 
     protected_spans = _protected_layout_spans(content)
     selected_spans: list[tuple[int, int, str]] = []
-    for item in highlights:
+    paragraph_counts: dict[tuple[int, int], int] = {}
+    for item in highlights[:MAX_LAYOUT_HIGHLIGHTS]:
         target = item.get("text", "")
         style = item.get("style", "")
         if (
@@ -733,22 +737,52 @@ def apply_ai_layout_highlights(
             continue
         if any(_spans_overlap(start, end, left, right) for left, right, _ in selected_spans):
             continue
+        paragraph = _paragraph_bounds(content, start, end)
+        if paragraph_counts.get(paragraph, 0) >= MAX_LAYOUT_HIGHLIGHTS_PER_PARAGRAPH:
+            continue
         selected_spans.append((start, end, style))
+        paragraph_counts[paragraph] = paragraph_counts.get(paragraph, 0) + 1
+
+    # Keep the visual hierarchy close to careful manual formatting: bold carries
+    # most conclusions, yellow background marks only the strongest numbers or
+    # turns, and theme color remains a sparse accent.
+    total = len(selected_spans)
+    background_limit = max(1, (total * 2 + 4) // 5) if total else 0
+    color_limit = min(2, max(1, total // 6)) if total else 0
+    normalized_spans: list[tuple[int, int, str]] = []
+    style_counts = {"bold": 0, "bg": 0, "color": 0}
+    for start, end, style in selected_spans:
+        normalized_style = style
+        if style == "bg" and style_counts["bg"] >= background_limit:
+            normalized_style = "bold"
+        elif style == "color" and style_counts["color"] >= color_limit:
+            normalized_style = "bold"
+        style_counts[normalized_style] += 1
+        normalized_spans.append((start, end, normalized_style))
 
     optimized = content
-    for start, end, style in sorted(selected_spans, reverse=True):
+    for start, end, style in sorted(normalized_spans, reverse=True):
         target = content[start:end]
         if style == "color":
             replacement = f"{{{{color:{accent_color}|{target}}}}}"
         elif style == "bg":
-            replacement = f"{{{{bg:#E8E9FF|{target}}}}}"
+            replacement = f"{{{{bg:{LAYOUT_HIGHLIGHT_BACKGROUND}|{target}}}}}"
         else:
             replacement = f"**{target}**"
         optimized = optimized[:start] + replacement + optimized[end:]
 
-    count = len(selected_spans)
+    count = len(normalized_spans)
     if count:
-        return optimized, (f"从原文中安全标出 {count} 处重点",)
+        details = []
+        if style_counts["bold"]:
+            details.append(f"{style_counts['bold']} 处加粗")
+        if style_counts["bg"]:
+            details.append(f"{style_counts['bg']} 处浅黄底色")
+        if style_counts["color"]:
+            details.append(f"{style_counts['color']} 处主题色")
+        return optimized, (
+            f"安全标出 {count} 处重点（{'、'.join(details)}），正文逐字未改",
+        )
     return content, ("没有找到可安全应用的新增重点，已完整保留原文",)
 
 
@@ -834,6 +868,15 @@ def _line_contains_pipe(content: str, start: int, end: int) -> bool:
     return "|" in content[line_start:line_end]
 
 
+def _paragraph_bounds(content: str, start: int, end: int) -> tuple[int, int]:
+    paragraph_start = content.rfind("\n\n", 0, start)
+    paragraph_start = 0 if paragraph_start < 0 else paragraph_start + 2
+    paragraph_end = content.find("\n\n", end)
+    if paragraph_end < 0:
+        paragraph_end = len(content)
+    return paragraph_start, paragraph_end
+
+
 def validate_optimized_content(original: str, optimized: str, *, mode: str) -> None:
     """Reject any model result that can lose assets or protected copy."""
 
@@ -848,7 +891,7 @@ def validate_optimized_content(original: str, optimized: str, *, mode: str) -> N
         )
 
     if mode == "layout":
-        if _visible_copy(original) != _visible_copy(optimized):
+        if _layout_copy_signature(original) != _layout_copy_signature(optimized):
             raise AILayoutValidationError(
                 "AI 排版结果改动了正文文字，本次未修改内容",
                 code="VISIBLE_COPY_CHANGED",
@@ -903,20 +946,45 @@ def validate_optimized_content(original: str, optimized: str, *, mode: str) -> N
 
 
 def _build_layout_selection_messages(content: str) -> list[dict[str, str]]:
-    rules = """
+    minimum, maximum = _layout_highlight_target_range(content)
+    rules = f"""
 你是中文社交图文排版助手。只输出一个合法 JSON 对象，不要代码块、解释或 <think>。
 JSON schema：
-{"highlights":[{"text":"原文中逐字存在的连续短语","style":"color|bg|bold"}],"changes":["简短说明"]}
+{{"highlights":[{{"text":"原文中逐字存在的连续短语","style":"color|bg|bold"}}],"changes":["简短说明"]}}
 
-从原文选择 3-8 个最值得强调的短语，每个 4-64 个字符。text 必须从输入正文逐字复制且只出现一次，
+这是“只优化排版”，禁止润色、改写、补充、删减、调整标点、标题、段落、列表或图片位置。
+根据文章长度，从原文选择 {minimum}-{maximum} 个最值得强调的短语，每个 4-64 个字符；宁可少而准，不要凑数。
+text 必须从输入正文逐字复制且只出现一次，
 不得改字、标点、大小写或空格，不得包含换行、[[image:...]]、{{...}}、Markdown 标记，
 也不要选择已经位于 color/bg/加粗/斜体标记内的文字。style 只能是 color、bg、bold。
-重点要克制，优先结论、行动建议与关键限制；无法确认逐字一致的内容不要选择。
+
+视觉层级必须像人工编辑：
+- 主结论加粗：bold 承担主要层级，占约 50%-65%；用于核心判断、行动规则、可直接带走的结论。
+- bg 占约 25%-40%；只用于关键数字、真实结果、强转折、风险提醒和最重要的一句话。
+- color 最多 0-2 处；只用于极短关键词，不是必选项。
+- 每个自然段最多选择 2 处；每个大章节通常 1-3 处；不要连续选择相邻句子。
+- 不要选择标题、普通叙述、工具名称、过渡句、空泛口号或整段长文。
+
+优先级：明确结论 > 可执行规则 > 数字/收入/时间结果 > 转折与限制 > 收束句。
+changes 只需概括本次选择策略，不得声称改写正文。无法确认逐字一致的内容不要选择。
 """.strip()
     return [
         {"role": "system", "content": rules},
         {"role": "user", "content": f"请从下面正文中选择排版重点：\n\n{content}"},
     ]
+
+
+def _layout_highlight_target_range(content: str) -> tuple[int, int]:
+    visible_length = len(_visible_copy(content))
+    if visible_length <= 400:
+        return 3, 5
+    if visible_length <= 900:
+        return 4, 7
+    if visible_length <= 1600:
+        return 6, 10
+    if visible_length <= 2400:
+        return 8, 13
+    return 10, MAX_LAYOUT_HIGHLIGHTS
 
 
 def _build_polish_selection_messages(content: str) -> list[dict[str, str]]:
@@ -985,6 +1053,17 @@ def _visible_copy(content: str) -> str:
         visible_lines.append(value)
     text = "\n".join(visible_lines).replace("**", "").replace("*", "")
     return re.sub(r"\s+", "", text)
+
+
+def _layout_copy_signature(content: str) -> str:
+    """Remove only supported inline emphasis while preserving every source character."""
+
+    text = _strip_supported_style_macros(content or "")
+    previous = None
+    while previous != text:
+        previous = text
+        text = re.sub(r"\*\*([^*\n]+?)\*\*", lambda match: match.group(1), text)
+    return text
 
 
 def _strip_supported_style_macros(content: str) -> str:

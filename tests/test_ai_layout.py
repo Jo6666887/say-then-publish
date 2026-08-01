@@ -196,11 +196,23 @@ class AILayoutGuardrailTests(unittest.TestCase):
     def test_layout_accepts_supported_formatting_without_copy_change(self):
         original = "标题\n\n正文重点\n[[image:img_1]]\n第二段"
         optimized = (
-            "# 标题\n\n{{bg:#E8E9FF|正文重点}}\n"
-            "[[image:img_1]]\n- 第二段"
+            "标题\n\n{{bg:#fff3a3|正文重点}}\n"
+            "[[image:img_1]]\n**第二段**"
         )
 
         validate_optimized_content(original, optimized, mode="layout")
+
+    def test_layout_rejects_structure_or_whitespace_change(self):
+        original = "标题\n\n正文重点"
+        for optimized in (
+            "# 标题\n\n正文重点",
+            "标题\n\n- 正文重点",
+            "标题\n正文重点",
+        ):
+            with self.subTest(optimized=optimized):
+                with self.assertRaises(AILayoutValidationError) as caught:
+                    validate_optimized_content(original, optimized, mode="layout")
+                self.assertEqual(caught.exception.code, "VISIBLE_COPY_CHANGED")
 
     def test_layout_rejects_visible_copy_change(self):
         with self.assertRaises(AILayoutValidationError) as caught:
@@ -229,7 +241,43 @@ class AILayoutGuardrailTests(unittest.TestCase):
         self.assertEqual(optimized.count("重复短语"), 2)
         self.assertEqual(optimized.count("{{color:#5B5FEF|已经高亮}}"), 1)
         self.assertIn("[[image:img_1]]", optimized)
-        self.assertEqual(changes, ("从原文中安全标出 1 处重点",))
+        self.assertEqual(
+            changes,
+            ("安全标出 1 处重点（1 处主题色），正文逐字未改",),
+        )
+        validate_optimized_content(original, optimized, mode="layout")
+
+    def test_layout_uses_manual_style_hierarchy_and_limits_each_paragraph(self):
+        original = (
+            "第一重点值得强调，第二重点同样重要，第三重点不应过密。\n\n"
+            "第四重点带来结果。\n\n第五重点给出判断。\n\n第六重点提供数字。\n\n"
+            "第七重点说明转折。\n\n第八重点收束全文。"
+        )
+        optimized, changes = apply_ai_layout_highlights(
+            original,
+            [
+                {"text": text, "style": "bg"}
+                for text in (
+                    "第一重点值得强调",
+                    "第二重点同样重要",
+                    "第三重点不应过密",
+                    "第四重点带来结果",
+                    "第五重点给出判断",
+                    "第六重点提供数字",
+                    "第七重点说明转折",
+                    "第八重点收束全文",
+                )
+            ],
+            accent_color="#2563eb",
+        )
+
+        self.assertNotIn("{{bg:#fff3a3|第三重点不应过密}}", optimized)
+        self.assertEqual(optimized.count("{{bg:#fff3a3|"), 3)
+        self.assertEqual(optimized.count("**"), 8)
+        self.assertEqual(
+            changes,
+            ("安全标出 7 处重点（4 处加粗、3 处浅黄底色），正文逐字未改",),
+        )
         validate_optimized_content(original, optimized, mode="layout")
 
     def test_layout_protects_links_images_code_and_table_structure(self):
@@ -268,7 +316,10 @@ class AILayoutGuardrailTests(unittest.TestCase):
         self.assertIn('[guide]: docs/guide-final.md "文档标题"', optimized)
         self.assertIn("```python\ndanger_call()\n```", optimized)
         self.assertIn("| A | 表格重点 |", optimized)
-        self.assertEqual(changes, ("从原文中安全标出 1 处重点",))
+        self.assertEqual(
+            changes,
+            ("安全标出 1 处重点（1 处主题色），正文逐字未改",),
+        )
         validate_optimized_content(original, optimized, mode="layout")
 
     def test_rejects_missing_reordered_or_duplicated_image_markers(self):
@@ -496,7 +547,10 @@ class AILayoutClientTests(unittest.TestCase):
         result = service.optimize("标题\n正文重点\n[[image:img_1]]", mode="layout")
 
         self.assertEqual(result.model, "test-model")
-        self.assertEqual(result.changes, ("从原文中安全标出 1 处重点",))
+        self.assertEqual(
+            result.changes,
+            ("安全标出 1 处重点（1 处主题色），正文逐字未改",),
+        )
         self.assertEqual(
             result.optimized_content,
             "标题\n{{color:#5B5FEF|正文重点}}\n[[image:img_1]]",
@@ -513,6 +567,26 @@ class AILayoutClientTests(unittest.TestCase):
         self.assertEqual(kwargs["json"]["max_tokens"], 2048)
         self.assertEqual(kwargs["timeout"], 12)
         self.assertFalse(kwargs["stream"])
+        prompt = kwargs["json"]["messages"][0]["content"]
+        self.assertIn("禁止润色、改写、补充、删减", prompt)
+        self.assertIn("3-5 个", prompt)
+        self.assertIn("主结论加粗", prompt)
+        self.assertIn("每个自然段最多选择 2 处", prompt)
+
+    def test_long_layout_prompt_requests_manual_density_without_returning_copy(self):
+        session = RecordingSession(
+            completion('{"highlights":[],"changes":["保留原文"]}')
+        )
+        service = AILayoutService(enabled_config(), session=session)
+        original = "这是一个需要排版的长段落。" * 260
+
+        result = service.optimize(original, mode="layout")
+
+        self.assertEqual(result.optimized_content, original)
+        prompt = session.calls[0][1]["json"]["messages"][0]["content"]
+        self.assertIn("10-16 个", prompt)
+        self.assertIn("bg 占约 25%-40%", prompt)
+        self.assertIn("不得声称改写正文", prompt)
 
     def test_polish_streams_utf8_safe_edits_with_a_bounded_token_budget(self):
         original = "这句话不够顺畅，39 元方案见 https://example.com/plan\n[[image:img_1]]"
@@ -561,7 +635,10 @@ class AILayoutClientTests(unittest.TestCase):
             "**这句话读起来不够顺畅**，39 元方案见 https://example.com/plan\n[[image:img_1]]",
         )
         self.assertEqual(result.changes[0], "安全润色 1 处表达")
-        self.assertEqual(result.changes[1], "从原文中安全标出 1 处重点")
+        self.assertEqual(
+            result.changes[1],
+            "安全标出 1 处重点（1 处加粗），正文逐字未改",
+        )
         self.assertTrue(response.closed)
         _, kwargs = session.calls[0]
         self.assertTrue(kwargs["stream"])

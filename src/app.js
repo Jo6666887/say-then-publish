@@ -3621,7 +3621,7 @@ function chooseAiOptimizeMode(mode, { focus = false } = {}) {
   renderAiChangeList([
     nextMode === "polish"
       ? "会对少量句子做局部润色，并重新标注视觉重点；确认应用前正文不会改变。"
-      : "正文逐字保持不变，只会为原文中的少量重点添加排版标记。",
+      : "正文逐字保持不变：主结论加粗，数字、结果和转折使用克制的浅黄底色。",
   ]);
   setAiOptimizeStatus(
     nextMode === "polish"
@@ -3653,6 +3653,22 @@ function renderAiChangeList(changes = []) {
       return item;
     }),
   );
+}
+
+function layoutOnlyCopySignature(value) {
+  let text = String(value || "");
+  let previous = null;
+  while (previous !== text) {
+    previous = text;
+    text = text
+      .replace(/\{\{(?:color|bg):#[0-9a-fA-F]{3,8}\|([\s\S]*?)\}\}/g, "$1")
+      .replace(/\*\*([^*\n]+?)\*\*/g, "$1");
+  }
+  return text;
+}
+
+function layoutOnlyPreservesCopy(before, after) {
+  return layoutOnlyCopySignature(before) === layoutOnlyCopySignature(after);
 }
 
 async function runAiOptimization(mode) {
@@ -3715,6 +3731,9 @@ async function runAiOptimization(mode) {
     }
     if (typeof payload.optimizedContent !== "string" || !payload.optimizedContent.trim()) {
       throw new Error("AI 没有返回可用内容");
+    }
+    if (nextMode === "layout" && !layoutOnlyPreservesCopy(before, payload.optimizedContent)) {
+      throw new Error("AI 排版结果改动了正文，已阻止进入预览");
     }
 
     pendingAiOptimization = {

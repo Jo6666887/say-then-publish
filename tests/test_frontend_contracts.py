@@ -176,6 +176,18 @@ class AiOptimizeInteractionContractTests(unittest.TestCase):
         self.assertIn("!requestedMode", run)
         self.assertIn("fetch(AI_OPTIMIZE_URL", run)
 
+    def test_layout_mode_rechecks_copy_before_showing_preview(self):
+        signature = function_body("layoutOnlyCopySignature")
+        preserves = function_body("layoutOnlyPreservesCopy")
+        run = function_body("runAiOptimization")
+
+        self.assertIn("color|bg", signature)
+        self.assertIn("layoutOnlyCopySignature(before)", preserves)
+        self.assertIn("layoutOnlyCopySignature(after)", preserves)
+        self.assertIn('nextMode === "layout"', run)
+        self.assertIn("layoutOnlyPreservesCopy(before, payload.optimizedContent)", run)
+        self.assertIn("已阻止进入预览", run)
+
 
 class IllustrationInteractionContractTests(unittest.TestCase):
     def test_opening_illustration_modal_is_read_only_until_explicit_search(self):
