@@ -24,7 +24,7 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Mapping
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from cloud_store import AssetInUseError, CloudStore, CloudStoreError
 from local_asset_store import LocalAssetStore, LocalAssetStoreError
@@ -374,6 +374,22 @@ def read_store() -> dict:
         return empty_store()
     if not isinstance(payload, dict) or not isinstance(payload.get("projects"), list):
         return empty_store()
+    return payload
+
+
+def browser_store_payload(payload: dict) -> dict:
+    """Replace embedded cloud image bytes with authenticated same-origin URLs."""
+
+    if not CLOUD.enabled or cloud_status().get("fallbackToLocal"):
+        return payload
+    projects = payload.get("projects") if isinstance(payload, dict) else None
+    for project in projects if isinstance(projects, list) else []:
+        data = project.get("data") if isinstance(project, dict) else None
+        images = data.get("images") if isinstance(data, dict) else None
+        for image in images.values() if isinstance(images, dict) else []:
+            asset_id = image.get("cloudAssetId") if isinstance(image, dict) else None
+            if isinstance(asset_id, str) and asset_id:
+                image["src"] = f"/api/assets/{quote(asset_id, safe='')}/content"
     return payload
 
 
@@ -1022,7 +1038,7 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
                 CLOUD_INITIAL_SYNC_DONE.wait(timeout=CLOUD_INITIAL_SYNC_WAIT_SECONDS)
             with STORE_LOCK:
                 payload = read_store()
-            self.send_json(payload)
+            self.send_json(browser_store_payload(payload))
             return
         if path == "/api/cloud-status":
             self.send_json(cloud_status())

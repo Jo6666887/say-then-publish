@@ -1619,6 +1619,35 @@ class CloudCheckpointTests(unittest.TestCase):
 
 
 class ProjectStoreMergeTests(unittest.TestCase):
+    def test_browser_store_payload_lazy_loads_existing_cloud_images(self):
+        payload = {
+            "projects": [
+                {
+                    "id": "project-1",
+                    "data": {
+                        "images": {
+                            "cloud": {
+                                "src": "data:image/png;base64,aGVsbG8=",
+                                "cloudAssetId": "asset/one",
+                            },
+                            "local": {"src": "data:image/png;base64,bG9jYWw="},
+                        }
+                    },
+                }
+            ]
+        }
+
+        with mock.patch.object(server, "CLOUD", FakeCloudStore()), mock.patch.object(
+            server,
+            "cloud_status",
+            return_value={"fallbackToLocal": False},
+        ):
+            result = server.browser_store_payload(payload)
+
+        images = result["projects"][0]["data"]["images"]
+        self.assertEqual(images["cloud"]["src"], "/api/assets/asset%2Fone/content")
+        self.assertTrue(images["local"]["src"].startswith("data:image/png"))
+
     def test_tombstone_prevents_an_older_project_from_resurrecting(self):
         current = {
             "activeId": "project-live",
