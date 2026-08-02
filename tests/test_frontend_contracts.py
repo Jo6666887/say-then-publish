@@ -85,6 +85,32 @@ class SharedProjectConflictContractTests(unittest.TestCase):
         self.assertIn("SHARED_SAVE_PROTOCOL_VERSION", save)
         self.assertIn("sharedProjectVersions.get", save)
         self.assertIn('headers["X-WTP-Expected-Project-Updated-At"]', save)
+        self.assertIn("projects: targetProject ? [targetProject] : []", save)
+
+    def test_live_conflict_refreshes_canonical_and_forks_local_work_before_retry(self):
+        save_start = APP.index("async function saveProjectStoreToSharedServer(")
+        save_end = APP.index("function imageReferenceSignature", save_start)
+        save = APP[save_start:save_end]
+        recover = function_body("recoverSharedProjectConflict")
+        flush = function_body("flushProjectStoreToIndexedDb")
+
+        self.assertIn('response.status === 409', save)
+        self.assertIn('payload?.code === "DRAFT_VERSION_CONFLICT"', save)
+        self.assertIn("loadProjectStoreFromSharedServer()", recover)
+        self.assertIn("reconcileLocalProjectsWithShared", recover)
+        self.assertIn("__localConflictOf", recover)
+        self.assertIn("saveProjectStoreToSharedServer(recoveredSnapshot)", recover)
+        self.assertIn("recoverSharedProjectConflict(snapshot)", flush)
+
+    def test_unchanged_draft_switch_never_creates_a_new_revision_or_shared_write(self):
+        save_state = function_body("saveState")
+        open_project = function_body("openProject")
+
+        self.assertIn("stableJsonStringify(current.data) === stableJsonStringify(data)", save_state)
+        self.assertIn("return { changed: false, project: current }", save_state)
+        self.assertNotIn("saveProjectStore()", open_project)
+        self.assertIn("render({ persist: false })", open_project)
+        self.assertIn("restoreCachedProjectPreview(project)", open_project)
 
 
 class PreviewDirectEditingContractTests(unittest.TestCase):

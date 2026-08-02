@@ -29,6 +29,7 @@ const EDITOR_STATE_SAVE_DELAY = 900;
 const CONTROL_PREVIEW_RENDER_DELAY = 180;
 const EDITOR_PREVIEW_RENDER_DELAY = 520;
 const EDITOR_PREVIEW_IDLE_TIMEOUT = 900;
+const AUTO_SAVE_EXPLANATION = "停笔约 2 秒写入共享库，约 3–5 秒确认云端";
 const SHARED_PROJECT_STORE_URL = "/api/project-store";
 const SHARED_PROJECT_TEXT_URL = "/api/project-store/current-text";
 const SHARED_SAVE_PROTOCOL_HEADER = "X-WTP-Save-Protocol";
@@ -43,6 +44,7 @@ const ILLUSTRATION_IMPORT_URL = "/api/illustrations/import";
 const ILLUSTRATION_MAX_TOTAL_BYTES = 12 * 1024 * 1024;
 const ASSET_LIBRARY_URL = "/api/assets";
 const MAX_DECODED_IMAGE_CACHE = 64;
+const MAX_PROJECT_PREVIEW_CACHE = 2;
 const MAX_PROJECTS = 24;
 const BUILT_IN_PROJECT_PREFIX = "guide_";
 const GUIDE_CARDS_PROJECT_ID = `${BUILT_IN_PROJECT_PREFIX}cards`;
@@ -87,6 +89,7 @@ const saveCheckpoint = {
   cloudSavedAt: null,
   cloudUpdatedAt: 0,
   destination: "正在确认保存位置",
+  confirmation: "auto",
   error: "",
 };
 
@@ -750,6 +753,7 @@ let renderGeneration = 0;
 let editorCompositionActive = false;
 let editorRenderIdleCallback = 0;
 const decodedImageCache = new Map();
+const projectPreviewCache = new Map();
 let pendingProjectImport = null;
 
 const textHistory = {
@@ -1608,10 +1612,10 @@ function renderSaveCheckpoint() {
     meta = "这里不会覆盖你的草稿；新建项目后会自动保存";
   } else if (phase === "dirty") {
     label = "有未保存修改";
-    meta = `${version} · ${lastConfirmedCheckpointText()}`;
+    meta = `${AUTO_SAVE_EXPLANATION} · ${lastConfirmedCheckpointText()}`;
   } else if (phase === "saving-local") {
     label = "正在保存当前版本…";
-    meta = `${version} · 浏览器副本与本机文件`;
+    meta = `${version} · 正在写入浏览器副本与共享库`;
   } else if (phase === "saved-local") {
     label = "当前版本已保存到本机";
     meta = `${version} · ${formatSavedTime(saveCheckpoint.serverSavedAt || saveCheckpoint.localSavedAt)} · ${saveCheckpoint.destination}`;
@@ -1619,8 +1623,8 @@ function renderSaveCheckpoint() {
     label = "本机已保存，正在同步云端…";
     meta = `${version} · ${saveCheckpoint.destination}`;
   } else if (phase === "saved-cloud") {
-    label = "当前版本已保存到云端";
-    meta = `${version} · 确认于 ${formatSavedTime(saveCheckpoint.cloudSavedAt)} · ${saveCheckpoint.destination}`;
+    label = saveCheckpoint.confirmation === "manual" ? "已手动确认云端最新版" : "当前版本已保存到云端";
+    meta = `${version} · 确认于 ${formatSavedTime(saveCheckpoint.cloudSavedAt)} · ${AUTO_SAVE_EXPLANATION}`;
   } else if (phase === "degraded") {
     label = "当前版本已保存到本机";
     meta = `${version} · 云端不可用 · ${saveCheckpoint.destination}${saveCheckpoint.error ? ` · ${saveCheckpoint.error}` : ""}`;
@@ -1677,6 +1681,7 @@ function markSaveDirty() {
     phase: "dirty",
     projectId: state.currentProjectId,
     targetUpdatedAt: Number(current?.updatedAt || saveCheckpoint.targetUpdatedAt || Date.now()),
+    confirmation: "auto",
     error: "",
   });
 }
@@ -1715,14 +1720,31 @@ function saveState() {
     }
 
     let current = state.projects.find((project) => project.id === state.currentProjectId);
+    const created = !current;
+    if (typeof current?.data?.__localConflictOf === "string") {
+      data.__localConflictOf = current.data.__localConflictOf;
+    }
     if (!current) {
       current = createProject(data);
       state.currentProjectId = current.id;
       state.projects.unshift(current);
     }
+    const title = normalizeProjectTitle(els.projectTitle?.value) || current.title || projectTitleFromData(data);
+    let unchanged = !created && current.title === title;
+    if (unchanged) {
+      try {
+        unchanged = stableJsonStringify(current.data) === stableJsonStringify(data);
+      } catch {
+        unchanged = false;
+      }
+    }
+    if (unchanged) {
+      updateProjectHistory();
+      return { changed: false, project: current };
+    }
     const now = nextProjectTimestamp(current);
     current.data = data;
-    current.title = normalizeProjectTitle(els.projectTitle?.value) || current.title || projectTitleFromData(data);
+    current.title = title;
     current.updatedAt = now;
     setSaveCheckpoint({
       phase: "saving-local",
@@ -1749,10 +1771,12 @@ function saveState() {
     if (!legacyStateSaved || !projectStoreSaved) {
       els.status.textContent = "内容较大，已改用本地数据库保存；建议再导出一份备份";
     }
+    return { changed: true, project: current };
   } catch (error) {
     console.error(error);
     setSaveCheckpoint({ phase: "error", error: "请点击“立即保存”重试" });
     els.status.textContent = "本次内容未能自动保存，请立即导出草稿备份";
+    return { changed: false, project: null, error };
   }
 }
 
@@ -1975,6 +1999,13 @@ async function saveProjectStoreToSharedServer(
       [SHARED_SAVE_PROTOCOL_HEADER]: SHARED_SAVE_PROTOCOL_VERSION,
     };
     const targetProject = snapshot.projects.find((project) => project.id === snapshot.activeId);
+    const outboundSnapshot = {
+      ...snapshot,
+      // A browser only owns the draft it is actively editing. Sending cached
+      // background projects would let an unrelated stale cache hitchhike on a
+      // valid active-project save and overwrite a teammate's newer draft.
+      projects: targetProject ? [targetProject] : [],
+    };
     if (expectedProjectId && Number(expectedUpdatedAt) > 0) {
       headers["X-WTP-Expected-Project-Id"] = expectedProjectId;
       headers["X-WTP-Expected-Project-Updated-At"] = String(Number(expectedUpdatedAt));
@@ -1987,10 +2018,23 @@ async function saveProjectStoreToSharedServer(
     const response = await fetch(SHARED_PROJECT_STORE_URL, {
       method: "PUT",
       headers,
-      body: JSON.stringify(snapshot),
+      body: JSON.stringify(outboundSnapshot),
     });
-    if (!response.ok) throw new Error(`共享草稿库写入失败（${response.status}）`);
-    const payload = await response.json();
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (response.status === 409 && payload?.code === "DRAFT_VERSION_CONFLICT") {
+        sharedProjectStoreAvailable = true;
+        return {
+          saved: false,
+          conflict: true,
+          code: payload.code,
+          current: payload.current || null,
+          confirmedUpdatedAt: 0,
+          error: new Error(payload.error || "检测到团队成员保存的新版本"),
+        };
+      }
+      throw new Error(payload?.error || `共享草稿库写入失败（${response.status}）`);
+    }
     const responseStore = payload?.store && Array.isArray(payload.store.projects) ? payload.store : payload;
     const confirmedProject = responseStore?.projects?.find((project) => project.id === snapshot.activeId);
     const targetUpdatedAt = Number(targetProject?.updatedAt || 0);
@@ -2008,6 +2052,7 @@ async function saveProjectStoreToSharedServer(
     sharedProjectStoreAvailable = true;
     return {
       saved: true,
+      conflict: false,
       confirmedUpdatedAt,
       responseStore,
       deletedProjects: payload.saveMeta.deletedProjects || [],
@@ -2015,7 +2060,7 @@ async function saveProjectStoreToSharedServer(
   } catch (error) {
     sharedProjectStoreAvailable = false;
     console.warn("共享草稿库写入失败，已保留浏览器本地副本", error);
-    return { saved: false, confirmedUpdatedAt: 0, error };
+    return { saved: false, conflict: false, confirmedUpdatedAt: 0, error };
   }
 }
 
@@ -2104,6 +2149,49 @@ function scheduleCurrentProjectTextSave() {
   sharedTextSaveTimer = 0;
 }
 
+async function recoverSharedProjectConflict(snapshot) {
+  const localActive = snapshot?.projects?.find((project) => project.id === snapshot.activeId);
+  if (!localActive) return null;
+  const shared = await loadProjectStoreFromSharedServer();
+  if (!shared?.projects) return null;
+
+  const reconciledProjects = reconcileLocalProjectsWithShared(snapshot.projects, shared.projects);
+  const resolved = resolveProjectDeletionWinners(
+    reconciledProjects,
+    mergeProjectDeletions(snapshot.deletedProjects, shared.deletedProjects),
+  );
+  const conflictCopy = resolved.projects
+    .filter((project) => project?.data?.__localConflictOf === localActive.id)
+    .sort((first, second) => Number(second.updatedAt || 0) - Number(first.updatedAt || 0))[0];
+  if (!conflictCopy) return null;
+
+  state.projects = resolved.projects;
+  state.deletedProjects = resolved.deletedProjects;
+  state.currentProjectId = conflictCopy.id;
+  rememberActiveProject(conflictCopy.id);
+  if (els.projectTitle) els.projectTitle.value = conflictCopy.title;
+  projectPreviewCache.delete(localActive.id);
+  updateProjectHistory();
+  saveProjectStore({ scheduleDatabase: false });
+
+  const recoveredSnapshot = projectStoreSnapshot();
+  let localSaved = false;
+  try {
+    localSaved = await saveProjectStoreToIndexedDb(recoveredSnapshot);
+  } catch (error) {
+    console.warn("冲突副本写入 IndexedDB 失败", error);
+  }
+  const sharedResult = await saveProjectStoreToSharedServer(recoveredSnapshot);
+  if (!sharedResult.saved) return null;
+  return {
+    snapshot: recoveredSnapshot,
+    localSaved,
+    sharedResult,
+    conflictCopy,
+    notice: `检测到团队成员的新版本；你的修改已安全另存为「${conflictCopy.title}」`,
+  };
+}
+
 async function flushProjectStoreToIndexedDb() {
   if (!state.localDatabaseHydrated) return { localSaved: false, sharedSaved: false, projectUpdatedAt: 0 };
   window.clearTimeout(localDatabaseSaveTimer);
@@ -2111,12 +2199,14 @@ async function flushProjectStoreToIndexedDb() {
   const queuedSave = localDatabaseSaveChain
     .catch(() => false)
     .then(async () => {
-      const snapshot = projectStoreSnapshot();
-      const targetProject = snapshot.projects.find((project) => project.id === snapshot.activeId);
-      const projectId = targetProject?.id || snapshot.activeId;
-      const projectUpdatedAt = Number(targetProject?.updatedAt || 0);
+      let snapshot = projectStoreSnapshot();
+      let targetProject = snapshot.projects.find((project) => project.id === snapshot.activeId);
+      let projectId = targetProject?.id || snapshot.activeId;
+      let projectUpdatedAt = Number(targetProject?.updatedAt || 0);
       let localSaved = false;
       let sharedResult = { saved: false, confirmedUpdatedAt: 0 };
+      let conflictRecovered = false;
+      let conflictNotice = "";
       try {
         // 在真正轮到本次事务时读取最新快照，避免旧的大图事务晚完成后覆盖新图。
         localSaved = await saveProjectStoreToIndexedDb(snapshot);
@@ -2124,6 +2214,19 @@ async function flushProjectStoreToIndexedDb() {
         console.warn("IndexedDB 草稿写入失败", error);
       }
       sharedResult = await saveProjectStoreToSharedServer(snapshot);
+      if (sharedResult.conflict) {
+        const recovery = await recoverSharedProjectConflict(snapshot);
+        if (recovery) {
+          snapshot = recovery.snapshot;
+          targetProject = snapshot.projects.find((project) => project.id === snapshot.activeId);
+          projectId = targetProject?.id || snapshot.activeId;
+          projectUpdatedAt = Number(targetProject?.updatedAt || 0);
+          localSaved = localSaved || recovery.localSaved;
+          sharedResult = recovery.sharedResult;
+          conflictRecovered = true;
+          conflictNotice = recovery.notice;
+        }
+      }
       const result = {
         localSaved,
         sharedSaved: sharedResult.saved === true,
@@ -2131,6 +2234,9 @@ async function flushProjectStoreToIndexedDb() {
         projectId,
         projectUpdatedAt,
         confirmedUpdatedAt: Number(sharedResult.confirmedUpdatedAt || 0),
+        conflict: sharedResult.conflict === true,
+        conflictRecovered,
+        conflictNotice,
       };
 
       const current = state.projects.find((project) => project.id === projectId);
@@ -2150,6 +2256,7 @@ async function flushProjectStoreToIndexedDb() {
           error: "",
         });
         if (persistenceMode === "cloud") void confirmCloudCheckpoint(projectId, projectUpdatedAt);
+        if (conflictNotice) els.status.textContent = conflictNotice;
       } else if (stillCurrent && localSaved) {
         setSaveCheckpoint({
           phase: "degraded",
@@ -2157,7 +2264,9 @@ async function flushProjectStoreToIndexedDb() {
           targetUpdatedAt: projectUpdatedAt,
           localSavedAt: new Date().toISOString(),
           destination: "浏览器本地数据库",
-          error: "本机项目服务暂未确认，刷新前请勿关闭页面",
+          error: result.conflict
+            ? "检测到团队成员的新版本，旧缓存未覆盖云端；请重新打开该稿或另存副本"
+            : "本机项目服务暂未确认，刷新前请勿关闭页面",
         });
       } else if (stillCurrent && !localSaved && !result.sharedSaved) {
         setSaveCheckpoint({ phase: "error", error: "浏览器数据库与本机项目文件均未确认写入" });
@@ -2547,7 +2656,10 @@ async function hydrateProjectStoreFromIndexedDb() {
       updateProjectHistory();
     }
     state.localDatabaseHydrated = true;
-    saveProjectStore();
+    saveProjectStore({ scheduleDatabase: false });
+    await saveProjectStoreToIndexedDb(projectStoreSnapshot()).catch((error) => {
+      console.warn("合并后的共享草稿写入 IndexedDB 失败", error);
+    });
     const sharedDeletionById = new Map(sharedDeletions.map((deletion) => [deletion.id, deletion]));
     const pendingDeletionIntents = localDeletionIntents.filter((deletion) => {
       const confirmed = sharedDeletionById.get(deletion.id);
@@ -2624,7 +2736,7 @@ function normalizeProject(project) {
   };
 }
 
-function saveProjectStore() {
+function saveProjectStore({ scheduleDatabase = true } = {}) {
   const snapshot = projectStoreSnapshot();
   rememberActiveProject(snapshot.activeId);
   let localStorageSaved = !projectStoreLocalStorageUnavailable;
@@ -2637,7 +2749,7 @@ function saveProjectStore() {
       console.warn("LocalStorage 草稿写入失败，后续改用 IndexedDB", error);
     }
   }
-  if (state.localDatabaseHydrated) {
+  if (state.localDatabaseHydrated && scheduleDatabase) {
     scheduleProjectStoreToIndexedDb();
   }
   return localStorageSaved;
@@ -2698,8 +2810,8 @@ function updatePersistenceControls(status = {}) {
   }
   if (els.historyNote) {
     els.historyNote.textContent = cloudConnected
-      ? "自动保存到云端，点击恢复"
-      : "自动保存到本机，点击恢复";
+      ? "云端最新版优先 · 停笔约 3–5 秒同步"
+      : "自动保存到本机 · 点击稿件恢复";
   }
   renderSaveCheckpoint();
   if (window.lucide) window.lucide.createIcons();
@@ -2754,6 +2866,7 @@ async function confirmCloudCheckpoint(projectId, updatedAt, { attempts = 7 } = {
         cloudUpdatedAt: cloudCheckpointIdentity(status).updatedAt,
         cloudSavedAt: status.lastSuccessAt || new Date().toISOString(),
         destination: "Supabase + 私有 TOS",
+        confirmation: "auto",
         error: "",
       });
       return true;
@@ -2894,7 +3007,13 @@ async function saveProjectNow() {
     };
     if (!manualSaveTargetMatches(generation, target)) return;
     if (!persisted.localSaved && !persisted.sharedSaved) throw new Error("浏览器数据库与本机项目文件均未确认保存");
-    if (!persisted.sharedSaved) throw new Error("本机项目文件尚未确认当前版本，暂不执行云同步");
+    if (!persisted.sharedSaved) {
+      throw new Error(
+        persisted.conflict
+          ? "检测到团队成员保存的新版本；旧缓存未覆盖云端，请重新打开该稿后再保存"
+          : "共享草稿库尚未确认当前版本，暂不执行云同步",
+      );
+    }
 
     els.status.textContent = "已保存本机副本，正在同步云端…";
     setSaveCheckpoint({
@@ -2921,6 +3040,7 @@ async function saveProjectNow() {
       cloudUpdatedAt: cloudCheckpointIdentity(status).updatedAt,
       cloudSavedAt: status.lastSuccessAt || new Date().toISOString(),
       destination: "Supabase + 私有 TOS",
+      confirmation: "manual",
       error: "",
     });
     els.status.textContent = `已保存到云端 · ${formatSavedTime(status.lastSuccessAt)}`;
@@ -3263,9 +3383,41 @@ function toggleHistory() {
   setHistoryOpen(!els.historySidebar?.classList.contains("open"), true);
 }
 
+function cacheCurrentProjectPreview() {
+  const project = state.projects.find((item) => item.id === state.currentProjectId);
+  if (!project || state.appMode !== "cards" || !state.canvases.length) return;
+  projectPreviewCache.delete(project.id);
+  projectPreviewCache.set(project.id, {
+    updatedAt: Number(project.updatedAt || 0),
+    mode: state.mode,
+    canvases: [...state.canvases],
+  });
+  while (projectPreviewCache.size > MAX_PROJECT_PREVIEW_CACHE) {
+    projectPreviewCache.delete(projectPreviewCache.keys().next().value);
+  }
+}
+
+function restoreCachedProjectPreview(project) {
+  const cached = projectPreviewCache.get(project?.id);
+  if (
+    !cached
+    || project?.data?.appMode === "article"
+    || cached.mode !== state.mode
+    || Number(cached.updatedAt || 0) !== Number(project?.updatedAt || 0)
+  ) {
+    return false;
+  }
+  projectPreviewCache.delete(project.id);
+  projectPreviewCache.set(project.id, cached);
+  state.canvases = [...cached.canvases];
+  drawPreview(state.canvases);
+  return true;
+}
+
 async function openProject(projectId) {
   if (!projectId || projectId === state.currentProjectId) return;
   saveState();
+  cacheCurrentProjectPreview();
   const project = findHistoryProject(projectId);
   if (!project) return;
   state.currentProjectId = project.id;
@@ -3273,10 +3425,13 @@ async function openProject(projectId) {
   state.scrollOffset = 0;
   applyForm(project.data);
   syncGuideReadOnlyMode();
-  saveProjectStore();
   resetTextHistory();
   updateProjectHistory();
-  await render();
+  if (!restoreCachedProjectPreview(project)) {
+    // Do not reuse another project's canvases: renderPage mutates canvases in place.
+    state.canvases = [];
+    await render({ persist: false });
+  }
   els.status.textContent = isBuiltInProject(project) ? `已打开内置说明书：${project.title}` : `已打开：${project.title || "未命名图文"}`;
 }
 
@@ -3708,7 +3863,13 @@ async function runAiOptimization(mode) {
     saveState();
     const persisted = state.localDatabaseHydrated ? await flushProjectStoreToIndexedDb() : null;
     if (generation !== aiOptimizeRequestGeneration || els.aiOptimizeModal.classList.contains("hidden")) return;
-    if (!persisted?.sharedSaved) throw new Error("当前版本尚未写入本机项目文件，请稍后重试");
+    if (!persisted?.sharedSaved) {
+      throw new Error(
+        persisted?.conflict
+          ? "检测到团队成员保存的新版本；旧缓存没有覆盖云端，请重新打开该稿后再试"
+          : "当前版本尚未写入共享草稿库，请稍后重试",
+      );
+    }
     const project = state.projects.find((item) => item.id === state.currentProjectId);
     const before = els.content.value;
     const baseUpdatedAt = Number(project?.updatedAt || 0);
@@ -4147,7 +4308,13 @@ async function runIllustrationSearch() {
     saveState();
     const persisted = state.localDatabaseHydrated ? await flushProjectStoreToIndexedDb() : null;
     if (generation !== illustrationRequestGeneration) return;
-    if (!persisted?.sharedSaved) throw new Error("当前版本尚未写入本机项目文件，请稍后重试");
+    if (!persisted?.sharedSaved) {
+      throw new Error(
+        persisted?.conflict
+          ? "检测到团队成员保存的新版本；旧缓存没有覆盖云端，请重新打开该稿后再试"
+          : "当前版本尚未写入共享草稿库，请稍后重试",
+      );
+    }
 
     const project = findHistoryProject(state.currentProjectId);
     const before = els.content.value;
