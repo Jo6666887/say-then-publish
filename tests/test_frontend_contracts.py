@@ -73,7 +73,7 @@ class SharedProjectConflictContractTests(unittest.TestCase):
         self.assertIn("normalizedShared", reconcile)
         self.assertIn("projectRevisionMatches", reconcile)
         self.assertIn("localConflictProject", reconcile)
-        self.assertIn("本地未同步副本", conflict)
+        self.assertIn("冲突备份", conflict)
         self.assertIn("__localConflictOf", conflict)
 
     def test_shared_saves_require_protocol_and_server_base_revision(self):
@@ -93,6 +93,7 @@ class SharedProjectConflictContractTests(unittest.TestCase):
         save = APP[save_start:save_end]
         recover = function_body("recoverSharedProjectConflict")
         flush = function_body("flushProjectStoreToIndexedDb")
+        merge = function_body("mergeProjectWithSharedBase")
 
         self.assertIn('response.status === 409', save)
         self.assertIn('payload?.code === "DRAFT_VERSION_CONFLICT"', save)
@@ -100,17 +101,32 @@ class SharedProjectConflictContractTests(unittest.TestCase):
         self.assertIn("reconcileLocalProjectsWithShared", recover)
         self.assertIn("__localConflictOf", recover)
         self.assertIn("saveProjectStoreToSharedServer(recoveredSnapshot)", recover)
+        self.assertIn("mergeProjectWithSharedBase(base, localActive, sharedActive)", recover)
+        self.assertIn("没有创建重复副本", recover)
+        self.assertIn("draftValuesMatch(normalizedLocal.title, base.title)", merge)
+        self.assertIn("draftValuesMatch(sharedValue, baseValue)", merge)
         self.assertIn("recoverSharedProjectConflict(snapshot)", flush)
 
     def test_unchanged_draft_switch_never_creates_a_new_revision_or_shared_write(self):
         save_state = function_body("saveState")
         open_project = function_body("openProject")
+        rename = function_body("updateCurrentProjectTitle")
 
         self.assertIn("stableJsonStringify(current.data) === stableJsonStringify(data)", save_state)
         self.assertIn("return { changed: false, project: current }", save_state)
         self.assertNotIn("saveProjectStore()", open_project)
         self.assertIn("render({ persist: false })", open_project)
         self.assertIn("restoreCachedProjectPreview(project)", open_project)
+        self.assertIn("scheduleStateSave()", rename)
+        self.assertNotIn("current.title =", rename)
+
+    def test_project_delete_requires_explicit_confirmation_before_any_tombstone(self):
+        remove = function_body("deleteProject")
+
+        self.assertIn("window.confirm", remove)
+        self.assertIn("无法直接找回", remove)
+        self.assertLess(remove.index("window.confirm"), remove.index("markPendingProjectDeletion"))
+        self.assertIn("已取消删除", remove)
 
 
 class PreviewDirectEditingContractTests(unittest.TestCase):

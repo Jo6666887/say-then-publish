@@ -92,11 +92,11 @@ def main() -> None:
 
         page.locator("#contentInput").fill("# 我正在编辑的本地版本")
         page.wait_for_function(
-            "document.querySelector('#projectTitleInput')?.value.includes('本地未同步副本')",
+            "document.querySelector('#projectTitleInput')?.value.includes('冲突备份')",
             timeout=15000,
         )
         page.wait_for_function(
-            "document.querySelector('#statusText')?.textContent.includes('团队成员的新版本')",
+            "document.querySelector('#statusText')?.textContent.includes('同一字段存在并发修改')",
             timeout=15000,
         )
         page.wait_for_timeout(2500)
@@ -113,6 +113,43 @@ def main() -> None:
         assert copies[0]["data"]["content"] == "# 我正在编辑的本地版本", copies[0]
         assert any(status == 409 for _, status in writes), writes
         assert any(status == 200 for _, status in writes), writes
+
+        conflict_project = copies[0]
+        timestamp_only_update = {
+            "activeId": conflict_project["id"],
+            "projects": [
+                {
+                    **conflict_project,
+                    "updatedAt": int(conflict_project["updatedAt"]) + 10,
+                }
+            ],
+            "deletedProjects": [],
+        }
+        request_json(
+            base_url + "/api/project-store",
+            method="PUT",
+            payload=timestamp_only_update,
+            headers={
+                "X-WTP-Save-Protocol": "2",
+                "X-WTP-Expected-Project-Id": conflict_project["id"],
+                "X-WTP-Expected-Project-Updated-At": str(conflict_project["updatedAt"]),
+            },
+        )
+        page.locator("#projectTitleInput").fill("「千问办公」宣传稿 · V1")
+        page.wait_for_function(
+            "document.querySelector('#statusText')?.textContent.includes('没有创建重复副本')",
+            timeout=15000,
+        )
+        page.wait_for_timeout(1800)
+        rebased = request_json(base_url + "/api/project-store")
+        rebased_copies = [
+            project
+            for project in rebased["projects"]
+            if project.get("data", {}).get("__localConflictOf") == PROJECT_ID
+        ]
+        assert len(rebased_copies) == 1, rebased_copies
+        assert rebased_copies[0]["id"] == conflict_project["id"], rebased_copies
+        assert rebased_copies[0]["title"] == "「千问办公」宣传稿 · V1", rebased_copies[0]
 
         writes_before_switch = len(writes)
         page.locator(f'.history-item[data-project-id="{PROJECT_ID}"] .history-open').evaluate(
@@ -135,6 +172,31 @@ def main() -> None:
         page.wait_for_timeout(2500)
         assert len(writes) == writes_before_switch, writes
 
+        confirmation_messages: list[str] = []
+        page.once(
+            "dialog",
+            lambda dialog: (confirmation_messages.append(dialog.message), dialog.dismiss()),
+        )
+        page.locator(f'.history-item[data-project-id="{PROJECT_ID}"] .history-delete').evaluate(
+            "button => button.click()"
+        )
+        page.wait_for_timeout(300)
+        after_cancel = request_json(base_url + "/api/project-store")
+        assert any(project["id"] == PROJECT_ID for project in after_cancel["projects"])
+        assert confirmation_messages and "无法直接找回" in confirmation_messages[0]
+
+        page.once("dialog", lambda dialog: dialog.accept())
+        with page.expect_response(
+            lambda response: response.request.method == "DELETE"
+            and f"/api/project-store/{PROJECT_ID}" in response.url,
+            timeout=10000,
+        ):
+            page.locator(f'.history-item[data-project-id="{PROJECT_ID}"] .history-delete').evaluate(
+                "button => button.click()"
+            )
+        after_confirm = request_json(base_url + "/api/project-store")
+        assert all(project["id"] != PROJECT_ID for project in after_confirm["projects"])
+
         print(
             json.dumps(
                 {
@@ -143,6 +205,9 @@ def main() -> None:
                     "conflictStatusObserved": 409,
                     "switchGeneratedWrites": 0,
                     "cachedReturnMs": round(switch_ms, 1),
+                    "titleOnlyConflictRebased": True,
+                    "deleteCancelPreservedDraft": True,
+                    "deleteConfirmRemovedDraft": True,
                 },
                 ensure_ascii=False,
             )

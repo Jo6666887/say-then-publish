@@ -133,7 +133,7 @@ def main() -> None:
                 )
                 titles = page.locator(".history-item .history-open span").all_text_contents()
                 assert "恢复后的绿色原稿" in titles, titles
-                assert any("本地未同步副本" in title for title in titles), titles
+                assert any("冲突备份" in title for title in titles), titles
                 assert write_requests == [], write_requests
                 browser.close()
 

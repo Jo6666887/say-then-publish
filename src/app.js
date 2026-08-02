@@ -747,6 +747,7 @@ let projectStoreLocalStorageUnavailable = false;
 let sharedProjectStoreAvailable = null;
 const sharedProjectVersions = new Map();
 const sharedProjectIds = new Set();
+const sharedProjectBases = new Map();
 let localStateSaveTimer = 0;
 let localStateSaveMaxTimer = 0;
 let renderGeneration = 0;
@@ -2152,16 +2153,70 @@ function scheduleCurrentProjectTextSave() {
 async function recoverSharedProjectConflict(snapshot) {
   const localActive = snapshot?.projects?.find((project) => project.id === snapshot.activeId);
   if (!localActive) return null;
+  const base = sharedProjectBases.get(localActive.id) || null;
   const shared = await loadProjectStoreFromSharedServer();
   if (!shared?.projects) return null;
+  const liveProject = state.projects.find((project) => project.id === localActive.id);
+  if (
+    state.currentProjectId !== localActive.id
+    || Number(liveProject?.updatedAt || 0) !== Number(localActive.updatedAt || 0)
+    || els.content.value !== localActive.data?.content
+  ) {
+    return null;
+  }
+
+  const sharedActive = shared.projects.find((project) => project.id === localActive.id);
+  const rebasedProject = mergeProjectWithSharedBase(base, localActive, sharedActive);
+  if (rebasedProject) {
+    const reconciledOthers = reconcileLocalProjectsWithShared(
+      snapshot.projects.filter((project) => project.id !== localActive.id),
+      shared.projects.filter((project) => project.id !== localActive.id),
+    );
+    const resolved = resolveProjectDeletionWinners(
+      [rebasedProject, ...reconciledOthers],
+      mergeProjectDeletions(snapshot.deletedProjects, shared.deletedProjects),
+    );
+    state.projects = resolved.projects;
+    state.deletedProjects = resolved.deletedProjects;
+    state.currentProjectId = rebasedProject.id;
+    rememberActiveProject(rebasedProject.id);
+    if (!draftValuesMatch(localActive.data, rebasedProject.data)) {
+      const generation = manualSaveGeneration;
+      applyForm(rebasedProject.data);
+      manualSaveGeneration = generation;
+    }
+    if (els.projectTitle) els.projectTitle.value = rebasedProject.title;
+    updateProjectHistory();
+    saveProjectStore({ scheduleDatabase: false });
+    const recoveredSnapshot = projectStoreSnapshot();
+    let localSaved = false;
+    try {
+      localSaved = await saveProjectStoreToIndexedDb(recoveredSnapshot);
+    } catch (error) {
+      console.warn("合并后的草稿写入 IndexedDB 失败", error);
+    }
+    const sharedResult = await saveProjectStoreToSharedServer(recoveredSnapshot);
+    if (!sharedResult.saved) return null;
+    return {
+      snapshot: recoveredSnapshot,
+      localSaved,
+      sharedResult,
+      rebasedProject,
+      notice: "已合并团队最新状态并保存，没有创建重复副本",
+    };
+  }
 
   const reconciledProjects = reconcileLocalProjectsWithShared(snapshot.projects, shared.projects);
   const resolved = resolveProjectDeletionWinners(
     reconciledProjects,
     mergeProjectDeletions(snapshot.deletedProjects, shared.deletedProjects),
   );
+  const conflictRoot = typeof localActive.data?.__localConflictOf === "string"
+    ? localActive.data.__localConflictOf
+    : localActive.id;
+  const existingIds = new Set(snapshot.projects.map((project) => project.id));
   const conflictCopy = resolved.projects
-    .filter((project) => project?.data?.__localConflictOf === localActive.id)
+    .filter((project) => project?.data?.__localConflictOf === conflictRoot && !existingIds.has(project.id))
     .sort((first, second) => Number(second.updatedAt || 0) - Number(first.updatedAt || 0))[0];
   if (!conflictCopy) return null;
 
@@ -2188,7 +2243,7 @@ async function recoverSharedProjectConflict(snapshot) {
     localSaved,
     sharedResult,
     conflictCopy,
-    notice: `检测到团队成员的新版本；你的修改已安全另存为「${conflictCopy.title}」`,
+    notice: `检测到同一字段存在并发修改；你的内容已安全另存为「${conflictCopy.title}」`,
   };
 }
 
@@ -2489,21 +2544,104 @@ function projectRevisionMatches(first, second) {
   }
 }
 
+function comparableDraftValue(value) {
+  if (Array.isArray(value)) return value.map(comparableDraftValue);
+  if (!value || typeof value !== "object") return value;
+  const cloudAssetId = typeof value.cloudAssetId === "string" ? value.cloudAssetId : "";
+  const ignored = new Set(["cloudAssetId", "cloudObjectKey", "localAssetId", "localAssetName"]);
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !ignored.has(key))
+      .map(([key, item]) => [
+        key,
+        key === "src" && cloudAssetId ? `cloud-asset:${cloudAssetId}` : comparableDraftValue(item),
+      ]),
+  );
+}
+
+function draftValuesMatch(first, second) {
+  if (first === second) return true;
+  try {
+    return stableJsonStringify(comparableDraftValue(first))
+      === stableJsonStringify(comparableDraftValue(second));
+  } catch {
+    return false;
+  }
+}
+
+function sharedProjectBase(project) {
+  const normalized = normalizeProject(project);
+  if (!normalized) return null;
+  return {
+    id: normalized.id,
+    title: normalized.title,
+    updatedAt: Number(project.updatedAt || normalized.updatedAt || 0),
+    data: normalized.data,
+  };
+}
+
+function mergeProjectWithSharedBase(base, localProject, sharedProject) {
+  if (!base || !localProject || !sharedProject || localProject.id !== sharedProject.id || base.id !== localProject.id) {
+    return null;
+  }
+  const normalizedLocal = sharedProjectBase(localProject);
+  const normalizedShared = sharedProjectBase(sharedProject);
+  if (!normalizedLocal || !normalizedShared) return null;
+
+  let title;
+  if (draftValuesMatch(normalizedLocal.title, base.title)) title = normalizedShared.title;
+  else if (draftValuesMatch(normalizedShared.title, base.title)) title = normalizedLocal.title;
+  else if (draftValuesMatch(normalizedLocal.title, normalizedShared.title)) title = normalizedLocal.title;
+  else return null;
+
+  const mergedData = {};
+  const keys = new Set([
+    ...Object.keys(base.data || {}),
+    ...Object.keys(normalizedLocal.data || {}),
+    ...Object.keys(normalizedShared.data || {}),
+  ]);
+  for (const key of keys) {
+    const baseValue = base.data?.[key];
+    const localValue = normalizedLocal.data?.[key];
+    const sharedValue = normalizedShared.data?.[key];
+    if (draftValuesMatch(localValue, baseValue)) mergedData[key] = sharedValue;
+    else if (draftValuesMatch(sharedValue, baseValue)) mergedData[key] = localValue;
+    else if (draftValuesMatch(localValue, sharedValue)) mergedData[key] = localValue;
+    else return null;
+  }
+  return {
+    ...localProject,
+    title,
+    updatedAt: Math.max(
+      Date.now(),
+      Number(localProject.updatedAt || 0) + 1,
+      Number(sharedProject.updatedAt || 0) + 1,
+    ),
+    data: mergedData,
+  };
+}
+
 function rememberSharedProjectVersions(store) {
   if (!store || !Array.isArray(store.projects)) return;
   sharedProjectIds.clear();
   sharedProjectVersions.clear();
+  sharedProjectBases.clear();
   store.projects.forEach((project) => {
     if (!project?.id) return;
     sharedProjectIds.add(project.id);
     const updatedAt = Number(project.updatedAt || 0);
     if (updatedAt > 0) sharedProjectVersions.set(project.id, updatedAt);
+    const base = sharedProjectBase(project);
+    if (base) sharedProjectBases.set(project.id, base);
   });
 }
 
 function localConflictProject(project, occupiedIds) {
   const suffix = Number(project.updatedAt || 0).toString(36);
-  const baseId = `${project.id}_local_conflict_${suffix}`;
+  const conflictRoot = typeof project.data?.__localConflictOf === "string"
+    ? project.data.__localConflictOf
+    : project.id;
+  const baseId = `${conflictRoot}_local_conflict_${suffix}`;
   let id = baseId;
   let index = 2;
   while (occupiedIds.has(id)) {
@@ -2511,13 +2649,15 @@ function localConflictProject(project, occupiedIds) {
     index += 1;
   }
   occupiedIds.add(id);
-  const title = `${project.title || projectTitleFromData(project.data)} · 本地未同步副本`;
+  const baseTitle = normalizeConflictDraftTitle(project.title || projectTitleFromData(project.data))
+    .replace(/ · 冲突备份$/, "");
+  const title = `${baseTitle.slice(0, Math.max(1, 40 - " · 冲突备份".length))} · 冲突备份`;
   return {
     ...project,
     id,
     title: title.slice(0, 40),
     updatedAt: nextProjectTimestamp(project),
-    data: { ...project.data, __localConflictOf: project.id },
+    data: { ...project.data, __localConflictOf: conflictRoot },
   };
 }
 
@@ -2730,7 +2870,7 @@ function normalizeProject(project) {
   const updatedAt = normalizedChanged ? sourceUpdatedAt + 1 : sourceUpdatedAt;
   return {
     id: project.id || `project_${updatedAt.toString(36)}`,
-    title: normalizeProjectTitle(project.title) || projectTitleFromData(data),
+    title: normalizeConflictDraftTitle(project.title) || projectTitleFromData(data),
     updatedAt,
     data,
   };
@@ -3262,6 +3402,15 @@ function normalizeProjectTitle(value) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, 40);
 }
 
+function normalizeConflictDraftTitle(value) {
+  const title = normalizeProjectTitle(value) || "未命名图文";
+  const suffixPattern = /(?: · (?:本地未同步副本|冲突备份))+$/;
+  if (!suffixPattern.test(title)) return title;
+  const suffix = " · 冲突备份";
+  const base = title.replace(suffixPattern, "").trim() || "未命名图文";
+  return `${base.slice(0, Math.max(1, 40 - suffix.length))}${suffix}`;
+}
+
 function duplicateProjectTitle(title) {
   const existingTitles = new Set(state.projects.map((project) => project.title));
   const base = (normalizeProjectTitle(title) || "未命名图文")
@@ -3277,10 +3426,9 @@ function duplicateProjectTitle(title) {
 
 function updateCurrentProjectTitle() {
   if (isBuiltInProjectId(state.currentProjectId)) return;
-  const current = state.projects.find((project) => project.id === state.currentProjectId);
-  if (!current) return;
-  current.title = normalizeProjectTitle(els.projectTitle?.value) || projectTitleFromData(current.data);
-  updateProjectHistory();
+  // Keep the persisted project untouched until saveState creates a real
+  // revision. Mutating it here makes saveState think the new title is already
+  // saved, so switching projects restores the old server title.
   scheduleStateSave();
 }
 
@@ -3485,6 +3633,14 @@ async function deleteProject(projectId) {
   }
   const project = state.projects.find((item) => item.id === projectId);
   if (!project) return;
+  const projectName = project.title || "未命名图文";
+  const confirmed = window.confirm(
+    `确认删除“${projectName}”？\n\n删除后会从当前浏览器、共享草稿库和团队云端移除，无法直接找回。建议重要内容先复制一份。`,
+  );
+  if (!confirmed) {
+    els.status.textContent = `已取消删除：${projectName}`;
+    return;
+  }
   const deletingCurrent = project.id === state.currentProjectId;
   const deletedAt = Math.max(Date.now(), Number(project.updatedAt || 0) + 1);
   const deletionIntentSaved = await markPendingProjectDeletion({ id: project.id, deletedAt });
