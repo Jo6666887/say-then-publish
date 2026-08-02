@@ -25,6 +25,10 @@ const LOCAL_ASSET_DIRECTORY_KEY = "assetLibraryDirectoryHandle";
 const LOCAL_STATE_SAVE_DELAY = 450;
 const LOCAL_STATE_SAVE_MAX_WAIT = 5000;
 const LOCAL_DATABASE_SAVE_DELAY = 1200;
+const EDITOR_STATE_SAVE_DELAY = 900;
+const CONTROL_PREVIEW_RENDER_DELAY = 180;
+const EDITOR_PREVIEW_RENDER_DELAY = 520;
+const EDITOR_PREVIEW_IDLE_TIMEOUT = 900;
 const SHARED_PROJECT_STORE_URL = "/api/project-store";
 const SHARED_PROJECT_TEXT_URL = "/api/project-store/current-text";
 const SHARED_SAVE_PROTOCOL_HEADER = "X-WTP-Save-Protocol";
@@ -743,6 +747,8 @@ const sharedProjectIds = new Set();
 let localStateSaveTimer = 0;
 let localStateSaveMaxTimer = 0;
 let renderGeneration = 0;
+let editorCompositionActive = false;
+let editorRenderIdleCallback = 0;
 const decodedImageCache = new Map();
 let pendingProjectImport = null;
 
@@ -1559,11 +1565,19 @@ function startPanelResize(event) {
 }
 
 function debounce(fn, wait = 140) {
-  let id;
-  return (...args) => {
+  let id = 0;
+  const debounced = (...args) => {
     window.clearTimeout(id);
-    id = window.setTimeout(() => fn(...args), wait);
+    id = window.setTimeout(() => {
+      id = 0;
+      fn(...args);
+    }, wait);
   };
+  debounced.cancel = () => {
+    window.clearTimeout(id);
+    id = 0;
+  };
+  return debounced;
 }
 
 function nextProjectTimestamp(project) {
@@ -1675,13 +1689,13 @@ function flushStateSave() {
   saveState();
 }
 
-function scheduleStateSave() {
+function scheduleStateSave(delay = LOCAL_STATE_SAVE_DELAY) {
   // 首屏必须先让 IndexedDB 与 LocalStorage 完成合并。否则旧的 LocalStorage
   // 草稿会被首屏渲染误标成“刚刚更新”，反过来覆盖数据库里的新图片。
   if (!state.localDatabaseHydrated) return;
   markSaveDirty();
   window.clearTimeout(localStateSaveTimer);
-  localStateSaveTimer = window.setTimeout(flushStateSave, LOCAL_STATE_SAVE_DELAY);
+  localStateSaveTimer = window.setTimeout(flushStateSave, delay);
   if (!localStateSaveMaxTimer) {
     localStateSaveMaxTimer = window.setTimeout(flushStateSave, LOCAL_STATE_SAVE_MAX_WAIT);
   }
@@ -9129,11 +9143,80 @@ async function downloadAll() {
   }
 }
 
-const debouncedRender = debounce(() => render({ persist: false }), 180);
+const debouncedRender = debounce(() => render({ persist: false }), CONTROL_PREVIEW_RENDER_DELAY);
+
+function runEditorPreviewRenderWhenIdle() {
+  const run = () => {
+    editorRenderIdleCallback = 0;
+    void render({ persist: false });
+  };
+  if ("requestIdleCallback" in window) {
+    editorRenderIdleCallback = window.requestIdleCallback(run, { timeout: EDITOR_PREVIEW_IDLE_TIMEOUT });
+  } else {
+    run();
+  }
+}
+
+const debouncedEditorRender = debounce(runEditorPreviewRenderWhenIdle, EDITOR_PREVIEW_RENDER_DELAY);
+
+function cancelEditorPreviewRender() {
+  debouncedEditorRender.cancel();
+  if (editorRenderIdleCallback && "cancelIdleCallback" in window) {
+    window.cancelIdleCallback(editorRenderIdleCallback);
+  }
+  editorRenderIdleCallback = 0;
+}
+
+function prioritizeEditorInput() {
+  renderGeneration += 1;
+  debouncedRender.cancel();
+  cancelEditorPreviewRender();
+}
 
 function requestRender() {
   scheduleStateSave();
+  renderGeneration += 1;
+  cancelEditorPreviewRender();
   debouncedRender();
+}
+
+function requestEditorRender() {
+  scheduleStateSave(EDITOR_STATE_SAVE_DELAY);
+  prioritizeEditorInput();
+  debouncedEditorRender();
+}
+
+function handleContentCompositionStart() {
+  editorCompositionActive = true;
+  prioritizeEditorInput();
+}
+
+function handleContentCompositionEnd() {
+  editorCompositionActive = false;
+  requestEditorRender();
+}
+
+function handleContentInput(event) {
+  scheduleTextHistoryCommit();
+  syncAiUndoAvailability();
+  const nextImageReferenceSignature = imageReferenceSignature(els.content.value);
+  const imageReferencesChanged = nextImageReferenceSignature !== lastEditorImageReferenceSignature;
+  lastEditorImageReferenceSignature = nextImageReferenceSignature;
+  scheduleCurrentProjectTextSave();
+  const composing = editorCompositionActive || event?.isComposing === true;
+
+  if (composing) {
+    scheduleStateSave(EDITOR_STATE_SAVE_DELAY);
+    prioritizeEditorInput();
+    return;
+  }
+  if (imageReferencesChanged) {
+    prioritizeEditorInput();
+    flushStateSave();
+    void render({ persist: false });
+    return;
+  }
+  requestEditorRender();
 }
 
 function positionToolPopover(menu) {
@@ -9244,20 +9327,9 @@ function bindEvents() {
     button.addEventListener("click", (event) => setArticleOption("color", event.currentTarget.dataset.articleColor));
   });
 
-  els.content.addEventListener("input", () => {
-    scheduleTextHistoryCommit();
-    syncAiUndoAvailability();
-    const nextImageReferenceSignature = imageReferenceSignature(els.content.value);
-    const imageReferencesChanged = nextImageReferenceSignature !== lastEditorImageReferenceSignature;
-    lastEditorImageReferenceSignature = nextImageReferenceSignature;
-    scheduleCurrentProjectTextSave();
-    if (imageReferencesChanged) {
-      flushStateSave();
-      void render({ persist: false });
-      return;
-    }
-    requestRender();
-  });
+  els.content.addEventListener("compositionstart", handleContentCompositionStart);
+  els.content.addEventListener("compositionend", handleContentCompositionEnd);
+  els.content.addEventListener("input", handleContentInput);
   els.projectTitle?.addEventListener("input", updateCurrentProjectTitle);
   els.content.addEventListener("pointerdown", clearPreviewEditorPin);
   els.content.addEventListener("keydown", handleTextShortcut);

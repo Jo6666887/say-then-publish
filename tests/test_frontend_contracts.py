@@ -153,6 +153,47 @@ class InlineFormattingInteractionContractTests(unittest.TestCase):
         self.assertIn("应用一次后自动结束", HTML)
 
 
+class EditorTypingPerformanceContractTests(unittest.TestCase):
+    def test_editor_uses_a_slower_input_specific_preview_scheduler(self):
+        request_editor = function_body("requestEditorRender")
+        idle_render = function_body("runEditorPreviewRenderWhenIdle")
+
+        self.assertIn("EDITOR_PREVIEW_RENDER_DELAY = 520", APP)
+        self.assertIn("EDITOR_STATE_SAVE_DELAY = 900", APP)
+        self.assertIn("scheduleStateSave(EDITOR_STATE_SAVE_DELAY)", request_editor)
+        self.assertIn("prioritizeEditorInput()", request_editor)
+        self.assertIn("debouncedEditorRender()", request_editor)
+        self.assertIn('"requestIdleCallback" in window', idle_render)
+        self.assertIn("EDITOR_PREVIEW_IDLE_TIMEOUT", idle_render)
+
+    def test_ime_composition_never_starts_preview_rendering(self):
+        content_input = function_body("handleContentInput")
+        composition_start = function_body("handleContentCompositionStart")
+        composition_end = function_body("handleContentCompositionEnd")
+        bind = function_body("bindEvents")
+
+        self.assertIn("editorCompositionActive", content_input)
+        self.assertIn("event?.isComposing === true", content_input)
+        composing_branch = content_input[content_input.index("if (composing)") : content_input.index("if (imageReferencesChanged)")]
+        self.assertIn("prioritizeEditorInput()", composing_branch)
+        self.assertNotIn("requestEditorRender()", composing_branch)
+        self.assertIn("editorCompositionActive = true", composition_start)
+        self.assertIn("editorCompositionActive = false", composition_end)
+        self.assertIn("requestEditorRender()", composition_end)
+        self.assertIn('addEventListener("compositionstart", handleContentCompositionStart)', bind)
+        self.assertIn('addEventListener("compositionend", handleContentCompositionEnd)', bind)
+        self.assertIn('addEventListener("input", handleContentInput)', bind)
+
+    def test_debounce_can_cancel_stale_preview_work(self):
+        debounce_body = function_body("debounce")
+        prioritize = function_body("prioritizeEditorInput")
+
+        self.assertIn("debounced.cancel", debounce_body)
+        self.assertIn("renderGeneration += 1", prioritize)
+        self.assertIn("debouncedRender.cancel()", prioritize)
+        self.assertIn("cancelEditorPreviewRender()", prioritize)
+
+
 class AiOptimizeInteractionContractTests(unittest.TestCase):
     def test_modal_starts_unselected_and_requires_explicit_generate(self):
         for element_id in ("aiModeLayout", "aiModePolish"):
