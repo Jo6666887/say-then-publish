@@ -53,7 +53,12 @@ if not DATA_DIR.is_absolute():
     DATA_DIR = ROOT / DATA_DIR
 DATA_DIR = DATA_DIR.resolve()
 STORE_FILE = DATA_DIR / "project-store.json"
-MAX_BODY_BYTES = 64 * 1024 * 1024
+# Image-heavy creator projects keep private image bytes in the local revision
+# until cloud asset synchronization has confirmed TOS storage. The active user
+# store can exceed 200 MB when several preserved conflict copies reference their
+# own embedded image bytes. Keep a bounded ceiling, but leave enough room for a
+# complete recovery snapshot instead of misreporting it as an unsaved draft.
+MAX_BODY_BYTES = 384 * 1024 * 1024
 MAX_TEXT_PATCH_BYTES = 2 * 1024 * 1024
 MAX_AI_TEXT_BYTES = 2 * 1024 * 1024
 STORE_LOCK = threading.Lock()
@@ -354,6 +359,7 @@ CLOUD_STATUS = {
     "syncedUpdatedAt": None,
     "lastError": CLOUD.disabled_reason or None,
     "fallbackToLocal": not CLOUD.enabled,
+    "conflicts": [],
 }
 LOGGER = logging.getLogger("write-then-publish")
 PUBLIC_STATIC_FILES = {"index.html"}
@@ -460,6 +466,26 @@ def project_content(project: dict | None) -> str | None:
     data = project.get("data") if isinstance(project, dict) else None
     content = data.get("content") if isinstance(data, dict) else None
     return content if isinstance(content, str) else None
+
+
+def project_summary(project: dict) -> dict:
+    data = project.get("data") if isinstance(project.get("data"), dict) else {}
+    cloud_base_updated_at = parse_updated_at(project.get("cloudBaseUpdatedAt"))
+    return {
+        "id": project.get("id"),
+        "title": project.get("title") or "未命名项目",
+        "updatedAt": parse_updated_at(project.get("updatedAt")),
+        "cloudBaseUpdatedAt": cloud_base_updated_at or 0,
+        "published": data.get("published") is True,
+        "conflictOf": data.get("__localConflictOf"),
+    }
+
+
+def next_server_revision(project: dict | None = None) -> int:
+    return max(
+        int(time.time() * 1000),
+        int(project_timestamp(project)) + 1 if isinstance(project, dict) else 1,
+    )
 
 
 def parse_updated_at(value: object) -> int | None:
@@ -703,7 +729,9 @@ def sync_cloud_store(
             CLOUD_STATUS["syncingProjectId"] = target["projectId"]
             CLOUD_STATUS["syncingUpdatedAt"] = target["updatedAt"]
             CLOUD_STATUS["lastError"] = None
+            CLOUD_STATUS["conflicts"] = []
         merged = CLOUD.sync_store(local_store)
+        conflicts = merged.get("conflicts") if isinstance(merged, dict) else None
         synced = project_checkpoint(merged, target_project_id or target["projectId"])
         with STORE_LOCK:
             current_store = read_store()
@@ -713,6 +741,7 @@ def sync_cloud_store(
             CLOUD_STATUS["projectId"] = synced["projectId"]
             CLOUD_STATUS["syncedUpdatedAt"] = synced["updatedAt"]
             CLOUD_STATUS["fallbackToLocal"] = False
+            CLOUD_STATUS["conflicts"] = conflicts if isinstance(conflicts, list) else []
         if target_project_id and (
             synced["projectId"] != target_project_id
             or synced["updatedAt"] is None
@@ -720,6 +749,13 @@ def sync_cloud_store(
             or synced["updatedAt"] != int(target_updated_at)
         ):
             return False
+        if target_project_id and target_updated_at is not None:
+            with STORE_LOCK:
+                confirmed_store = read_store()
+                confirmed_project = find_project(confirmed_store, target_project_id)
+                if confirmed_project is not None:
+                    confirmed_project["cloudBaseUpdatedAt"] = int(target_updated_at)
+                    write_store(confirmed_store)
         return True
     except Exception as error:
         LOGGER.exception("Cloud sync failed")
@@ -1024,6 +1060,33 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
                 payload = read_store()
             self.send_json(payload)
             return
+        if path == "/api/projects":
+            if CLOUD.enabled and not CLOUD_INITIAL_SYNC_DONE.is_set():
+                CLOUD_INITIAL_SYNC_DONE.wait(timeout=CLOUD_INITIAL_SYNC_WAIT_SECONDS)
+            with STORE_LOCK:
+                store = read_store()
+            self.send_json(
+                {
+                    "projects": [
+                        project_summary(project)
+                        for project in store.get("projects") or []
+                        if isinstance(project, dict)
+                    ],
+                    "activeId": store.get("activeId"),
+                    "status": cloud_status(),
+                }
+            )
+            return
+        projects_prefix = "/api/projects/"
+        if path.startswith(projects_prefix) and "/" not in path.removeprefix(projects_prefix):
+            project_id = unquote(path.removeprefix(projects_prefix))
+            with STORE_LOCK:
+                project = find_project(read_store(), project_id)
+            if project is None:
+                self.send_json({"error": "找不到对应项目"}, HTTPStatus.NOT_FOUND)
+                return
+            self.send_json({"project": project, "status": cloud_status()})
+            return
         if path == "/api/cloud-status":
             self.send_json(cloud_status())
             return
@@ -1255,6 +1318,130 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
             return
         if self.reject_cross_origin_mutation():
             return
+        projects_prefix = "/api/projects/"
+        if path.startswith(projects_prefix) and "/" not in path.removeprefix(projects_prefix):
+            project_id = unquote(path.removeprefix(projects_prefix))
+            incoming = self.read_json_body(maximum=MAX_BODY_BYTES)
+            if incoming is None:
+                self.send_json({"error": "项目修改请求无效"}, HTTPStatus.BAD_REQUEST)
+                return
+            expected_updated_at = parse_updated_at(incoming.get("expectedUpdatedAt"))
+            if expected_updated_at is None:
+                self.send_json(
+                    {"error": "缺少 expectedUpdatedAt，无法安全避免覆盖他人修改"},
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+
+            with STORE_LOCK:
+                store = read_store()
+                current = find_project(store, project_id)
+                current_updated_at = (
+                    parse_updated_at(current.get("updatedAt"))
+                    if current is not None
+                    else None
+                )
+                if current is None:
+                    self.send_json({"error": "找不到对应项目"}, HTTPStatus.NOT_FOUND)
+                    return
+                if current_updated_at != expected_updated_at:
+                    self.send_json(save_conflict_payload(current), HTTPStatus.CONFLICT)
+                    return
+
+                project = json.loads(json.dumps(current, ensure_ascii=False))
+                data = project.get("data") if isinstance(project.get("data"), dict) else {}
+                if "content" in incoming:
+                    if not isinstance(incoming.get("content"), str):
+                        self.send_json({"error": "正文必须是字符串"}, HTTPStatus.BAD_REQUEST)
+                        return
+                    data["content"] = incoming["content"]
+                if "published" in incoming:
+                    if not isinstance(incoming.get("published"), bool):
+                        self.send_json({"error": "published 必须是布尔值"}, HTTPStatus.BAD_REQUEST)
+                        return
+                    data["published"] = incoming["published"]
+                if "addImage" in incoming:
+                    addition = incoming.get("addImage")
+                    image_id = addition.get("id") if isinstance(addition, dict) else None
+                    image = addition.get("image") if isinstance(addition, dict) else None
+                    src = image.get("src") if isinstance(image, dict) else None
+                    if (
+                        not isinstance(image_id, str)
+                        or not image_id
+                        or len(image_id) > 160
+                        or not isinstance(image, dict)
+                        or not isinstance(src, str)
+                        or not src.startswith(("data:image/png;base64,", "data:image/jpeg;base64,", "data:image/webp;base64,"))
+                    ):
+                        self.send_json({"error": "新增图片资源结构无效"}, HTTPStatus.BAD_REQUEST)
+                        return
+                    images = dict(data.get("images") or {}) if isinstance(data.get("images"), dict) else {}
+                    if image_id in images:
+                        self.send_json({"error": "新增图片 ID 已存在"}, HTTPStatus.CONFLICT)
+                        return
+                    images[image_id] = image
+                    data["images"] = images
+                if "title" in incoming:
+                    if not isinstance(incoming.get("title"), str) or not incoming["title"].strip():
+                        self.send_json({"error": "项目标题不能为空"}, HTTPStatus.BAD_REQUEST)
+                        return
+                    project["title"] = incoming["title"].strip()[:40]
+                project["data"] = data
+                project["updatedAt"] = next_server_revision(current)
+                next_store = merge_store(
+                    store,
+                    {"activeId": project_id, "projects": [project], "deletedProjects": []},
+                )
+                write_store(next_store)
+
+            cloud_synced = sync_cloud_store(
+                wait_for_existing=True,
+                target_project_id=project_id,
+                target_updated_at=int(project["updatedAt"]),
+                wait_timeout=None,
+            ) if CLOUD.enabled else False
+            with STORE_LOCK:
+                confirmed_store = read_store()
+                confirmed_project = find_project(confirmed_store, project_id)
+            status = cloud_status()
+            conflict_info = next(
+                (
+                    item
+                    for item in status.get("conflicts") or []
+                    if isinstance(item, dict) and item.get("projectId") == project_id
+                ),
+                None,
+            )
+            conflict_project = (
+                find_project(confirmed_store, conflict_info.get("conflictProjectId"))
+                if conflict_info is not None
+                else None
+            )
+            if conflict_project is not None and not cloud_synced:
+                payload = save_conflict_payload(confirmed_project)
+                payload.update(
+                    {
+                        "error": "云端伙伴已编辑同一项目；你的修改已保留为冲突副本",
+                        "conflictProject": project_summary(conflict_project),
+                        "localSaved": True,
+                        "cloudSynced": False,
+                    }
+                )
+                self.send_json(payload, HTTPStatus.CONFLICT)
+                return
+            response_status = HTTPStatus.OK if cloud_synced or not CLOUD.enabled else HTTPStatus.ACCEPTED
+            self.send_json(
+                {
+                    "ok": True,
+                    "project": confirmed_project or project,
+                    "localSaved": True,
+                    "cloudSynced": cloud_synced,
+                    "status": status,
+                },
+                response_status,
+            )
+            return
+
         if path != "/api/project-store/current-text":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
@@ -1358,6 +1545,55 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
         if self.reject_unauthenticated(path):
             return
         if self.reject_cross_origin_mutation():
+            return
+        if path == "/api/projects":
+            incoming = self.read_json_body(maximum=MAX_BODY_BYTES)
+            if incoming is None:
+                self.send_json({"error": "项目创建请求无效"}, HTTPStatus.BAD_REQUEST)
+                return
+            content = incoming.get("content", "")
+            title = incoming.get("title") or "未命名项目"
+            if not isinstance(content, str) or not isinstance(title, str):
+                self.send_json({"error": "标题或正文格式无效"}, HTTPStatus.BAD_REQUEST)
+                return
+            now = next_server_revision()
+            project_id = f"project_{now:x}_{uuid.uuid4().hex[:6]}"
+            project = {
+                "id": project_id,
+                "title": title.strip()[:40] or "未命名项目",
+                "updatedAt": now,
+                "cloudBaseUpdatedAt": 0,
+                "data": {
+                    "content": content,
+                    "published": incoming.get("published") is True,
+                    "images": {},
+                },
+            }
+            with STORE_LOCK:
+                store = read_store()
+                next_store = merge_store(
+                    store,
+                    {"activeId": project_id, "projects": [project], "deletedProjects": []},
+                )
+                write_store(next_store)
+            cloud_synced = sync_cloud_store(
+                wait_for_existing=True,
+                target_project_id=project_id,
+                target_updated_at=now,
+                wait_timeout=None,
+            ) if CLOUD.enabled else False
+            with STORE_LOCK:
+                confirmed = find_project(read_store(), project_id) or project
+            self.send_json(
+                {
+                    "ok": True,
+                    "project": confirmed,
+                    "localSaved": True,
+                    "cloudSynced": cloud_synced,
+                    "status": cloud_status(),
+                },
+                HTTPStatus.CREATED if cloud_synced or not CLOUD.enabled else HTTPStatus.ACCEPTED,
+            )
             return
         if path == "/api/ai/optimize-layout":
             payload = self.read_json_body(maximum=MAX_AI_TEXT_BYTES)

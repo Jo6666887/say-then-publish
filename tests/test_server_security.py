@@ -1207,6 +1207,112 @@ class StaticFileBoundaryTests(unittest.TestCase):
         self.assertEqual(response["projects"][0]["data"]["content"], "新正文")
         schedule.assert_called_once()
 
+    def test_agent_project_api_lists_reads_and_conditionally_updates(self):
+        fake_cloud = FakeCloudStore()
+        current = {
+            "activeId": "project-1",
+            "projects": [
+                {
+                    "id": "project-1",
+                    "title": "原项目",
+                    "updatedAt": 200,
+                    "cloudBaseUpdatedAt": 200,
+                    "data": {"content": "原正文", "published": False},
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            store_file = Path(temporary) / "project-store.json"
+            store_file.write_text(json.dumps(current), encoding="utf-8")
+            with (
+                mock.patch.object(server, "STORE_FILE", store_file),
+                mock.patch.object(server, "CLOUD", fake_cloud),
+                mock.patch.dict(server.CLOUD_STATUS, enabled_cloud_status(), clear=True),
+            ):
+                list_status, list_body = self.request_status("/api/projects")
+                get_status, get_body = self.request_status("/api/projects/project-1")
+                update_status, update_body = self.request_status(
+                    "/api/projects/project-1",
+                    method="PATCH",
+                    headers={"Content-Type": "application/json"},
+                    data=json.dumps(
+                        {
+                            "expectedUpdatedAt": 200,
+                            "title": "Codex 修改",
+                            "content": "新正文",
+                            "published": True,
+                            "addImage": {
+                                "id": "img-agent",
+                                "image": {
+                                    "src": "data:image/png;base64,dGVzdA==",
+                                    "name": "Agent 配图.png",
+                                },
+                            },
+                        }
+                    ).encode("utf-8"),
+                )
+
+        self.assertEqual(list_status, 200)
+        self.assertEqual(json.loads(list_body)["projects"][0]["published"], False)
+        self.assertEqual(get_status, 200)
+        self.assertEqual(json.loads(get_body)["project"]["data"]["content"], "原正文")
+        self.assertEqual(update_status, 200)
+        response = json.loads(update_body)
+        self.assertTrue(response["localSaved"])
+        self.assertTrue(response["cloudSynced"])
+        self.assertEqual(response["project"]["title"], "Codex 修改")
+        self.assertEqual(response["project"]["data"]["content"], "新正文")
+        self.assertTrue(response["project"]["data"]["published"])
+        self.assertEqual(response["project"]["data"]["images"]["img-agent"]["name"], "Agent 配图.png")
+
+    def test_agent_project_api_rejects_a_stale_revision_without_overwrite(self):
+        current = {
+            "activeId": "project-1",
+            "projects": [
+                {"id": "project-1", "updatedAt": 201, "data": {"content": "伙伴新版"}}
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            store_file = Path(temporary) / "project-store.json"
+            store_file.write_text(json.dumps(current), encoding="utf-8")
+            with mock.patch.object(server, "STORE_FILE", store_file):
+                status, body = self.request_status(
+                    "/api/projects/project-1",
+                    method="PATCH",
+                    headers={"Content-Type": "application/json"},
+                    data=json.dumps(
+                        {"expectedUpdatedAt": 200, "content": "Codex 旧基线修改"}
+                    ).encode("utf-8"),
+                )
+                saved = json.loads(store_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(status, 409)
+        self.assertEqual(json.loads(body)["code"], "DRAFT_VERSION_CONFLICT")
+        self.assertEqual(saved, current)
+
+    def test_agent_project_api_creates_a_shared_project(self):
+        fake_cloud = FakeCloudStore()
+        with tempfile.TemporaryDirectory() as temporary:
+            store_file = Path(temporary) / "project-store.json"
+            with (
+                mock.patch.object(server, "STORE_FILE", store_file),
+                mock.patch.object(server, "CLOUD", fake_cloud),
+                mock.patch.dict(server.CLOUD_STATUS, enabled_cloud_status(), clear=True),
+            ):
+                status, body = self.request_status(
+                    "/api/projects",
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                    data=json.dumps({"title": "Codex 新项目", "content": "正文"}).encode("utf-8"),
+                )
+
+        self.assertEqual(status, 201)
+        response = json.loads(body)
+        self.assertTrue(response["localSaved"])
+        self.assertTrue(response["cloudSynced"])
+        self.assertEqual(response["project"]["title"], "Codex 新项目")
+        self.assertEqual(response["project"]["cloudBaseUpdatedAt"], response["project"]["updatedAt"])
+
     def test_conditional_project_store_put_requires_the_expected_base_revision(self):
         fake_cloud = FakeCloudStore()
         current = {

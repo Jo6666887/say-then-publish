@@ -1,0 +1,23 @@
+{
+  "skill_name": "write-then-publish",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "把 /tmp/new-draft.md 创建成写了就发项目，标题叫 Agent 友好工作流，并确认云端小伙伴能看到。",
+      "expected_output": "Uses the CLI create command and only claims cloud visibility when cloudSynced is true.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "把写了就发里的项目 project-demo 更新成 /tmp/revised.md，然后标记为已发布。",
+      "expected_output": "Reads the latest project revision, performs a conditional CLI update, and reports the new revision and published state.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "我和云端伙伴同时改了同一篇稿子，Codex 更新时报 DRAFT_VERSION_CONFLICT，帮我继续。",
+      "expected_output": "Does not force overwrite; reads both the main project and conflict copy, explains preservation, and asks which version should become primary.",
+      "files": []
+    }
+  ]
+}

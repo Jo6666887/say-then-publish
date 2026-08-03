@@ -311,6 +311,90 @@ class CloudStoreTests(unittest.TestCase):
             [{"id": "project-deleted", "deletedAt": 200}],
         )
 
+    def test_merge_stores_accepts_linear_edit_from_known_cloud_base(self):
+        local = {
+            "activeId": "project-1",
+            "projects": [
+                {
+                    "id": "project-1",
+                    "title": "本机继续编辑",
+                    "updatedAt": 201,
+                    "cloudBaseUpdatedAt": 200,
+                    "data": {"content": "本机新版"},
+                }
+            ],
+        }
+        remote = {
+            "activeId": "project-1",
+            "projects": [
+                {
+                    "id": "project-1",
+                    "title": "共同基线",
+                    "updatedAt": 200,
+                    "cloudBaseUpdatedAt": 200,
+                    "data": {"content": "共同基线"},
+                }
+            ],
+        }
+
+        merged = CloudStore._merge_stores(local, remote)
+
+        self.assertEqual(merged["projects"][0]["data"]["content"], "本机新版")
+        self.assertEqual(merged["conflicts"], [])
+
+    def test_merge_stores_preserves_both_sides_when_cloud_changed_from_base(self):
+        local = {
+            "activeId": "project-1",
+            "projects": [
+                {
+                    "id": "project-1",
+                    "title": "本机稿",
+                    "updatedAt": 220,
+                    "cloudBaseUpdatedAt": 200,
+                    "data": {"content": "本机修改"},
+                }
+            ],
+        }
+        remote = {
+            "activeId": "project-1",
+            "projects": [
+                {
+                    "id": "project-1",
+                    "title": "云端稿",
+                    "updatedAt": 210,
+                    "cloudBaseUpdatedAt": 210,
+                    "data": {"content": "伙伴修改"},
+                }
+            ],
+        }
+
+        merged = CloudStore._merge_stores(local, remote)
+
+        by_id = {project["id"]: project for project in merged["projects"]}
+        conflict_id = merged["conflicts"][0]["conflictProjectId"]
+        self.assertEqual(by_id["project-1"]["data"]["content"], "伙伴修改")
+        self.assertEqual(by_id[conflict_id]["data"]["content"], "本机修改")
+        self.assertEqual(by_id[conflict_id]["data"]["__localConflictOf"], "project-1")
+        self.assertEqual(by_id[conflict_id]["cloudBaseUpdatedAt"], 0)
+        self.assertEqual(merged["activeId"], conflict_id)
+
+    def test_cloud_base_cursor_is_not_written_into_publishable_cloud_project(self):
+        store = RecordingCloudStore()
+        _, cloud_project = store._encode_project(
+            {
+                "id": "project-1",
+                "title": "测试",
+                "updatedAt": 201,
+                "cloudBaseUpdatedAt": 200,
+                "data": {"content": "正文", "images": {}},
+            },
+            known_by_sha={},
+            known_by_id={},
+            all_by_id={},
+        )
+
+        self.assertNotIn("cloudBaseUpdatedAt", cloud_project)
+
 
 if __name__ == "__main__":
     unittest.main()

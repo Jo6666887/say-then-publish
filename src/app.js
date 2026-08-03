@@ -15,6 +15,7 @@ const PENDING_PROJECT_DELETIONS_STORAGE_KEY = "writeThenPublishPendingProjectDel
 const PANEL_LAYOUT_STORAGE_KEY = "writeThenPublishPanelLayout.v1";
 const EXPORT_SCALE_STORAGE_KEY = "writeThenPublishExportScale.v1";
 const UI_THEME_STORAGE_KEY = "writeThenPublishUiTheme.v1";
+const PREVIEW_VIEW_STORAGE_KEY = "writeThenPublishPreviewView.v1";
 const PROJECT_BACKUP_SCHEMA = "write-then-publish-projects";
 const PROJECT_BACKUP_VERSION = 1;
 const LOCAL_DATABASE_NAME = "writeThenPublishLocal.v1";
@@ -43,7 +44,7 @@ const GUIDE_CARDS_PROJECT_ID = `${BUILT_IN_PROJECT_PREFIX}cards`;
 const GUIDE_ARTICLE_PROJECT_ID = `${BUILT_IN_PROJECT_PREFIX}article`;
 const PANEL_LIMITS = {
   history: { min: 210, max: 380, fallback: 260 },
-  editor: { min: 360, max: 760, fallback: 500 },
+  editor: { min: 280, max: 1200, fallback: 500 },
 };
 
 let previewEditorPin = null;
@@ -68,8 +69,12 @@ let illustrationUiState = "closed";
 let pendingIllustrationSearch = null;
 let themeLibraryReturnFocus = null;
 let themeLibraryFilter = "all";
+let helpReturnFocus = null;
 let imageReorderDrag = null;
 let imageReorderBusy = false;
+let articleSettingsOpen = false;
+let activePreviewPageIndex = 0;
+let previewViewMode = "grid";
 
 const saveCheckpoint = {
   phase: "loading",
@@ -88,10 +93,21 @@ const $ = (selector) => document.querySelector(selector);
 const els = {
   workspace: $(".workspace"),
   editorPanel: $(".editor-panel"),
+  editorPanelToggle: $("#editorPanelToggleBtn"),
+  previewPanel: $(".preview-panel"),
+  previewFooter: $(".preview-footer"),
+  toolbar: $(".toolbar"),
+  settingsMenu: $(".settings-menu"),
   content: $("#contentInput"),
   pages: $("#pages"),
+  pageDock: $("#pageDock"),
+  pageDockTrack: $("#pageDockTrack"),
+  pageDockStatus: $("#pageDockStatus"),
+  previewViewSwitch: $("#previewViewSwitch"),
+  previewViewButtons: document.querySelectorAll("[data-preview-view]"),
   pageCount: $("#pageCount"),
   projectTitle: $("#projectTitleInput"),
+  projectPublishStatus: $("#projectPublishStatus"),
   status: $("#statusText"),
   saveCheckpoint: $("#saveCheckpoint"),
   saveCheckpointLabel: $("#saveCheckpointLabel"),
@@ -102,6 +118,11 @@ const els = {
   historyNote: $("#historyNote"),
   historyToggle: $("#historyToggleBtn"),
   historyClose: $("#historyCloseBtn"),
+  help: $("#helpBtn"),
+  helpModal: $("#helpModal"),
+  helpClose: $("#helpCloseBtn"),
+  workspaceSettingsMenu: $("#workspaceSettingsMenu"),
+  uiThemeSwitch: $("#uiThemeSwitch"),
   newProject: $("#newProjectBtn"),
   exportProjects: $("#exportProjectsBtn"),
   exportProjectsLabel: $("#exportProjectsLabel"),
@@ -159,11 +180,14 @@ const els = {
   convertMode: $("#convertModeBtn"),
   headerModeToggle: $("#headerModeToggleBtn"),
   themeToggle: $("#themeToggleBtn"),
+  downloadMenu: $("#downloadMenu"),
+  downloadMenuLabel: $("#downloadMenuLabel"),
   downloadZip: $("#downloadZipBtn"),
   downloadArticle: $("#downloadArticleBtn"),
   exportScale: $("#exportScaleSelect"),
   scrollMode: $("#scrollModeBtn"),
   articleSettings: $("#articleSettings"),
+  articleSettingsToggle: $("#articleSettingsToggleBtn"),
   articleThemeButtons: document.querySelectorAll("[data-article-theme]"),
   articleFontButtons: document.querySelectorAll("[data-article-font]"),
   articleSizeButtons: document.querySelectorAll("[data-article-size]"),
@@ -725,6 +749,7 @@ const state = {
   panelLayout: {
     history: PANEL_LIMITS.history.fallback,
     editor: PANEL_LIMITS.editor.fallback,
+    editorCollapsed: false,
   },
 };
 
@@ -769,6 +794,7 @@ const obsidianVault = {
 function defaultFormState() {
   return {
     content: defaultText,
+    published: false,
     displayName: "捏捏番茄（AI图文版）",
     handle: "@heytomato",
     textColor: "#202938",
@@ -962,7 +988,7 @@ function isBuiltInProject(project) {
 }
 
 function allHistoryProjects() {
-  return [...builtInGuideProjects(), ...state.projects];
+  return [...state.projects];
 }
 
 function findHistoryProject(projectId) {
@@ -981,7 +1007,7 @@ function syncGuideReadOnlyMode() {
 
   document
     .querySelectorAll(
-      ".mode-switch button, #convertModeBtn, #headerModeToggleBtn, #themeToggleBtn, .editor-controls button, .editor-controls input, .editor-controls select, .editor-controls summary",
+      ".mode-switch button, #projectPublishStatus, #convertModeBtn, #headerModeToggleBtn, #themeToggleBtn, .editor-controls button, .editor-controls input, .editor-controls select, .editor-controls summary",
     )
     .forEach((control) => {
       if (control instanceof HTMLDetailsElement) return;
@@ -1009,6 +1035,7 @@ function syncGuideReadOnlyMode() {
 function readForm() {
   return {
     content: els.content.value,
+    published: els.projectPublishStatus?.value === "published",
     displayName: els.displayName.value.trim() || "未命名作者",
     handle: normalizeHandle(els.handle.value),
     textColor: normalizeHexColor(els.textColor.value, "#202938"),
@@ -1036,6 +1063,9 @@ function readForm() {
 function applyForm(data) {
   manualSaveGeneration += 1;
   els.content.value = data.content ?? defaultText;
+  if (els.projectPublishStatus) {
+    els.projectPublishStatus.value = data.published === true ? "published" : "unpublished";
+  }
   els.displayName.value = data.displayName ?? "捏捏番茄（AI图文版）";
   els.handle.value = data.handle ?? "@heytomato";
   els.textColor.value = normalizeHexColor(data.textColor, "#202938");
@@ -1072,7 +1102,7 @@ function applyForm(data) {
   if (els.projectTitle) {
     els.projectTitle.value = isBuiltInProject(currentProject)
       ? currentProject?.title || ""
-      : currentProject?.title || projectTitleFromData(data);
+      : currentProject?.title || (state.currentProjectId ? projectTitleFromData(data) : "");
   }
 }
 
@@ -1093,6 +1123,38 @@ function loadUiTheme(fallback = "light") {
   return UI_THEMES.includes(fallback) ? fallback : "light";
 }
 
+function loadPreviewViewMode() {
+  try {
+    return localStorage.getItem(PREVIEW_VIEW_STORAGE_KEY) === "dock" ? "dock" : "grid";
+  } catch {
+    return "grid";
+  }
+}
+
+function syncPreviewViewControls() {
+  els.previewViewButtons.forEach((button) => {
+    const active = button.dataset.previewView === previewViewMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
+function setPreviewViewMode(mode, { announce = false, persist = true } = {}) {
+  previewViewMode = mode === "dock" ? "dock" : "grid";
+  if (persist) {
+    try {
+      localStorage.setItem(PREVIEW_VIEW_STORAGE_KEY, previewViewMode);
+    } catch {
+      // 预览偏好保存失败不影响项目内容。
+    }
+  }
+  syncPreviewViewControls();
+  updatePreviewCardView();
+  if (announce && els.status) {
+    els.status.textContent = previewViewMode === "grid" ? "已切换为网格浏览" : "已切换为逐张预览";
+  }
+}
+
 function setUiTheme(theme, announce = false, persist = true) {
   const normalizedTheme = theme === "ink" ? "dark" : theme === "paper" ? "light" : theme;
   const nextTheme = UI_THEMES.includes(normalizedTheme) ? normalizedTheme : "light";
@@ -1109,6 +1171,11 @@ function setUiTheme(theme, announce = false, persist = true) {
     const label = UI_THEME_LABELS[nextTheme];
     els.themeToggle.title = `切换软件界面明暗：当前${label}界面`;
     els.themeToggle.setAttribute("aria-label", `切换软件界面明暗，当前${label}界面`);
+  }
+  if (els.uiThemeSwitch) {
+    const dark = nextTheme === "dark";
+    els.uiThemeSwitch.checked = dark;
+    els.uiThemeSwitch.setAttribute("aria-label", dark ? "切换为浅色界面" : "切换为深色界面");
   }
   if (announce) {
     els.status.textContent = `软件界面已切换为${UI_THEME_LABELS[nextTheme]}，卡片成品颜色保持不变`;
@@ -1280,6 +1347,38 @@ function closeThemeLibrary() {
   themeLibraryReturnFocus = null;
 }
 
+function openHelp() {
+  helpReturnFocus = document.activeElement;
+  els.workspace?.setAttribute("inert", "");
+  els.helpModal?.classList.remove("hidden");
+  els.helpClose?.focus();
+}
+
+function closeHelp() {
+  els.helpModal?.classList.add("hidden");
+  els.workspace?.removeAttribute("inert");
+  helpReturnFocus?.focus?.();
+  helpReturnFocus = null;
+}
+
+function trapHelpFocus(event) {
+  if (event.key !== "Tab" || els.helpModal?.classList.contains("hidden")) return;
+  trapModalFocus(event, els.helpModal);
+}
+
+async function copyAgentPrompt(button) {
+  const prompt = button?.dataset?.copyPrompt || "";
+  if (!prompt) return;
+  try {
+    await navigator.clipboard.writeText(prompt);
+    els.status.textContent = "已复制这句 Agent 指令，可直接发给 Codex";
+    button.classList.add("copied");
+    window.setTimeout(() => button.classList.remove("copied"), 1200);
+  } catch {
+    els.status.textContent = "浏览器未允许复制，请直接选中帮助里的示例文字";
+  }
+}
+
 function handleThemeLibrarySelection(event) {
   const button = event.target.closest("[data-card-theme]");
   if (!button || !els.themeLibraryGrid?.contains(button)) return;
@@ -1364,33 +1463,44 @@ function updateAppMode() {
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
   });
-  const targetMode = state.appMode === "article" ? "cards" : "article";
-  const targetLabel = targetMode === "article" ? "转长文" : "转图文";
-  els.convertMode.dataset.targetMode = targetMode;
-  els.convertMode.setAttribute("aria-label", targetLabel);
-  els.convertMode.setAttribute("title", targetMode === "article" ? "将当前内容转为长文" : "将当前内容自动分页为图文卡片");
-  els.convertMode.querySelector("span").textContent = targetLabel;
-  els.articleSettings.hidden = state.appMode !== "article";
-  els.scrollMode.hidden = state.appMode === "article";
+  const articleMode = state.appMode === "article";
+  state.mode = "auto";
+  if (!articleMode) articleSettingsOpen = false;
+  if (els.articleSettings) els.articleSettings.hidden = !articleMode || !articleSettingsOpen;
+  if (els.articleSettingsToggle) {
+    els.articleSettingsToggle.hidden = !articleMode;
+    els.articleSettingsToggle.setAttribute("aria-expanded", String(articleMode && articleSettingsOpen));
+    els.articleSettingsToggle.classList.toggle("active", articleMode && articleSettingsOpen);
+  }
+  if (els.downloadMenuLabel) els.downloadMenuLabel.textContent = articleMode ? "下载长图" : "批量下载";
   els.downloadZip.hidden = state.appMode === "article";
   els.downloadArticle.hidden = state.appMode !== "article";
   els.headerModeToggle.hidden = state.appMode === "article";
+  if (els.previewViewSwitch) els.previewViewSwitch.hidden = articleMode;
+  updatePreviewCardView();
 }
 
 async function setAppMode(mode) {
   const nextMode = mode === "article" ? "article" : "cards";
   if (state.appMode === nextMode) return;
   state.appMode = nextMode;
+  articleSettingsOpen = false;
   state.scrollOffset = 0;
   updateAppMode();
   await render();
 }
 
 async function convertCurrentMode() {
-  closeProjectActionsMenu();
   const nextMode = state.appMode === "article" ? "cards" : "article";
   await setAppMode(nextMode);
   els.status.textContent = nextMode === "article" ? "已转为长文" : "已转为图文卡片，并自动分页排版";
+}
+
+function toggleArticleSettings() {
+  if (state.appMode !== "article") return;
+  articleSettingsOpen = !articleSettingsOpen;
+  updateAppMode();
+  if (articleSettingsOpen) els.articleSettings?.querySelector("button")?.focus();
 }
 
 function updateArticleControls() {
@@ -1466,9 +1576,11 @@ function loadPanelLayout() {
     const stored = JSON.parse(localStorage.getItem(PANEL_LAYOUT_STORAGE_KEY) || "{}");
     state.panelLayout.history = clamp(Number(stored.history) || PANEL_LIMITS.history.fallback, PANEL_LIMITS.history.min, PANEL_LIMITS.history.max);
     state.panelLayout.editor = clamp(Number(stored.editor) || PANEL_LIMITS.editor.fallback, PANEL_LIMITS.editor.min, PANEL_LIMITS.editor.max);
+    state.panelLayout.editorCollapsed = stored.editorCollapsed === true;
   } catch {
     state.panelLayout.history = PANEL_LIMITS.history.fallback;
     state.panelLayout.editor = PANEL_LIMITS.editor.fallback;
+    state.panelLayout.editorCollapsed = false;
   }
 }
 
@@ -1477,24 +1589,43 @@ function savePanelLayout() {
 }
 
 function applyPanelLayout() {
+  const editorCollapsed = state.panelLayout.editorCollapsed === true;
   els.workspace?.style.setProperty("--history-width", `${Math.round(state.panelLayout.history)}px`);
   els.workspace?.style.setProperty("--editor-width", `${Math.round(state.panelLayout.editor)}px`);
+  els.workspace?.classList.toggle("editor-collapsed", editorCollapsed);
+  if (els.editorPanel) els.editorPanel.hidden = editorCollapsed;
   els.panelResizers.forEach((resizer) => {
     const target = resizer.dataset.panelResize;
     const limits = PANEL_LIMITS[target];
     if (!limits) return;
+    if (target === "editor") resizer.hidden = editorCollapsed;
     resizer.setAttribute("role", "separator");
     resizer.setAttribute("aria-orientation", "vertical");
     resizer.setAttribute("aria-valuemin", String(limits.min));
     resizer.setAttribute("aria-valuemax", String(limits.max));
     resizer.setAttribute("aria-valuenow", String(Math.round(state.panelLayout[target])));
   });
+  if (els.editorPanelToggle) {
+    const action = editorCollapsed ? "显示" : "隐藏";
+    els.editorPanelToggle.setAttribute("aria-expanded", String(!editorCollapsed));
+    els.editorPanelToggle.setAttribute("aria-label", `${action}源码编辑区`);
+    els.editorPanelToggle.title = `${action}源码编辑区`;
+    els.editorPanelToggle.innerHTML = `<i data-lucide="${editorCollapsed ? "panel-left-open" : "panel-left-close"}"></i>`;
+  }
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function toggleEditorPanel() {
+  state.panelLayout.editorCollapsed = !state.panelLayout.editorCollapsed;
+  applyPanelLayout();
+  savePanelLayout();
+  els.status.textContent = state.panelLayout.editorCollapsed ? "已收起源码编辑区" : "已展开源码编辑区，可拖动中线调整宽度";
 }
 
 function resizePanelWithKeyboard(event) {
   const target = event.currentTarget.dataset.panelResize;
   const limits = PANEL_LIMITS[target];
-  if (!limits || window.matchMedia("(max-width: 900px)").matches) return;
+  if (!limits || window.matchMedia("(max-width: 700px)").matches) return;
   const keys = ["ArrowLeft", "ArrowRight", "Home", "End"];
   if (!keys.includes(event.key)) return;
   event.preventDefault();
@@ -1511,7 +1642,7 @@ function resizePanelWithKeyboard(event) {
 function startPanelResize(event) {
   const target = event.currentTarget.dataset.panelResize;
   if (!["history", "editor"].includes(target)) return;
-  if (window.matchMedia("(max-width: 900px)").matches) return;
+  if (window.matchMedia("(max-width: 700px)").matches) return;
 
   event.preventDefault();
   if (target === "history" && !els.historySidebar?.classList.contains("open")) {
@@ -1607,6 +1738,9 @@ function renderSaveCheckpoint() {
   } else if (phase === "error") {
     label = "本次保存尚未确认";
     meta = `${lastConfirmedCheckpointText()}${saveCheckpoint.error ? ` · ${saveCheckpoint.error}` : ""}`;
+  } else if (phase === "conflict") {
+    label = "已保留两个版本";
+    meta = saveCheckpoint.error || "另一端也修改了同一基础版本；两边都未被覆盖，可在历史记录中比较";
   }
 
   els.saveCheckpoint.dataset.phase = isBuiltInProjectId(state.currentProjectId) ? "readonly" : phase;
@@ -1620,9 +1754,11 @@ function renderSaveCheckpoint() {
           ? "saving"
           : phase === "degraded"
             ? "warning"
-            : phase === "loading"
-              ? "checking"
-              : phase;
+            : phase === "conflict"
+              ? "warning"
+              : phase === "loading"
+                ? "checking"
+                : phase;
   els.saveCheckpoint.dataset.state = visualState;
   els.saveCheckpointLabel.textContent = label;
   els.saveCheckpointMeta.textContent = meta;
@@ -1740,14 +1876,15 @@ function loadState() {
   const store = loadProjectStore();
   state.projects = store.projects;
   state.deletedProjects = store.deletedProjects || [];
-  state.currentProjectId = store.activeId || store.projects[0]?.id || GUIDE_CARDS_PROJECT_ID;
-  return findHistoryProject(state.currentProjectId)?.data || findHistoryProject(GUIDE_CARDS_PROJECT_ID)?.data || defaultFormState();
+  state.currentProjectId = store.activeId || store.projects[0]?.id || null;
+  return findHistoryProject(state.currentProjectId)?.data || blankFormState();
 }
 
 function migrateStoredState(data) {
   const oldBoldQuote =
     "**“请你从某个领域里，选择一个研究生水平的概念。然后写一个寓言故事，用间接的方式把这个概念讲清楚。不要一开始就说答案，尽量到故事快结束的时候，才让人意识到原来讲的是这个概念。故事结束后，再解释这个概念，以及故事里的隐喻分别对应什么。”**";
   if (typeof data.content !== "string") data.content = defaultText;
+  data.published = data.published === true;
   data.content = data.content.replace(
     oldBoldQuote,
     "“请你从某个领域里，选择一个研究生水平的概念。然后写一个寓言故事，用间接的方式把这个概念讲清楚。不要一开始就说答案，尽量到故事快结束的时候，才让人意识到原来讲的是这个概念。故事结束后，再解释这个概念，以及故事里的隐喻分别对应什么。”",
@@ -1789,8 +1926,9 @@ function createProject(data = defaultFormState()) {
   const now = Date.now();
   return {
     id: `project_${now.toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
-    title: projectTitleFromData(normalized),
+    title: String(normalized.content || "").trim() ? projectTitleFromData(normalized) : "未命名图文",
     updatedAt: now,
+    cloudBaseUpdatedAt: 0,
     data: normalized,
   };
 }
@@ -1881,6 +2019,28 @@ async function saveProjectStoreToIndexedDb(snapshot) {
       reject(error);
     };
   });
+}
+
+function markProjectCloudBase(projectId, updatedAt) {
+  const revision = Number(updatedAt || 0);
+  const project = state.projects.find((item) => item.id === projectId);
+  if (!project || !Number.isSafeInteger(revision) || revision <= 0) return;
+  if (Number(project.cloudBaseUpdatedAt || 0) === revision) return;
+  project.cloudBaseUpdatedAt = revision;
+  const snapshot = projectStoreSnapshot();
+  if (!projectStoreLocalStorageUnavailable) {
+    try {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(snapshot));
+    } catch (error) {
+      projectStoreLocalStorageUnavailable = true;
+      console.warn("云端基线写入 LocalStorage 失败", error);
+    }
+  }
+  if (state.localDatabaseHydrated) {
+    void saveProjectStoreToIndexedDb(snapshot).catch((error) => {
+      console.warn("云端基线写入 IndexedDB 失败", error);
+    });
+  }
 }
 
 async function savePendingProjectDeletionsToIndexedDb(deletions) {
@@ -2225,8 +2385,12 @@ function resolveProjectDeletionWinners(projects, deletions) {
 }
 
 function rememberActiveProject(projectId) {
-  if (typeof projectId !== "string" || !projectId) return false;
+  if (typeof projectId !== "string") return false;
   try {
+    if (!projectId) {
+      localStorage.removeItem(ACTIVE_PROJECT_STORAGE_KEY);
+      return true;
+    }
     localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, projectId);
     return true;
   } catch (error) {
@@ -2324,6 +2488,7 @@ function projectRevisionMatches(first, second) {
   if (
     first.id !== second.id
     || Number(first.updatedAt) !== Number(second.updatedAt)
+    || Number(first.cloudBaseUpdatedAt || 0) !== Number(second.cloudBaseUpdatedAt || 0)
     || first.title !== second.title
   ) {
     return false;
@@ -2360,6 +2525,7 @@ function restoreImportedProjects(existingProjects, incomingProjects, deletedProj
       ...project,
       // 用户明确确认导入时，备份必须同时胜过本机旧版本与任何未来时钟墓碑。
       updatedAt,
+      cloudBaseUpdatedAt: Number(existing?.cloudBaseUpdatedAt ?? existing?.updatedAt ?? 0),
     };
   });
   const untouchedProjects = (existingProjects || [])
@@ -2423,18 +2589,25 @@ async function hydrateProjectStoreFromIndexedDb() {
       // The current browser selection is UI state, not a shared/cloud choice.
       // Only fall back when that project was actually deleted or is unavailable.
       const rememberedActiveId = loadRememberedActiveProject();
-      const preferredActiveId = rememberedActiveId || stored?.activeId || shared?.activeId;
+      const preferredActiveId = requestedProjectIdFromUrl() || rememberedActiveId || stored?.activeId || shared?.activeId;
       const storedActive = state.projects.find((project) => project.id === preferredActiveId);
       const activeWasReplaced = mergedActive && !projectRevisionMatches(mergedActive, activeBeforeHydration);
       const projectToApply = activeWasReplaced
         ? mergedActive
         : !mergedActive && (!isBuiltInProjectId(state.currentProjectId) || !isBuiltInProjectId(rememberedActiveId))
-          ? storedActive || state.projects[0] || findHistoryProject(GUIDE_CARDS_PROJECT_ID)
+          ? storedActive || state.projects[0] || null
           : null;
       if (projectToApply) {
         state.currentProjectId = projectToApply.id;
         rememberActiveProject(projectToApply.id);
         applyForm(projectToApply.data);
+        syncGuideReadOnlyMode();
+        resetTextHistory();
+        await render({ persist: false });
+      } else if (!state.projects.length && !mergedActive) {
+        state.currentProjectId = null;
+        rememberActiveProject("");
+        applyForm(blankFormState());
         syncGuideReadOnlyMode();
         resetTextHistory();
         await render({ persist: false });
@@ -2476,23 +2649,31 @@ function loadProjectStore() {
         : [];
       const resolved = resolveProjectDeletionWinners(projects, parsed.deletedProjects);
       const rememberedActiveId = loadRememberedActiveProject();
-      const preferredActiveId = rememberedActiveId || parsed.activeId;
+      const preferredActiveId = requestedProjectIdFromUrl() || rememberedActiveId || parsed.activeId;
       const activeId = isBuiltInProjectId(preferredActiveId)
         ? preferredActiveId
         : resolved.projects.some((project) => project.id === preferredActiveId)
           ? preferredActiveId
-          : resolved.projects[0]?.id || GUIDE_CARDS_PROJECT_ID;
+          : resolved.projects[0]?.id || null;
       return { activeId, projects: resolved.projects, deletedProjects: resolved.deletedProjects };
     }
 
     const legacyRaw = localStorage.getItem(STORAGE_KEY);
-    if (!legacyRaw) return { activeId: GUIDE_CARDS_PROJECT_ID, projects: [], deletedProjects: [] };
+    if (!legacyRaw) return { activeId: null, projects: [], deletedProjects: [] };
 
     const legacyData = JSON.parse(legacyRaw);
     const project = createProject(legacyData);
     return { activeId: project.id, projects: [project], deletedProjects: [] };
   } catch {
-    return { activeId: GUIDE_CARDS_PROJECT_ID, projects: [], deletedProjects: [] };
+    return { activeId: null, projects: [], deletedProjects: [] };
+  }
+}
+
+function requestedProjectIdFromUrl() {
+  try {
+    return new URLSearchParams(window.location.search).get("project") || "";
+  } catch {
+    return "";
   }
 }
 
@@ -2511,10 +2692,15 @@ function normalizeProject(project) {
   // A migration changes the whole project snapshot. Give it a real revision so
   // the server never has to accept different data under an identical timestamp.
   const updatedAt = normalizedChanged ? sourceUpdatedAt + 1 : sourceUpdatedAt;
+  const sourceCloudBaseUpdatedAt = Number(project.cloudBaseUpdatedAt);
+  const cloudBaseUpdatedAt = Number.isSafeInteger(sourceCloudBaseUpdatedAt) && sourceCloudBaseUpdatedAt >= 0
+    ? sourceCloudBaseUpdatedAt
+    : sourceUpdatedAt;
   return {
     id: project.id || `project_${updatedAt.toString(36)}`,
     title: normalizeProjectTitle(project.title) || projectTitleFromData(data),
     updatedAt,
+    cloudBaseUpdatedAt,
     data,
   };
 }
@@ -2613,6 +2799,16 @@ function cloudCheckpointMatches(status, projectId, updatedAt) {
   return checkpoint.projectId === projectId && checkpoint.updatedAt === Number(updatedAt || 0);
 }
 
+function cloudConflictForProject(status, projectId, updatedAt = 0) {
+  if (!projectId || !Array.isArray(status?.conflicts)) return null;
+  const targetUpdatedAt = Number(updatedAt || 0);
+  return status.conflicts.find((item) => {
+    if (item?.projectId !== projectId) return false;
+    if (!targetUpdatedAt) return true;
+    return [Number(item.localUpdatedAt || 0), Number(item.remoteUpdatedAt || 0)].includes(targetUpdatedAt);
+  }) || null;
+}
+
 function delay(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
@@ -2641,7 +2837,17 @@ async function confirmCloudCheckpoint(projectId, updatedAt, { attempts = 7 } = {
 
     updatePersistenceControls(status);
     if (generation !== saveCheckpointPollGeneration) return false;
+    if (cloudConflictForProject(status, projectId, updatedAt)) {
+      setSaveCheckpoint({
+        phase: "conflict",
+        projectId,
+        targetUpdatedAt: updatedAt,
+        error: "另一端也改了这个版本；系统已保留两份内容，没有覆盖任何一方",
+      });
+      return false;
+    }
     if (cloudCheckpointMatches(status, projectId, updatedAt)) {
+      markProjectCloudBase(projectId, updatedAt);
       setSaveCheckpoint({
         phase: "saved-cloud",
         projectId,
@@ -2686,6 +2892,7 @@ async function refreshPersistenceMode({ quiet = true } = {}) {
     if (current && state.localDatabaseHydrated && saveCheckpoint.phase === "loading") {
       const updatedAt = Number(current.updatedAt || 0);
       if (cloudCheckpointMatches(status, current.id, updatedAt)) {
+        markProjectCloudBase(current.id, updatedAt);
         setSaveCheckpoint({
           phase: "saved-cloud",
           projectId: current.id,
@@ -2809,6 +3016,7 @@ async function saveProjectNow() {
     if (!response.ok || payload.ok !== true || status.fallbackToLocal || !cloudCheckpointMatches(status, persisted.projectId, persisted.projectUpdatedAt)) {
       throw new Error(status.lastError || payload.error || `云同步失败（${response.status}）`);
     }
+    markProjectCloudBase(persisted.projectId, persisted.projectUpdatedAt);
     setSaveCheckpoint({
       phase: "saved-cloud",
       projectId: persisted.projectId,
@@ -3040,7 +3248,10 @@ function normalizeProjectTitle(value) {
 function updateCurrentProjectTitle() {
   if (isBuiltInProjectId(state.currentProjectId)) return;
   const current = state.projects.find((project) => project.id === state.currentProjectId);
-  if (!current) return;
+  if (!current) {
+    scheduleStateSave();
+    return;
+  }
   current.title = normalizeProjectTitle(els.projectTitle?.value) || projectTitleFromData(current.data);
   updateProjectHistory();
   scheduleStateSave();
@@ -3217,11 +3428,10 @@ async function deleteProject(projectId) {
   state.projects = state.projects.filter((item) => item.id !== project.id);
 
   if (!state.projects.length) {
-    const guideProject = findHistoryProject(GUIDE_CARDS_PROJECT_ID);
-    state.currentProjectId = GUIDE_CARDS_PROJECT_ID;
+    state.currentProjectId = null;
     state.mode = "auto";
     state.scrollOffset = 0;
-    applyForm(guideProject?.data || defaultFormState());
+    applyForm(blankFormState());
     syncGuideReadOnlyMode();
     resetTextHistory();
   } else if (deletingCurrent) {
@@ -7603,7 +7813,8 @@ function renderArticlePreview(settings) {
   state.scrollMax = 0;
   els.pages.innerHTML = "";
   els.pages.className = "pages article-mode";
-  els.articleSettings.hidden = false;
+  clearPageDock();
+  if (els.articleSettings) els.articleSettings.hidden = !articleSettingsOpen;
 
   const article = document.createElement("article");
   article.className = `article-preview article-theme-${settings.articleTheme} article-font-${settings.articleFont} article-size-${settings.articleSize}`;
@@ -7785,7 +7996,7 @@ function drawPreview(canvases) {
   els.pages.className = "pages";
   els.pages.classList.toggle("scroll-mode", state.mode === "scroll");
   els.articleSettings.hidden = true;
-  els.scrollMode.classList.toggle("active", state.mode === "scroll");
+  els.scrollMode?.classList.toggle("active", state.mode === "scroll");
   if (!canvases.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
@@ -7796,6 +8007,8 @@ function drawPreview(canvases) {
   canvases.forEach((canvas, index) => {
     const shell = document.createElement("article");
     shell.className = "page-shell";
+    shell.id = `preview-page-${index + 1}`;
+    shell.dataset.pageIndex = String(index);
     const frame = document.createElement("div");
     frame.className = "page-frame";
     if (state.mode === "scroll") {
@@ -7822,12 +8035,144 @@ function drawPreview(canvases) {
     els.pages.append(shell);
   });
 
+  renderPageDock(canvases);
+  updatePreviewCardView();
+
   els.pageCount.textContent = state.mode === "scroll" ? "滑动截图模式" : `${canvases.length} 张图片`;
   els.status.textContent =
     state.mode === "scroll"
       ? `滑动截图模式：预览 ${CANVAS_WIDTH}x${CANVAS_HEIGHT}，导出 ${CANVAS_WIDTH * state.exportScale}x${CANVAS_HEIGHT * state.exportScale}`
       : `已生成 ${canvases.length} 张；预览 ${CANVAS_WIDTH}x${CANVAS_HEIGHT}，导出 ${CANVAS_WIDTH * state.exportScale}x${CANVAS_HEIGHT * state.exportScale}`;
   if (window.lucide) window.lucide.createIcons();
+}
+
+function clearPageDock() {
+  if (!els.pageDock || !els.pageDockTrack || !els.pageDockStatus) return;
+  els.pageDock.hidden = true;
+  els.pageDockTrack.innerHTML = "";
+  els.pageDockStatus.textContent = "0 / 0";
+  els.pages.querySelectorAll(".page-shell").forEach((shell) => {
+    shell.removeAttribute("role");
+    shell.removeAttribute("aria-labelledby");
+  });
+}
+
+function renderPageDock(canvases) {
+  if (!els.pageDock || !els.pageDockTrack || !els.pageDockStatus) return;
+  els.pageDockTrack.innerHTML = "";
+  const dockCanvases = state.mode === "auto" ? canvases : [];
+  if (!dockCanvases.length) {
+    clearPageDock();
+    return;
+  }
+
+  activePreviewPageIndex = clamp(activePreviewPageIndex, 0, dockCanvases.length - 1);
+  els.pageDock.hidden = false;
+  dockCanvases.forEach((canvas, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "page-dock-button";
+    button.id = `page-dock-tab-${index + 1}`;
+    button.dataset.pageIndex = String(index);
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-controls", `preview-page-${index + 1}`);
+    button.setAttribute("aria-label", `切换到第 ${index + 1} 张卡片`);
+    button.title = `第 ${index + 1} 张卡片`;
+
+    const thumbnail = document.createElement("canvas");
+    thumbnail.width = 54;
+    thumbnail.height = 72;
+    thumbnail.setAttribute("aria-hidden", "true");
+    const context = thumbnail.getContext("2d");
+    if (context) context.drawImage(canvas, 0, 0, thumbnail.width, thumbnail.height);
+
+    const number = document.createElement("span");
+    number.textContent = String(index + 1).padStart(2, "0");
+    button.append(thumbnail, number);
+    button.addEventListener("click", () => setActivePreviewPage(index));
+    button.addEventListener("keydown", handlePageDockKeydown);
+    els.pageDockTrack.append(button);
+    const shell = els.pages.querySelector(`#preview-page-${index + 1}`);
+    if (shell) {
+      shell.setAttribute("role", "tabpanel");
+      shell.setAttribute("aria-labelledby", button.id);
+    }
+  });
+}
+
+function applyActivePreviewPage({ focus = false } = {}) {
+  const shells = Array.from(els.pages.querySelectorAll(".page-shell"));
+  const buttons = els.pageDockTrack ? Array.from(els.pageDockTrack.querySelectorAll(".page-dock-button")) : [];
+  if (!shells.length) return;
+  activePreviewPageIndex = clamp(activePreviewPageIndex, 0, shells.length - 1);
+  const compact = els.previewPanel?.dataset.cardView === "dock";
+
+  shells.forEach((shell, index) => {
+    const active = index === activePreviewPageIndex;
+    shell.classList.toggle("is-active", active);
+    if (compact) {
+      shell.setAttribute("role", "tabpanel");
+      shell.setAttribute("aria-labelledby", `page-dock-tab-${index + 1}`);
+      shell.setAttribute("aria-hidden", String(!active));
+    } else {
+      shell.removeAttribute("role");
+      shell.removeAttribute("aria-labelledby");
+      shell.removeAttribute("aria-hidden");
+    }
+  });
+  buttons.forEach((button, index) => {
+    const active = index === activePreviewPageIndex;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  if (els.pageDockStatus) {
+    els.pageDockStatus.textContent = `${activePreviewPageIndex + 1} / ${shells.length}`;
+  }
+  const activeButton = buttons[activePreviewPageIndex];
+  if (activeButton) {
+    activeButton.scrollIntoView({
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      block: "nearest",
+      inline: "center",
+    });
+    if (focus) activeButton.focus();
+  }
+}
+
+function updatePreviewCardView() {
+  if (!els.previewPanel) return;
+  const supportsCardViews = state.appMode === "cards" && state.mode === "auto";
+  const cardView = supportsCardViews ? previewViewMode : "grid";
+  els.previewPanel.dataset.cardView = cardView;
+  if (els.previewFooter) els.previewFooter.hidden = !supportsCardViews;
+  if (els.previewViewSwitch) els.previewViewSwitch.hidden = !supportsCardViews;
+  if (els.pageDock) {
+    const hasDockPages = Boolean(els.pageDockTrack?.children.length);
+    els.pageDock.hidden = cardView !== "dock" || !hasDockPages;
+  }
+  syncPreviewViewControls();
+  applyActivePreviewPage();
+}
+
+function setActivePreviewPage(index, { focus = false } = {}) {
+  if (!Number.isInteger(index)) return;
+  activePreviewPageIndex = index;
+  applyActivePreviewPage({ focus });
+}
+
+function handlePageDockKeydown(event) {
+  const buttons = els.pageDockTrack ? Array.from(els.pageDockTrack.querySelectorAll(".page-dock-button")) : [];
+  if (!buttons.length) return;
+  const current = Number(event.currentTarget.dataset.pageIndex);
+  let next = current;
+  if (event.key === "ArrowLeft") next = Math.max(0, current - 1);
+  else if (event.key === "ArrowRight") next = Math.min(buttons.length - 1, current + 1);
+  else if (event.key === "Home") next = 0;
+  else if (event.key === "End") next = buttons.length - 1;
+  else return;
+  event.preventDefault();
+  setActivePreviewPage(next, { focus: true });
 }
 
 function createImageEditLayer(canvas) {
@@ -8581,6 +8926,9 @@ function positionOpenToolPopovers() {
 }
 
 function bindEvents() {
+  if (els.toolbar && els.settingsMenu) {
+    els.toolbar.prepend(els.settingsMenu);
+  }
   document.querySelectorAll(".tool-menu").forEach((menu) => {
     const summary = menu.querySelector("summary");
     const popover = menu.querySelector(".tool-popover");
@@ -8622,6 +8970,7 @@ function bindEvents() {
     resizer.addEventListener("pointerdown", startPanelResize);
     resizer.addEventListener("keydown", resizePanelWithKeyboard);
   });
+  els.editorPanelToggle?.addEventListener("click", toggleEditorPanel);
 
   document.querySelectorAll("[data-format]").forEach((button) => {
     button.addEventListener("click", () => wrapSelection(button.dataset.format));
@@ -8629,6 +8978,11 @@ function bindEvents() {
 
   els.modeButtons.forEach((button) => {
     button.addEventListener("click", (event) => setAppMode(event.currentTarget.dataset.appMode));
+  });
+  els.previewViewButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      setPreviewViewMode(button.dataset.previewView, { announce: true });
+    });
   });
 
   els.articleThemeButtons.forEach((button) => {
@@ -8659,6 +9013,7 @@ function bindEvents() {
     requestRender();
   });
   els.projectTitle?.addEventListener("input", updateCurrentProjectTitle);
+  els.projectPublishStatus?.addEventListener("change", scheduleStateSave);
   els.content.addEventListener("pointerdown", clearPreviewEditorPin);
   els.content.addEventListener("keydown", handleTextShortcut);
   els.content.addEventListener("paste", handleEditorPaste);
@@ -8722,11 +9077,6 @@ function bindEvents() {
   els.applyImageWidth?.addEventListener("click", applyImageWidthToAll);
   els.applyFixedImageSize?.addEventListener("click", applyFixedImageSizeToAll);
   els.avatarInput.addEventListener("change", handleAvatar);
-  els.scrollMode.addEventListener("click", () => {
-    state.mode = state.mode === "scroll" ? "auto" : "scroll";
-    state.scrollOffset = 0;
-    render();
-  });
   els.cropAvatar.addEventListener("click", () => openCropper("avatar"));
   els.cropClose.addEventListener("click", closeCropper);
   els.cropApply.addEventListener("click", applyCropper);
@@ -8747,6 +9097,7 @@ function bindEvents() {
     if (event.key === "Escape" && !els.aiOptimizeModal?.classList.contains("hidden")) closeAiOptimizeModal();
     if (event.key === "Escape" && !els.illustrationModal?.classList.contains("hidden")) closeIllustrationModal();
     if (event.key === "Escape" && !els.themeLibraryModal?.classList.contains("hidden")) closeThemeLibrary();
+    if (event.key === "Escape" && !els.helpModal?.classList.contains("hidden")) closeHelp();
     if (event.key === "Escape" && imageReorderDrag) cancelPreviewImageReorder();
     if (event.key === "Escape") clearPreviewEditorPin();
   });
@@ -8755,6 +9106,15 @@ function bindEvents() {
   els.replaceAll.addEventListener("click", replaceAll);
   els.historyToggle.addEventListener("click", toggleHistory);
   els.historyClose.addEventListener("click", () => setHistoryOpen(false, true));
+  els.help?.addEventListener("click", openHelp);
+  els.helpClose?.addEventListener("click", closeHelp);
+  els.helpModal?.addEventListener("click", (event) => {
+    if (event.target === els.helpModal) closeHelp();
+  });
+  els.helpModal?.addEventListener("keydown", trapHelpFocus);
+  els.helpModal?.querySelectorAll("[data-copy-prompt]").forEach((button) => {
+    button.addEventListener("click", () => void copyAgentPrompt(button));
+  });
   els.historyFilterButtons.forEach((button) => {
     button.addEventListener("click", () => setHistoryFilter(button.dataset.historyFilter));
   });
@@ -8812,12 +9172,20 @@ function bindEvents() {
   els.assetLibraryModal?.addEventListener("click", (event) => {
     if (event.target === els.assetLibraryModal) closeAssetLibrary();
   });
-  els.convertMode.addEventListener("click", convertCurrentMode);
   els.headerModeToggle.addEventListener("click", toggleHeaderMode);
-  els.themeToggle.addEventListener("click", toggleUiTheme);
+  els.uiThemeSwitch?.addEventListener("change", () => {
+    setUiTheme(els.uiThemeSwitch.checked ? "dark" : "light", true, true);
+  });
+  els.articleSettingsToggle?.addEventListener("click", toggleArticleSettings);
   els.exportScale?.addEventListener("change", () => setExportScale(els.exportScale.value));
-  els.downloadZip.addEventListener("click", downloadAll);
-  els.downloadArticle.addEventListener("click", downloadArticleImage);
+  els.downloadZip.addEventListener("click", async () => {
+    await downloadAll();
+    if (els.downloadMenu) els.downloadMenu.open = false;
+  });
+  els.downloadArticle.addEventListener("click", async () => {
+    await downloadArticleImage();
+    if (els.downloadMenu) els.downloadMenu.open = false;
+  });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") {
       if (localStateSaveTimer || localStateSaveMaxTimer) flushStateSave();
@@ -8838,6 +9206,7 @@ setExportScale(loadExportScale(), false);
 const initialFormState = loadState();
 setUiTheme(loadUiTheme(initialFormState.uiTheme), false, true);
 applyForm(initialFormState);
+setPreviewViewMode(loadPreviewViewMode(), { persist: false });
 syncGuideReadOnlyMode();
 resetTextHistory();
 updateProjectHistory();

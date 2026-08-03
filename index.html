@@ -28,16 +28,45 @@
           </div>
           <div id="projectHistory" class="history-list"></div>
         </div>
+        <div class="workspace-utilities" aria-label="帮助与界面设置">
+          <button id="helpBtn" class="rail-utility-button" type="button" title="创作帮助" aria-label="打开创作帮助">
+            <i data-lucide="circle-help"></i>
+          </button>
+          <details id="workspaceSettingsMenu" class="tool-menu workspace-settings-menu">
+            <summary class="rail-utility-button" title="界面设置" aria-label="打开界面设置">
+              <i data-lucide="settings"></i>
+            </summary>
+            <div class="tool-popover workspace-settings-popover">
+              <div class="workspace-settings-heading">
+                <strong>界面明暗</strong>
+                <span>只改变工作台，不影响导出的图片。</span>
+              </div>
+              <label class="theme-switch-control" for="uiThemeSwitch">
+                <span>浅色</span>
+                <input id="uiThemeSwitch" type="checkbox" role="switch" aria-label="切换深色界面" />
+                <i aria-hidden="true"></i>
+                <span>深色</span>
+              </label>
+            </div>
+          </details>
+        </div>
       </aside>
       <button class="panel-resizer" data-panel-resize="history" type="button" aria-label="拖动调整历史栏宽度"></button>
 
-      <aside class="editor-panel" aria-label="编辑器">
+      <aside id="editorPanel" class="editor-panel" aria-label="编辑器">
         <div class="brand-row">
           <h1 class="visually-hidden">写了就发</h1>
           <div class="project-heading">
             <label class="project-title-control">
               <span>当前项目</span>
               <input id="projectTitleInput" type="text" maxlength="40" placeholder="例如：千问 Token Plan 优化版" aria-label="项目标题" />
+            </label>
+            <label class="project-publish-control">
+              <span>发布状态</span>
+              <select id="projectPublishStatus" aria-label="项目发布状态">
+                <option value="unpublished">未发布</option>
+                <option value="published">已发布</option>
+              </select>
             </label>
             <p id="pageCount" class="project-page-count" aria-live="polite">0 张图片</p>
           </div>
@@ -57,27 +86,14 @@
               <i data-lucide="images"></i>
               资源库
             </button>
-            <details class="tool-menu project-actions-menu">
-              <summary class="secondary-button" title="更多项目与界面设置">更多</summary>
-              <div class="tool-popover project-actions-popover">
-                <button class="secondary-button" id="importProjectsBtn" type="button" title="从本地 JSON 合并导入草稿、图片和排版设置">
-                  <i data-lucide="folder-up"></i>
-                  导入 JSON
-                </button>
-                <button class="secondary-button convert-mode-button" id="convertModeBtn" type="button">
-                  <i data-lucide="repeat-2"></i>
-                  <span>转长文</span>
-                </button>
-                <button class="secondary-button header-mode-button" id="headerModeToggleBtn" type="button">
-                  <i data-lucide="user-round"></i>
-                  每页头像
-                </button>
-                <button class="secondary-button" id="themeToggleBtn" type="button" title="切换软件界面明暗" aria-label="切换软件界面明暗">
-                  <i data-lucide="palette"></i>
-                  <span>界面明暗</span>
-                </button>
-              </div>
-            </details>
+            <button class="secondary-button" id="importProjectsBtn" type="button" title="从本地 JSON 合并导入草稿、图片和排版设置">
+              <i data-lucide="folder-up"></i>
+              导入 JSON
+            </button>
+            <button class="secondary-button header-mode-button" id="headerModeToggleBtn" type="button">
+              <i data-lucide="user-round"></i>
+              每页头像
+            </button>
             <input id="projectBackupInput" class="backup-file-input" type="file" accept=".json,application/json" tabindex="-1" />
           </div>
         </div>
@@ -95,12 +111,14 @@
             </button>
           </div>
 
-          <div class="toolbar" aria-label="文字样式">
+          <div class="toolbar" aria-label="创作工具">
+            <span class="toolbar-group-label">内容</span>
             <button type="button" class="tool-button" data-format="h1" title="大标题">H1</button>
             <button type="button" class="tool-button" data-format="h2" title="小标题">H2</button>
             <button type="button" class="tool-button" data-format="bold" title="加粗"><strong>B</strong></button>
             <button type="button" class="tool-button" data-format="italic" title="斜体"><em>I</em></button>
             <button type="button" class="tool-button" data-format="quote" title="重点引用"><i data-lucide="quote"></i></button>
+            <span class="toolbar-group-label">智能与素材</span>
             <button id="aiOptimizeBtn" class="ai-toolbar-button" type="button" title="让 AI 自动识别重点并优化当前排版">
               <i data-lucide="sparkles"></i>
               <span>AI 优化排版</span>
@@ -108,10 +126,6 @@
             <button id="aiUndoBtn" class="ai-toolbar-button ai-undo-button" type="button" title="撤回上一次 AI 优化" hidden>
               <i data-lucide="undo-2"></i>
               <span>撤回 AI</span>
-            </button>
-            <button id="illustrationBtn" class="ai-toolbar-button illustration-toolbar-button" type="button" title="分析正文并从网络图库寻找配图；不会修改文字">
-              <i data-lucide="images"></i>
-              <span>一键配图</span>
             </button>
             <label class="tool-button file-tool" title="插入图片" aria-label="插入图片">
               <i data-lucide="image-plus"></i>
@@ -137,6 +151,7 @@
                 <p class="obsidian-direct-paste-hint">已连接仓库。直接回到左侧的原文编辑区粘贴 Obsidian Markdown，图片会自动读取。</p>
               </div>
             </details>
+            <span class="toolbar-group-label">细调</span>
             <details id="colorMenu" class="tool-menu">
               <summary class="tool-button color-tool" title="选中文字颜色" aria-label="选中文字颜色">
                 <i data-lucide="paintbrush"></i>
@@ -357,15 +372,20 @@
           </div>
         </section>
 
-        <textarea id="contentInput" class="editor-textarea" spellcheck="false" aria-label="正文内容"></textarea>
+        <textarea id="contentInput" class="editor-textarea" spellcheck="false" aria-label="正文内容" placeholder="直接粘贴内容、导入 Markdown，或告诉 Codex：给当前项目配图并插入对应小节"></textarea>
       </aside>
       <button class="panel-resizer" data-panel-resize="editor" type="button" aria-label="拖动调整编辑区宽度"></button>
 
-      <section class="preview-panel" aria-label="图片预览">
+      <section class="preview-panel" data-card-view="grid" aria-label="图片预览">
         <div class="preview-topbar">
           <div class="preview-heading">
-            <h2>预览与下载</h2>
-            <span id="statusText" class="render-status" role="status" aria-live="polite">自动分页已开启</span>
+            <button id="editorPanelToggleBtn" class="editor-panel-toggle" type="button" aria-controls="editorPanel" aria-expanded="true" title="隐藏源码编辑区" aria-label="隐藏源码编辑区">
+              <i data-lucide="panel-left-close"></i>
+            </button>
+            <div class="preview-heading-copy">
+              <h2>预览与下载</h2>
+              <span id="statusText" class="render-status" role="status" aria-live="polite">自动分页已开启</span>
+            </div>
           </div>
           <div class="preview-topbar-controls">
             <div id="saveCheckpoint" class="save-checkpoint" data-state="checking">
@@ -376,32 +396,40 @@
                 <strong id="saveCheckpointLabel">正在确认保存状态</strong>
                 <small id="saveCheckpointMeta">正在读取本机与云端的最近记录…</small>
               </div>
-              <button id="saveNowBtn" class="save-now-button" type="button" title="立即保存当前内容">
-                <i data-lucide="save"></i>
-                <span>立即保存</span>
-              </button>
             </div>
             <div class="topbar-actions">
-              <label class="export-scale-control" title="保持版式比例，按更高像素重新绘制下载图片">
-                <span>清晰度</span>
-                <select id="exportScaleSelect" aria-label="导出清晰度">
-                  <option value="1">1× 标准</option>
-                  <option value="2" selected>2× 高清</option>
-                  <option value="3">3× 超清</option>
-                </select>
-              </label>
-              <button id="scrollModeBtn" class="secondary-button" type="button">
-                <i data-lucide="scroll-text"></i>
-                滑动截图
+              <button id="articleSettingsToggleBtn" class="secondary-button" type="button" aria-controls="articleSettings" aria-expanded="false" hidden>
+                <i data-lucide="sliders-horizontal"></i>
+                调整样式
               </button>
-              <button id="downloadZipBtn" class="primary-button" type="button">
-                <i data-lucide="download"></i>
-                批量下载
-              </button>
-              <button id="downloadArticleBtn" class="primary-button" type="button" hidden>
-                <i data-lucide="download"></i>
-                下载长图
-              </button>
+              <details id="downloadMenu" class="tool-menu download-menu">
+                <summary class="primary-button" title="选择清晰度并下载">
+                  <i data-lucide="download"></i>
+                  <span id="downloadMenuLabel">批量下载</span>
+                </summary>
+                <div class="tool-popover download-popover">
+                  <div class="download-popover-heading">
+                    <strong>下载设置</strong>
+                    <span>清晰度只影响导出像素，不改变版式。</span>
+                  </div>
+                  <label class="export-scale-control" title="保持版式比例，按更高像素重新绘制下载图片">
+                    <span>清晰度</span>
+                    <select id="exportScaleSelect" aria-label="导出清晰度">
+                      <option value="1">1× 标准</option>
+                      <option value="2" selected>2× 高清</option>
+                      <option value="3">3× 超清</option>
+                    </select>
+                  </label>
+                  <button id="downloadZipBtn" class="primary-button" type="button">
+                    <i data-lucide="download"></i>
+                    下载全部卡片
+                  </button>
+                  <button id="downloadArticleBtn" class="primary-button" type="button" hidden>
+                    <i data-lucide="download"></i>
+                    下载长图
+                  </button>
+                </div>
+              </details>
             </div>
           </div>
         </div>
@@ -446,8 +474,70 @@
             </section>
           </aside>
         </div>
+        <div class="preview-footer">
+          <nav id="pageDock" class="page-dock" aria-label="卡片切换" hidden>
+            <div class="page-dock-heading">
+              <strong>卡片</strong>
+              <span id="pageDockStatus" aria-live="polite">0 / 0</span>
+            </div>
+            <div id="pageDockTrack" class="page-dock-track" role="tablist" aria-label="选择预览卡片"></div>
+          </nav>
+          <div id="previewViewSwitch" class="preview-view-switch" role="group" aria-label="预览展示方式">
+            <button class="active" type="button" data-preview-view="grid" aria-pressed="true" title="同时浏览多张卡片">
+              <i data-lucide="grid-2x2"></i>
+              网格
+            </button>
+            <button type="button" data-preview-view="dock" aria-pressed="false" title="逐张预览，通过底部缩略图切换">
+              <i data-lucide="panels-top-left"></i>
+              逐张
+            </button>
+          </div>
+        </div>
       </section>
     </main>
+
+    <div id="helpModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="helpTitle" aria-describedby="helpDescription">
+      <div class="modal-card help-card">
+        <div class="modal-head">
+          <div>
+            <h3 id="helpTitle">创作帮助</h3>
+            <p id="helpDescription">人负责表达，Agent 负责批量执行；这里仅保留最常用的写法。</p>
+          </div>
+          <button id="helpCloseBtn" class="icon-button ghost" type="button" title="关闭创作帮助" aria-label="关闭创作帮助">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <div class="help-body">
+          <section aria-labelledby="helpFormatTitle">
+            <h4 id="helpFormatTitle">常用格式</h4>
+            <dl class="format-cheatsheet">
+              <div><dt><code># 标题</code></dt><dd>大标题</dd></div>
+              <div><dt><code>## 小标题</code></dt><dd>段落标题</dd></div>
+              <div><dt><code>**重点**</code></dt><dd>加粗</dd></div>
+              <div><dt><code>*补充*</code></dt><dd>斜体</dd></div>
+              <div><dt><code>&gt; 判断</code></dt><dd>引用块</dd></div>
+              <div><dt><code>{{color:#2563eb|文字}}</code></dt><dd>文字颜色</dd></div>
+              <div><dt><code>{{bg:#fff3a3|文字}}</code></dt><dd>文字底色</dd></div>
+              <div><dt><code>[[pagebreak]]</code></dt><dd>从这里新起一张卡片</dd></div>
+              <div><dt><code>[[image:图片ID]]</code></dt><dd>图片所在位置</dd></div>
+            </dl>
+          </section>
+          <section class="agent-help" aria-labelledby="helpAgentTitle">
+            <h4 id="helpAgentTitle">直接对 Codex 说</h4>
+            <p>不需要记命令。Agent 会读取当前项目、按版本安全修改，再把结果同步给云端伙伴。</p>
+            <button class="agent-prompt-example" type="button" data-copy-prompt="给当前项目的第 01、03 节用小黑 style 各配一张图，插在对应标题后，不改正文，并同步云端。">
+              <span>配图</span>
+              <q>给第 01、03 节用小黑 style 配图，插在标题后，不改正文，并同步云端。</q>
+            </button>
+            <button class="agent-prompt-example" type="button" data-copy-prompt="把当前项目整理为 8 张图文卡片，保留原意和图片位置，重点更容易扫读，并同步云端。">
+              <span>排版</span>
+              <q>整理为 8 张图文卡片，保留原意和图片位置，重点更容易扫读。</q>
+            </button>
+            <small>点击示例可复制。云端伙伴有新修改时，系统会保留两个版本，不会静默覆盖。</small>
+          </section>
+        </div>
+      </div>
+    </div>
 
     <div id="aiOptimizeModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="aiOptimizeTitle" aria-describedby="aiOptimizeDescription">
       <div class="modal-card ai-optimize-card">
@@ -504,62 +594,6 @@
           <button id="aiOptimizeApplyBtn" class="primary-button" type="button" disabled hidden>
             <i data-lucide="check"></i>
             <span>应用到正文</span>
-          </button>
-        </div>
-      </div>
-    </div>
-
-    <div id="illustrationModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="illustrationTitle" aria-describedby="illustrationDescription">
-      <div class="modal-card illustration-card">
-        <div class="modal-head">
-          <div>
-            <h3 id="illustrationTitle">一键配图</h3>
-            <p id="illustrationDescription">只分析段落、查找网络图片；确认后仅插入图片，不润色、不删改任何文字。</p>
-          </div>
-          <button id="illustrationCloseBtn" class="icon-button ghost" type="button" title="关闭一键配图" aria-label="关闭一键配图">
-            <i data-lucide="x"></i>
-          </button>
-        </div>
-        <div class="illustration-body">
-          <div id="illustrationStatus" class="ai-optimize-status" role="status" aria-live="polite">设置配图数量后开始查找；当前正文不会被改动。</div>
-          <div class="illustration-controls" aria-label="配图查找设置">
-            <label>
-              配图数量
-              <select id="illustrationCountSelect">
-                <option value="1">1 张</option>
-                <option value="2" selected>2 张</option>
-                <option value="3">3 张</option>
-              </select>
-            </label>
-            <label>
-              图源
-              <select id="illustrationProviderSelect">
-                <option value="auto" selected>自动选择可靠图库</option>
-                <option value="wikimedia">Wikimedia Commons</option>
-                <option value="pexels">Pexels（需服务端 Key）</option>
-              </select>
-            </label>
-            <div class="illustration-safety-note">
-              <i data-lucide="shield-check"></i>
-              <span>点击开始后，只把少量适合配图的正文片段交给本机已配置的 AI 生成通用英文搜索词；图库只收到搜索词。AI 不可用时由本机提取通用主题词，不发送正文原句。</span>
-            </div>
-          </div>
-          <div id="illustrationEmpty" class="illustration-empty">
-            <i data-lucide="image"></i>
-            <strong>尚未查找配图</strong>
-            <span>点击“开始找图”，系统会为适合插图的段落生成搜索词与候选图片。</span>
-          </div>
-          <div id="illustrationResults" class="illustration-results" aria-live="polite"></div>
-        </div>
-        <div class="ai-optimize-actions illustration-actions">
-          <button id="illustrationCancelBtn" class="secondary-button" type="button">关闭（不插入）</button>
-          <button id="illustrationSearchBtn" class="primary-button" type="button">
-            <i data-lucide="search"></i>
-            <span>开始找图</span>
-          </button>
-          <button id="illustrationApplyBtn" class="primary-button" type="button" disabled hidden>
-            <i data-lucide="image-down"></i>
-            <span>插入选中图片</span>
           </button>
         </div>
       </div>

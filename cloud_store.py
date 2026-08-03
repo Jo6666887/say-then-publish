@@ -31,6 +31,8 @@ IMAGE_TOKEN_RE = re.compile(r"\[\[image:([^\]]+)\]\]")
 TOS_ASSET_PREFIX = "tos://"
 TOS_DELETED_PREFIX = "tos-deleted://"
 PROJECT_TOMBSTONE_FIELD = "__writeThenPublishDeletedAt"
+CLOUD_BASE_UPDATED_AT_FIELD = "cloudBaseUpdatedAt"
+LOCAL_CONFLICT_OF_FIELD = "__localConflictOf"
 
 
 def _safe_asset_source(image: dict[str, Any]) -> dict[str, str] | None:
@@ -542,6 +544,9 @@ class CloudStore:
     ) -> tuple[dict, dict]:
         local_project = copy.deepcopy(project)
         cloud_project = copy.deepcopy(project)
+        # This is a local synchronization cursor. It must not become publishable
+        # project data or participate in cloud payload equality.
+        cloud_project.pop(CLOUD_BASE_UPDATED_AT_FIELD, None)
         local_data = local_project.get("data") if isinstance(local_project.get("data"), dict) else {}
         cloud_data = cloud_project.get("data") if isinstance(cloud_project.get("data"), dict) else {}
         local_project["data"] = local_data
@@ -623,6 +628,7 @@ class CloudStore:
             "id": row["project_id"],
             "title": row.get("title") or "未命名项目",
             "updatedAt": int(row.get("updated_at_ms") or 0),
+            CLOUD_BASE_UPDATED_AT_FIELD: int(row.get("updated_at_ms") or 0),
             "data": data,
         }
 
@@ -664,6 +670,7 @@ class CloudStore:
                 "cloudObjectKey",
                 "localAssetId",
                 "localAssetName",
+                CLOUD_BASE_UPDATED_AT_FIELD,
             }
             return {
                 key: cls._logical_project_value(item)
@@ -691,6 +698,39 @@ class CloudStore:
         )
 
     @classmethod
+    def _cloud_base_timestamp(cls, project: dict | None) -> int | None:
+        if not isinstance(project, dict) or CLOUD_BASE_UPDATED_AT_FIELD not in project:
+            return None
+        try:
+            value = int(float(project.get(CLOUD_BASE_UPDATED_AT_FIELD) or 0))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return value if value >= 0 else None
+
+    @classmethod
+    def _conflict_copy(
+        cls,
+        project: dict,
+        *,
+        original_id: str,
+        remote_updated_at: int,
+    ) -> dict:
+        copy_project = copy.deepcopy(project)
+        local_updated_at = cls._project_timestamp(project)
+        suffix = format(max(local_updated_at, remote_updated_at, 1), "x")
+        copy_project["id"] = f"{original_id}_local_conflict_{suffix}"
+        title = str(copy_project.get("title") or "未命名项目")
+        if not title.endswith("（冲突副本）"):
+            copy_project["title"] = f"{title[:32]}（冲突副本）"
+        data = copy_project.get("data") if isinstance(copy_project.get("data"), dict) else {}
+        data[LOCAL_CONFLICT_OF_FIELD] = original_id
+        copy_project["data"] = data
+        # A conflict copy is a new cloud project, not a descendant of the
+        # original project's current cloud revision.
+        copy_project[CLOUD_BASE_UPDATED_AT_FIELD] = 0
+        return copy_project
+
+    @classmethod
     def _merge_stores(cls, local: dict, remote: dict) -> dict:
         remote_projects = {
             project["id"]: project
@@ -703,6 +743,8 @@ class CloudStore:
             if isinstance(project, dict) and isinstance(project.get("id"), str)
         }
         merged: dict[str, dict] = {}
+        conflicts: list[dict[str, Any]] = []
+        active_conflict_id: str | None = None
         for project_id in remote_projects.keys() | local_projects.keys():
             remote_project = remote_projects.get(project_id)
             local_project = local_projects.get(project_id)
@@ -714,14 +756,47 @@ class CloudStore:
                 continue
             remote_timestamp = cls._project_timestamp(remote_project)
             local_timestamp = cls._project_timestamp(local_project)
+            local_base = cls._cloud_base_timestamp(local_project)
+            payload_matches = cls._project_payload(local_project) == cls._project_payload(remote_project)
+
+            if payload_matches:
+                winner = local_project if local_timestamp >= remote_timestamp else remote_project
+                winner[CLOUD_BASE_UPDATED_AT_FIELD] = max(local_timestamp, remote_timestamp)
+                merged[project_id] = winner
+                continue
+
+            local_has_unsynced_changes = local_base is not None and local_timestamp > local_base
+            remote_changed_from_base = local_base is not None and remote_timestamp != local_base
+            if local_has_unsynced_changes and remote_changed_from_base:
+                merged[project_id] = remote_project
+                conflict_copy = cls._conflict_copy(
+                    local_project,
+                    original_id=project_id,
+                    remote_updated_at=remote_timestamp,
+                )
+                merged[conflict_copy["id"]] = conflict_copy
+                conflicts.append(
+                    {
+                        "projectId": project_id,
+                        "conflictProjectId": conflict_copy["id"],
+                        "localUpdatedAt": local_timestamp,
+                        "remoteUpdatedAt": remote_timestamp,
+                    }
+                )
+                if local.get("activeId") == project_id:
+                    active_conflict_id = conflict_copy["id"]
+                continue
+
             if local_timestamp > remote_timestamp:
                 merged[project_id] = local_project
             elif remote_timestamp > local_timestamp:
                 merged[project_id] = remote_project
-            elif cls._project_payload(local_project) == cls._project_payload(remote_project):
-                merged[project_id] = local_project
-            else:
+            elif local_base is None:
+                # Legacy projects do not yet carry a cloud base cursor. Preserve
+                # the previous strict behavior until one successful sync adds it.
                 raise CloudStoreError(f"项目 {project_id} 存在同版本不同内容，请重新保存后再同步")
+            else:
+                merged[project_id] = remote_project
 
         remote_deletions = {item["id"]: item for item in cls._normalize_deletions(remote)}
         local_deletions = {item["id"]: item for item in cls._normalize_deletions(local)}
@@ -754,7 +829,7 @@ class CloudStore:
         ]
         projects = sorted(projects, key=cls._project_timestamp, reverse=True)[:24]
         project_ids = {project["id"] for project in projects}
-        active_id = local.get("activeId") if local.get("activeId") in project_ids else remote.get("activeId")
+        active_id = active_conflict_id if active_conflict_id in project_ids else local.get("activeId") if local.get("activeId") in project_ids else remote.get("activeId")
         if active_id not in project_ids:
             active_id = projects[0]["id"] if projects else None
         return {
@@ -765,6 +840,7 @@ class CloudStore:
                 key=cls._deletion_timestamp,
                 reverse=True,
             ),
+            "conflicts": conflicts,
         }
 
     def fetch_store(self) -> dict:
@@ -844,6 +920,10 @@ class CloudStore:
                         raise CloudStoreError(
                             f"Supabase 未精确确认项目 {expected['project_id']} 的完整版本"
                         )
+                for project in enriched_projects:
+                    project[CLOUD_BASE_UPDATED_AT_FIELD] = int(
+                        float(project.get("updatedAt") or 0)
+                    )
                 active_rows = [
                     row["project_id"]
                     for row in verified_rows.values()
@@ -855,6 +935,7 @@ class CloudStore:
                 "activeId": merged.get("activeId"),
                 "projects": enriched_projects,
                 "deletedProjects": merged.get("deletedProjects") or [],
+                "conflicts": merged.get("conflicts") or [],
             }
 
     def delete_project(self, project_id: str, deleted_at: int, *, active_id: str | None = None) -> int:
