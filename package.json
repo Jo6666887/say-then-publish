@@ -1,12 +1,12 @@
 {
-  "name": "write-then-publish",
+  "name": "say-then-publish",
   "version": "1.0.0",
   "description": "Say Then Publish — local-first, Agent-native workspace: talk to an agent and it turns the conversation into publish-ready social cards (with auto-illustration and optional team sync).",
   "license": "MIT",
   "private": true,
   "repository": {
     "type": "git",
-    "url": "https://github.com/Jo6666887/write-then-publish.git"
+    "url": "https://github.com/Jo6666887/say-then-publish.git"
   },
   "keywords": [
     "local-first",
