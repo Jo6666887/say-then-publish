@@ -43,6 +43,200 @@ def button_tag(element_id):
     return match.group(0)
 
 
+class ProjectDuplicateContractTests(unittest.TestCase):
+    def test_history_duplicate_creates_a_new_revision_and_persists_it(self):
+        history = function_body("updateProjectHistory")
+        duplicate = function_body("duplicateProject")
+
+        self.assertIn('class="history-duplicate"', history)
+        self.assertIn('data-lucide="copy-plus"', history)
+        self.assertIn("duplicateProject(project.id)", history)
+        self.assertIn("JSON.parse(JSON.stringify(source.data))", duplicate)
+        self.assertIn("createProject(copiedData)", duplicate)
+        self.assertIn("flushProjectStoreToIndexedDb()", duplicate)
+        self.assertIn('phase: "saving-local"', duplicate)
+
+    def test_builtin_guides_do_not_offer_duplicate_action(self):
+        history = function_body("updateProjectHistory")
+        duplicate = function_body("duplicateProject")
+
+        self.assertIn("builtIn", history)
+        self.assertIn("history-lock", history)
+        self.assertIn("isBuiltInProjectId(projectId)", duplicate)
+        self.assertIn("内置说明书不可复制", duplicate)
+
+
+class SharedProjectConflictContractTests(unittest.TestCase):
+    def test_shared_revision_keeps_original_id_and_forks_newer_local_cache(self):
+        reconcile = function_body("reconcileLocalProjectsWithShared")
+        conflict = function_body("localConflictProject")
+
+        self.assertIn("normalizedShared", reconcile)
+        self.assertIn("projectRevisionMatches", reconcile)
+        self.assertIn("localConflictProject", reconcile)
+        self.assertIn("冲突备份", conflict)
+        self.assertIn("__localConflictOf", conflict)
+
+    def test_shared_saves_require_protocol_and_server_base_revision(self):
+        start = APP.index("async function saveProjectStoreToSharedServer(")
+        end = APP.index("function imageReferenceSignature", start)
+        save = APP[start:end]
+
+        self.assertIn("SHARED_SAVE_PROTOCOL_HEADER", save)
+        self.assertIn("SHARED_SAVE_PROTOCOL_VERSION", save)
+        self.assertIn("sharedProjectVersions.get", save)
+        self.assertIn('headers["X-WTP-Expected-Project-Updated-At"]', save)
+        self.assertIn("projects: targetProject ? [targetProject] : []", save)
+
+    def test_live_conflict_refreshes_canonical_and_forks_local_work_before_retry(self):
+        save_start = APP.index("async function saveProjectStoreToSharedServer(")
+        save_end = APP.index("function imageReferenceSignature", save_start)
+        save = APP[save_start:save_end]
+        recover = function_body("recoverSharedProjectConflict")
+        flush = function_body("flushProjectStoreToIndexedDb")
+        merge = function_body("mergeProjectWithSharedBase")
+
+        self.assertIn('response.status === 409', save)
+        self.assertIn('payload?.code === "DRAFT_VERSION_CONFLICT"', save)
+        self.assertIn("loadProjectStoreFromSharedServer()", recover)
+        self.assertIn("reconcileLocalProjectsWithShared", recover)
+        self.assertIn("__localConflictOf", recover)
+        self.assertIn("saveProjectStoreToSharedServer(recoveredSnapshot)", recover)
+        self.assertIn("mergeProjectWithSharedBase(base, localActive, sharedActive)", recover)
+        self.assertIn("没有创建重复副本", recover)
+        self.assertIn("draftValuesMatch(normalizedLocal.title, base.title)", merge)
+        self.assertIn("draftValuesMatch(sharedValue, baseValue)", merge)
+        self.assertIn("recoverSharedProjectConflict(snapshot)", flush)
+
+    def test_unchanged_draft_switch_never_creates_a_new_revision_or_shared_write(self):
+        save_state = function_body("saveState")
+        open_project = function_body("openProject")
+        rename = function_body("updateCurrentProjectTitle")
+
+        self.assertIn("stableJsonStringify(current.data) === stableJsonStringify(data)", save_state)
+        self.assertIn("return { changed: false, project: current }", save_state)
+        self.assertNotIn("saveProjectStore()", open_project)
+        self.assertIn("render({ persist: false })", open_project)
+        self.assertIn("restoreCachedProjectPreview(project)", open_project)
+        self.assertIn("scheduleStateSave()", rename)
+        self.assertNotIn("current.title =", rename)
+
+    def test_project_delete_requires_explicit_confirmation_before_any_tombstone(self):
+        remove = function_body("deleteProject")
+
+        self.assertIn("window.confirm", remove)
+        self.assertIn("无法直接找回", remove)
+        self.assertLess(remove.index("window.confirm"), remove.index("markPendingProjectDeletion"))
+        self.assertIn("已取消删除", remove)
+
+
+class PreviewDirectEditingContractTests(unittest.TestCase):
+    def test_preview_text_uses_wrapping_aware_source_tracking(self):
+        focus = function_body("focusEditorRange")
+        scroll = function_body("scrollTextareaToRange")
+
+        self.assertIn("scrollTextareaToRange(start)", focus)
+        self.assertIn('mirror.className = "textarea-scroll-mirror"', scroll)
+        self.assertIn("marker.offsetTop", scroll)
+        self.assertNotIn('split("\\n").length', scroll)
+
+    def test_card_text_opens_a_visual_editor_and_serializes_formatting(self):
+        target = function_body("handlePreviewTextTarget")
+        editor = function_body("openPreviewInlineEditor")
+        finish = function_body("finishPreviewInlineEditor")
+        serialize = function_body("serializePreviewInlineNode")
+
+        self.assertIn("openPreviewInlineEditor", target)
+        self.assertIn('contentEditable = "true"', editor)
+        self.assertIn('data-preview-format="bold"', editor)
+        self.assertIn("applyProgrammaticContent", finish)
+        self.assertIn('value = `**${value}**`', serialize)
+
+    def test_preview_images_link_to_source_and_delete_only_the_reference(self):
+        image_layer = function_body("createImageEditLayer")
+        focus = function_body("handlePreviewImageTarget")
+        remove = function_body("deletePreviewImageReference")
+
+        self.assertIn('className = "preview-image-delete"', image_layer)
+        self.assertIn("handlePreviewImageTarget", image_layer)
+        self.assertIn("focusEditorRange(start, end, true)", focus)
+        self.assertIn("removeContentLineAtRange", remove)
+        self.assertIn("applyProgrammaticContent", remove)
+        self.assertNotIn("delete state.images", remove)
+
+
+class InlineFormattingInteractionContractTests(unittest.TestCase):
+    def test_bold_and_italic_buttons_toggle_existing_wrappers(self):
+        wrap = function_body("wrapSelection")
+
+        self.assertIn('const marker = kind === "bold" ? "**" : "*"', wrap)
+        self.assertIn("selectedHasMarkers", wrap)
+        self.assertIn("selectionIsWrapped", wrap)
+        self.assertIn("setSelectionRange(unwrappedStart", wrap)
+
+    def test_color_tools_can_exit_from_the_same_toolbar_button(self):
+        toggle = function_body("toggleActiveBrushFromTool")
+        bind = function_body("bindEvents")
+
+        self.assertIn("event.preventDefault()", toggle)
+        self.assertIn("disableColorBrush(true)", toggle)
+        self.assertIn("disableBackgroundBrush(true)", toggle)
+        self.assertIn('toggleActiveBrushFromTool(event, "color")', bind)
+        self.assertIn('toggleActiveBrushFromTool(event, "background")', bind)
+
+    def test_both_color_brushes_are_single_use_and_do_not_double_apply(self):
+        color = function_body("applyColorBrushToSelection")
+        background = function_body("applyBackgroundBrushToSelection")
+        bind = function_body("bindEvents")
+
+        self.assertIn("disableColorBrush()", color)
+        self.assertIn("disableBackgroundBrush()", background)
+        self.assertNotIn('els.content.addEventListener("mouseup", applyActiveBrushToSelection)', bind)
+        self.assertIn('document.addEventListener("pointerup", applyActiveBrushToSelection)', bind)
+        self.assertIn("应用一次后自动结束", HTML)
+
+
+class EditorTypingPerformanceContractTests(unittest.TestCase):
+    def test_editor_uses_a_slower_input_specific_preview_scheduler(self):
+        request_editor = function_body("requestEditorRender")
+        idle_render = function_body("runEditorPreviewRenderWhenIdle")
+
+        self.assertIn("EDITOR_PREVIEW_RENDER_DELAY = 520", APP)
+        self.assertIn("EDITOR_STATE_SAVE_DELAY = 900", APP)
+        self.assertIn("scheduleStateSave(EDITOR_STATE_SAVE_DELAY)", request_editor)
+        self.assertIn("prioritizeEditorInput()", request_editor)
+        self.assertIn("debouncedEditorRender()", request_editor)
+        self.assertIn('"requestIdleCallback" in window', idle_render)
+        self.assertIn("EDITOR_PREVIEW_IDLE_TIMEOUT", idle_render)
+
+    def test_ime_composition_never_starts_preview_rendering(self):
+        content_input = function_body("handleContentInput")
+        composition_start = function_body("handleContentCompositionStart")
+        composition_end = function_body("handleContentCompositionEnd")
+        bind = function_body("bindEvents")
+
+        self.assertIn("editorCompositionActive", content_input)
+        self.assertIn("event?.isComposing === true", content_input)
+        composing_branch = content_input[content_input.index("if (composing)") : content_input.index("if (imageReferencesChanged)")]
+        self.assertIn("prioritizeEditorInput()", composing_branch)
+        self.assertNotIn("requestEditorRender()", composing_branch)
+        self.assertIn("editorCompositionActive = true", composition_start)
+        self.assertIn("editorCompositionActive = false", composition_end)
+        self.assertIn("requestEditorRender()", composition_end)
+        self.assertIn('addEventListener("compositionstart", handleContentCompositionStart)', bind)
+        self.assertIn('addEventListener("compositionend", handleContentCompositionEnd)', bind)
+        self.assertIn('addEventListener("input", handleContentInput)', bind)
+
+    def test_debounce_can_cancel_stale_preview_work(self):
+        debounce_body = function_body("debounce")
+        prioritize = function_body("prioritizeEditorInput")
+
+        self.assertIn("debounced.cancel", debounce_body)
+        self.assertIn("renderGeneration += 1", prioritize)
+        self.assertIn("debouncedRender.cancel()", prioritize)
+        self.assertIn("cancelEditorPreviewRender()", prioritize)
+
+
 class AiOptimizeInteractionContractTests(unittest.TestCase):
     def test_modal_starts_unselected_and_requires_explicit_generate(self):
         for element_id in ("aiModeLayout", "aiModePolish"):
@@ -96,6 +290,18 @@ class AiOptimizeInteractionContractTests(unittest.TestCase):
         run = function_body("runAiOptimization")
         self.assertIn("!requestedMode", run)
         self.assertIn("fetch(AI_OPTIMIZE_URL", run)
+
+    def test_layout_mode_rechecks_copy_before_showing_preview(self):
+        signature = function_body("layoutOnlyCopySignature")
+        preserves = function_body("layoutOnlyPreservesCopy")
+        run = function_body("runAiOptimization")
+
+        self.assertIn("color|bg", signature)
+        self.assertIn("layoutOnlyCopySignature(before)", preserves)
+        self.assertIn("layoutOnlyCopySignature(after)", preserves)
+        self.assertIn('nextMode === "layout"', run)
+        self.assertIn("layoutOnlyPreservesCopy(before, payload.optimizedContent)", run)
+        self.assertIn("已阻止进入预览", run)
 
 
 class IllustrationInteractionContractTests(unittest.TestCase):

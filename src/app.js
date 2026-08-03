@@ -26,8 +26,15 @@ const LOCAL_ASSET_DIRECTORY_KEY = "assetLibraryDirectoryHandle";
 const LOCAL_STATE_SAVE_DELAY = 450;
 const LOCAL_STATE_SAVE_MAX_WAIT = 5000;
 const LOCAL_DATABASE_SAVE_DELAY = 1200;
+const EDITOR_STATE_SAVE_DELAY = 900;
+const CONTROL_PREVIEW_RENDER_DELAY = 180;
+const EDITOR_PREVIEW_RENDER_DELAY = 520;
+const EDITOR_PREVIEW_IDLE_TIMEOUT = 900;
+const AUTO_SAVE_EXPLANATION = "停笔约 2 秒写入共享库，约 3–5 秒确认云端";
 const SHARED_PROJECT_STORE_URL = "/api/project-store";
 const SHARED_PROJECT_TEXT_URL = "/api/project-store/current-text";
+const SHARED_SAVE_PROTOCOL_HEADER = "X-WTP-Save-Protocol";
+const SHARED_SAVE_PROTOCOL_VERSION = "2";
 const CLOUD_STATUS_URL = "/api/cloud-status";
 const CLOUD_SYNC_URL = "/api/cloud-sync";
 const AI_OPTIMIZE_STATUS_URL = "/api/ai/status";
@@ -38,6 +45,7 @@ const ILLUSTRATION_IMPORT_URL = "/api/illustrations/import";
 const ILLUSTRATION_MAX_TOTAL_BYTES = 12 * 1024 * 1024;
 const ASSET_LIBRARY_URL = "/api/assets";
 const MAX_DECODED_IMAGE_CACHE = 64;
+const MAX_PROJECT_PREVIEW_CACHE = 2;
 const MAX_PROJECTS = 24;
 const BUILT_IN_PROJECT_PREFIX = "guide_";
 const GUIDE_CARDS_PROJECT_ID = `${BUILT_IN_PROJECT_PREFIX}cards`;
@@ -48,6 +56,7 @@ const PANEL_LIMITS = {
 };
 
 let previewEditorPin = null;
+let previewInlineEditor = null;
 let lastEditorImageReferenceSignature = "";
 let sharedTextSaveTimer = 0;
 let persistenceMode = "detecting";
@@ -85,6 +94,7 @@ const saveCheckpoint = {
   cloudSavedAt: null,
   cloudUpdatedAt: 0,
   destination: "正在确认保存位置",
+  confirmation: "auto",
   error: "",
 };
 
@@ -760,10 +770,16 @@ let pendingProjectDeletionsCache = null;
 let legacyStateLocalStorageUnavailable = false;
 let projectStoreLocalStorageUnavailable = false;
 let sharedProjectStoreAvailable = null;
+const sharedProjectVersions = new Map();
+const sharedProjectIds = new Set();
+const sharedProjectBases = new Map();
 let localStateSaveTimer = 0;
 let localStateSaveMaxTimer = 0;
 let renderGeneration = 0;
+let editorCompositionActive = false;
+let editorRenderIdleCallback = 0;
 const decodedImageCache = new Map();
+const projectPreviewCache = new Map();
 let pendingProjectImport = null;
 
 const textHistory = {
@@ -1062,6 +1078,7 @@ function readForm() {
 
 function applyForm(data) {
   manualSaveGeneration += 1;
+  disableActiveBrushes();
   els.content.value = data.content ?? defaultText;
   if (els.projectPublishStatus) {
     els.projectPublishStatus.value = data.published === true ? "published" : "unpublished";
@@ -1684,11 +1701,19 @@ function startPanelResize(event) {
 }
 
 function debounce(fn, wait = 140) {
-  let id;
-  return (...args) => {
+  let id = 0;
+  const debounced = (...args) => {
     window.clearTimeout(id);
-    id = window.setTimeout(() => fn(...args), wait);
+    id = window.setTimeout(() => {
+      id = 0;
+      fn(...args);
+    }, wait);
   };
+  debounced.cancel = () => {
+    window.clearTimeout(id);
+    id = 0;
+  };
+  return debounced;
 }
 
 function nextProjectTimestamp(project) {
@@ -1719,10 +1744,10 @@ function renderSaveCheckpoint() {
     meta = "这里不会覆盖你的草稿；新建项目后会自动保存";
   } else if (phase === "dirty") {
     label = "有未保存修改";
-    meta = `${version} · ${lastConfirmedCheckpointText()}`;
+    meta = `${AUTO_SAVE_EXPLANATION} · ${lastConfirmedCheckpointText()}`;
   } else if (phase === "saving-local") {
     label = "正在保存当前版本…";
-    meta = `${version} · 浏览器副本与本机文件`;
+    meta = `${version} · 正在写入浏览器副本与共享库`;
   } else if (phase === "saved-local") {
     label = "当前版本已保存到本机";
     meta = `${version} · ${formatSavedTime(saveCheckpoint.serverSavedAt || saveCheckpoint.localSavedAt)} · ${saveCheckpoint.destination}`;
@@ -1730,8 +1755,8 @@ function renderSaveCheckpoint() {
     label = "本机已保存，正在同步云端…";
     meta = `${version} · ${saveCheckpoint.destination}`;
   } else if (phase === "saved-cloud") {
-    label = "当前版本已保存到云端";
-    meta = `${version} · 确认于 ${formatSavedTime(saveCheckpoint.cloudSavedAt)} · ${saveCheckpoint.destination}`;
+    label = saveCheckpoint.confirmation === "manual" ? "已手动确认云端最新版" : "当前版本已保存到云端";
+    meta = `${version} · 确认于 ${formatSavedTime(saveCheckpoint.cloudSavedAt)} · ${AUTO_SAVE_EXPLANATION}`;
   } else if (phase === "degraded") {
     label = "当前版本已保存到本机";
     meta = `${version} · 云端不可用 · ${saveCheckpoint.destination}${saveCheckpoint.error ? ` · ${saveCheckpoint.error}` : ""}`;
@@ -1793,6 +1818,7 @@ function markSaveDirty() {
     phase: "dirty",
     projectId: state.currentProjectId,
     targetUpdatedAt: Number(current?.updatedAt || saveCheckpoint.targetUpdatedAt || Date.now()),
+    confirmation: "auto",
     error: "",
   });
 }
@@ -1805,13 +1831,13 @@ function flushStateSave() {
   saveState();
 }
 
-function scheduleStateSave() {
+function scheduleStateSave(delay = LOCAL_STATE_SAVE_DELAY) {
   // 首屏必须先让 IndexedDB 与 LocalStorage 完成合并。否则旧的 LocalStorage
   // 草稿会被首屏渲染误标成“刚刚更新”，反过来覆盖数据库里的新图片。
   if (!state.localDatabaseHydrated) return;
   markSaveDirty();
   window.clearTimeout(localStateSaveTimer);
-  localStateSaveTimer = window.setTimeout(flushStateSave, LOCAL_STATE_SAVE_DELAY);
+  localStateSaveTimer = window.setTimeout(flushStateSave, delay);
   if (!localStateSaveMaxTimer) {
     localStateSaveMaxTimer = window.setTimeout(flushStateSave, LOCAL_STATE_SAVE_MAX_WAIT);
   }
@@ -1831,14 +1857,31 @@ function saveState() {
     }
 
     let current = state.projects.find((project) => project.id === state.currentProjectId);
+    const created = !current;
+    if (typeof current?.data?.__localConflictOf === "string") {
+      data.__localConflictOf = current.data.__localConflictOf;
+    }
     if (!current) {
       current = createProject(data);
       state.currentProjectId = current.id;
       state.projects.unshift(current);
     }
+    const title = normalizeProjectTitle(els.projectTitle?.value) || current.title || projectTitleFromData(data);
+    let unchanged = !created && current.title === title;
+    if (unchanged) {
+      try {
+        unchanged = stableJsonStringify(current.data) === stableJsonStringify(data);
+      } catch {
+        unchanged = false;
+      }
+    }
+    if (unchanged) {
+      updateProjectHistory();
+      return { changed: false, project: current };
+    }
     const now = nextProjectTimestamp(current);
     current.data = data;
-    current.title = normalizeProjectTitle(els.projectTitle?.value) || current.title || projectTitleFromData(data);
+    current.title = title;
     current.updatedAt = now;
     setSaveCheckpoint({
       phase: "saving-local",
@@ -1865,10 +1908,12 @@ function saveState() {
     if (!legacyStateSaved || !projectStoreSaved) {
       els.status.textContent = "内容较大，已改用本地数据库保存；建议再导出一份备份";
     }
+    return { changed: true, project: current };
   } catch (error) {
     console.error(error);
     setSaveCheckpoint({ phase: "error", error: "请点击“立即保存”重试" });
     els.status.textContent = "本次内容未能自动保存，请立即导出草稿备份";
+    return { changed: false, project: null, error };
   }
 }
 
@@ -2095,6 +2140,7 @@ async function loadProjectStoreFromSharedServer() {
     if (!response.ok) throw new Error(`共享草稿库读取失败（${response.status}）`);
     const payload = await response.json();
     if (!payload || !Array.isArray(payload.projects)) throw new Error("共享草稿库格式无效");
+    rememberSharedProjectVersions(payload);
     sharedProjectStoreAvailable = true;
     return payload;
   } catch (error) {
@@ -2109,20 +2155,48 @@ async function saveProjectStoreToSharedServer(
   { expectedProjectId = "", expectedUpdatedAt = 0 } = {},
 ) {
   try {
-    const headers = { "Content-Type": "application/json" };
+    const headers = {
+      "Content-Type": "application/json",
+      [SHARED_SAVE_PROTOCOL_HEADER]: SHARED_SAVE_PROTOCOL_VERSION,
+    };
+    const targetProject = snapshot.projects.find((project) => project.id === snapshot.activeId);
+    const outboundSnapshot = {
+      ...snapshot,
+      // A browser only owns the draft it is actively editing. Sending cached
+      // background projects would let an unrelated stale cache hitchhike on a
+      // valid active-project save and overwrite a teammate's newer draft.
+      projects: targetProject ? [targetProject] : [],
+    };
     if (expectedProjectId && Number(expectedUpdatedAt) > 0) {
       headers["X-WTP-Expected-Project-Id"] = expectedProjectId;
       headers["X-WTP-Expected-Project-Updated-At"] = String(Number(expectedUpdatedAt));
+    } else if (targetProject && sharedProjectIds.has(targetProject.id)) {
+      const sharedUpdatedAt = Number(sharedProjectVersions.get(targetProject.id) || 0);
+      if (!sharedUpdatedAt) throw new Error("尚未取得服务器基础版本，已停止覆盖保存");
+      headers["X-WTP-Expected-Project-Id"] = targetProject.id;
+      headers["X-WTP-Expected-Project-Updated-At"] = String(sharedUpdatedAt);
     }
     const response = await fetch(SHARED_PROJECT_STORE_URL, {
       method: "PUT",
       headers,
-      body: JSON.stringify(snapshot),
+      body: JSON.stringify(outboundSnapshot),
     });
-    if (!response.ok) throw new Error(`共享草稿库写入失败（${response.status}）`);
-    const payload = await response.json();
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (response.status === 409 && payload?.code === "DRAFT_VERSION_CONFLICT") {
+        sharedProjectStoreAvailable = true;
+        return {
+          saved: false,
+          conflict: true,
+          code: payload.code,
+          current: payload.current || null,
+          confirmedUpdatedAt: 0,
+          error: new Error(payload.error || "检测到团队成员保存的新版本"),
+        };
+      }
+      throw new Error(payload?.error || `共享草稿库写入失败（${response.status}）`);
+    }
     const responseStore = payload?.store && Array.isArray(payload.store.projects) ? payload.store : payload;
-    const targetProject = snapshot.projects.find((project) => project.id === snapshot.activeId);
     const confirmedProject = responseStore?.projects?.find((project) => project.id === snapshot.activeId);
     const targetUpdatedAt = Number(targetProject?.updatedAt || 0);
     const confirmedUpdatedAt = Number(payload?.saveMeta?.savedUpdatedAt || payload?.save?.updatedAt || confirmedProject?.updatedAt || 0);
@@ -2135,9 +2209,11 @@ async function saveProjectStoreToSharedServer(
     if (payload?.saveMeta?.saved !== true || payload?.saveMeta?.snapshotSaved !== true || (targetProject && !activeRevisionConfirmed)) {
       throw new Error("本机服务没有精确确认当前草稿版本");
     }
+    rememberSharedProjectVersions(responseStore);
     sharedProjectStoreAvailable = true;
     return {
       saved: true,
+      conflict: false,
       confirmedUpdatedAt,
       responseStore,
       deletedProjects: payload.saveMeta.deletedProjects || [],
@@ -2145,7 +2221,7 @@ async function saveProjectStoreToSharedServer(
   } catch (error) {
     sharedProjectStoreAvailable = false;
     console.warn("共享草稿库写入失败，已保留浏览器本地副本", error);
-    return { saved: false, confirmedUpdatedAt: 0, error };
+    return { saved: false, conflict: false, confirmedUpdatedAt: 0, error };
   }
 }
 
@@ -2174,9 +2250,21 @@ async function saveCurrentProjectTextToSharedServer({ keepalive = false } = {}) 
   });
 
   try {
+    const sharedUpdatedAt = Number(sharedProjectVersions.get(current.id) || 0);
+    if (sharedProjectIds.has(current.id) && !sharedUpdatedAt) {
+      throw new Error("尚未取得服务器基础版本，已停止覆盖保存");
+    }
+    const headers = {
+      "Content-Type": "application/json",
+      [SHARED_SAVE_PROTOCOL_HEADER]: SHARED_SAVE_PROTOCOL_VERSION,
+    };
+    if (sharedUpdatedAt) {
+      headers["X-WTP-Expected-Project-Id"] = current.id;
+      headers["X-WTP-Expected-Project-Updated-At"] = String(sharedUpdatedAt);
+    }
     const response = await fetch(SHARED_PROJECT_TEXT_URL, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ id: current.id, title, content, updatedAt }),
       keepalive,
     });
@@ -2190,6 +2278,8 @@ async function saveCurrentProjectTextToSharedServer({ keepalive = false } = {}) 
       throw new Error("本机服务没有精确确认当前正文版本");
     }
     sharedProjectStoreAvailable = true;
+    sharedProjectIds.add(current.id);
+    sharedProjectVersions.set(current.id, updatedAt);
     updateProjectHistory();
     const stillCurrent = state.currentProjectId === current.id
       && Number(current.updatedAt) === updatedAt
@@ -2220,6 +2310,103 @@ function scheduleCurrentProjectTextSave() {
   sharedTextSaveTimer = 0;
 }
 
+async function recoverSharedProjectConflict(snapshot) {
+  const localActive = snapshot?.projects?.find((project) => project.id === snapshot.activeId);
+  if (!localActive) return null;
+  const base = sharedProjectBases.get(localActive.id) || null;
+  const shared = await loadProjectStoreFromSharedServer();
+  if (!shared?.projects) return null;
+  const liveProject = state.projects.find((project) => project.id === localActive.id);
+  if (
+    state.currentProjectId !== localActive.id
+    || Number(liveProject?.updatedAt || 0) !== Number(localActive.updatedAt || 0)
+    || els.content.value !== localActive.data?.content
+  ) {
+    return null;
+  }
+
+  const sharedActive = shared.projects.find((project) => project.id === localActive.id);
+  const rebasedProject = mergeProjectWithSharedBase(base, localActive, sharedActive);
+  if (rebasedProject) {
+    const reconciledOthers = reconcileLocalProjectsWithShared(
+      snapshot.projects.filter((project) => project.id !== localActive.id),
+      shared.projects.filter((project) => project.id !== localActive.id),
+    );
+    const resolved = resolveProjectDeletionWinners(
+      [rebasedProject, ...reconciledOthers],
+      mergeProjectDeletions(snapshot.deletedProjects, shared.deletedProjects),
+    );
+    state.projects = resolved.projects;
+    state.deletedProjects = resolved.deletedProjects;
+    state.currentProjectId = rebasedProject.id;
+    rememberActiveProject(rebasedProject.id);
+    if (!draftValuesMatch(localActive.data, rebasedProject.data)) {
+      const generation = manualSaveGeneration;
+      applyForm(rebasedProject.data);
+      manualSaveGeneration = generation;
+    }
+    if (els.projectTitle) els.projectTitle.value = rebasedProject.title;
+    updateProjectHistory();
+    saveProjectStore({ scheduleDatabase: false });
+    const recoveredSnapshot = projectStoreSnapshot();
+    let localSaved = false;
+    try {
+      localSaved = await saveProjectStoreToIndexedDb(recoveredSnapshot);
+    } catch (error) {
+      console.warn("合并后的草稿写入 IndexedDB 失败", error);
+    }
+    const sharedResult = await saveProjectStoreToSharedServer(recoveredSnapshot);
+    if (!sharedResult.saved) return null;
+    return {
+      snapshot: recoveredSnapshot,
+      localSaved,
+      sharedResult,
+      rebasedProject,
+      notice: "已合并团队最新状态并保存，没有创建重复副本",
+    };
+  }
+
+  const reconciledProjects = reconcileLocalProjectsWithShared(snapshot.projects, shared.projects);
+  const resolved = resolveProjectDeletionWinners(
+    reconciledProjects,
+    mergeProjectDeletions(snapshot.deletedProjects, shared.deletedProjects),
+  );
+  const conflictRoot = typeof localActive.data?.__localConflictOf === "string"
+    ? localActive.data.__localConflictOf
+    : localActive.id;
+  const existingIds = new Set(snapshot.projects.map((project) => project.id));
+  const conflictCopy = resolved.projects
+    .filter((project) => project?.data?.__localConflictOf === conflictRoot && !existingIds.has(project.id))
+    .sort((first, second) => Number(second.updatedAt || 0) - Number(first.updatedAt || 0))[0];
+  if (!conflictCopy) return null;
+
+  state.projects = resolved.projects;
+  state.deletedProjects = resolved.deletedProjects;
+  state.currentProjectId = conflictCopy.id;
+  rememberActiveProject(conflictCopy.id);
+  if (els.projectTitle) els.projectTitle.value = conflictCopy.title;
+  projectPreviewCache.delete(localActive.id);
+  updateProjectHistory();
+  saveProjectStore({ scheduleDatabase: false });
+
+  const recoveredSnapshot = projectStoreSnapshot();
+  let localSaved = false;
+  try {
+    localSaved = await saveProjectStoreToIndexedDb(recoveredSnapshot);
+  } catch (error) {
+    console.warn("冲突副本写入 IndexedDB 失败", error);
+  }
+  const sharedResult = await saveProjectStoreToSharedServer(recoveredSnapshot);
+  if (!sharedResult.saved) return null;
+  return {
+    snapshot: recoveredSnapshot,
+    localSaved,
+    sharedResult,
+    conflictCopy,
+    notice: `检测到同一字段存在并发修改；你的内容已安全另存为「${conflictCopy.title}」`,
+  };
+}
+
 async function flushProjectStoreToIndexedDb() {
   if (!state.localDatabaseHydrated) return { localSaved: false, sharedSaved: false, projectUpdatedAt: 0 };
   window.clearTimeout(localDatabaseSaveTimer);
@@ -2227,12 +2414,14 @@ async function flushProjectStoreToIndexedDb() {
   const queuedSave = localDatabaseSaveChain
     .catch(() => false)
     .then(async () => {
-      const snapshot = projectStoreSnapshot();
-      const targetProject = snapshot.projects.find((project) => project.id === snapshot.activeId);
-      const projectId = targetProject?.id || snapshot.activeId;
-      const projectUpdatedAt = Number(targetProject?.updatedAt || 0);
+      let snapshot = projectStoreSnapshot();
+      let targetProject = snapshot.projects.find((project) => project.id === snapshot.activeId);
+      let projectId = targetProject?.id || snapshot.activeId;
+      let projectUpdatedAt = Number(targetProject?.updatedAt || 0);
       let localSaved = false;
       let sharedResult = { saved: false, confirmedUpdatedAt: 0 };
+      let conflictRecovered = false;
+      let conflictNotice = "";
       try {
         // 在真正轮到本次事务时读取最新快照，避免旧的大图事务晚完成后覆盖新图。
         localSaved = await saveProjectStoreToIndexedDb(snapshot);
@@ -2240,6 +2429,19 @@ async function flushProjectStoreToIndexedDb() {
         console.warn("IndexedDB 草稿写入失败", error);
       }
       sharedResult = await saveProjectStoreToSharedServer(snapshot);
+      if (sharedResult.conflict) {
+        const recovery = await recoverSharedProjectConflict(snapshot);
+        if (recovery) {
+          snapshot = recovery.snapshot;
+          targetProject = snapshot.projects.find((project) => project.id === snapshot.activeId);
+          projectId = targetProject?.id || snapshot.activeId;
+          projectUpdatedAt = Number(targetProject?.updatedAt || 0);
+          localSaved = localSaved || recovery.localSaved;
+          sharedResult = recovery.sharedResult;
+          conflictRecovered = true;
+          conflictNotice = recovery.notice;
+        }
+      }
       const result = {
         localSaved,
         sharedSaved: sharedResult.saved === true,
@@ -2247,6 +2449,9 @@ async function flushProjectStoreToIndexedDb() {
         projectId,
         projectUpdatedAt,
         confirmedUpdatedAt: Number(sharedResult.confirmedUpdatedAt || 0),
+        conflict: sharedResult.conflict === true,
+        conflictRecovered,
+        conflictNotice,
       };
 
       const current = state.projects.find((project) => project.id === projectId);
@@ -2266,6 +2471,7 @@ async function flushProjectStoreToIndexedDb() {
           error: "",
         });
         if (persistenceMode === "cloud") void confirmCloudCheckpoint(projectId, projectUpdatedAt);
+        if (conflictNotice) els.status.textContent = conflictNotice;
       } else if (stillCurrent && localSaved) {
         setSaveCheckpoint({
           phase: "degraded",
@@ -2273,7 +2479,9 @@ async function flushProjectStoreToIndexedDb() {
           targetUpdatedAt: projectUpdatedAt,
           localSavedAt: new Date().toISOString(),
           destination: "浏览器本地数据库",
-          error: "本机项目服务暂未确认，刷新前请勿关闭页面",
+          error: result.conflict
+            ? "检测到团队成员的新版本，旧缓存未覆盖云端；请重新打开该稿或另存副本"
+            : "本机项目服务暂未确认，刷新前请勿关闭页面",
         });
       } else if (stillCurrent && !localSaved && !result.sharedSaved) {
         setSaveCheckpoint({ phase: "error", error: "浏览器数据库与本机项目文件均未确认写入" });
@@ -2501,6 +2709,153 @@ function projectRevisionMatches(first, second) {
   }
 }
 
+function comparableDraftValue(value) {
+  if (Array.isArray(value)) return value.map(comparableDraftValue);
+  if (!value || typeof value !== "object") return value;
+  const cloudAssetId = typeof value.cloudAssetId === "string" ? value.cloudAssetId : "";
+  const ignored = new Set(["cloudAssetId", "cloudObjectKey", "localAssetId", "localAssetName"]);
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !ignored.has(key))
+      .map(([key, item]) => [
+        key,
+        key === "src" && cloudAssetId ? `cloud-asset:${cloudAssetId}` : comparableDraftValue(item),
+      ]),
+  );
+}
+
+function draftValuesMatch(first, second) {
+  if (first === second) return true;
+  try {
+    return stableJsonStringify(comparableDraftValue(first))
+      === stableJsonStringify(comparableDraftValue(second));
+  } catch {
+    return false;
+  }
+}
+
+function sharedProjectBase(project) {
+  const normalized = normalizeProject(project);
+  if (!normalized) return null;
+  return {
+    id: normalized.id,
+    title: normalized.title,
+    updatedAt: Number(project.updatedAt || normalized.updatedAt || 0),
+    data: normalized.data,
+  };
+}
+
+function mergeProjectWithSharedBase(base, localProject, sharedProject) {
+  if (!base || !localProject || !sharedProject || localProject.id !== sharedProject.id || base.id !== localProject.id) {
+    return null;
+  }
+  const normalizedLocal = sharedProjectBase(localProject);
+  const normalizedShared = sharedProjectBase(sharedProject);
+  if (!normalizedLocal || !normalizedShared) return null;
+
+  let title;
+  if (draftValuesMatch(normalizedLocal.title, base.title)) title = normalizedShared.title;
+  else if (draftValuesMatch(normalizedShared.title, base.title)) title = normalizedLocal.title;
+  else if (draftValuesMatch(normalizedLocal.title, normalizedShared.title)) title = normalizedLocal.title;
+  else return null;
+
+  const mergedData = {};
+  const keys = new Set([
+    ...Object.keys(base.data || {}),
+    ...Object.keys(normalizedLocal.data || {}),
+    ...Object.keys(normalizedShared.data || {}),
+  ]);
+  for (const key of keys) {
+    const baseValue = base.data?.[key];
+    const localValue = normalizedLocal.data?.[key];
+    const sharedValue = normalizedShared.data?.[key];
+    if (draftValuesMatch(localValue, baseValue)) mergedData[key] = sharedValue;
+    else if (draftValuesMatch(sharedValue, baseValue)) mergedData[key] = localValue;
+    else if (draftValuesMatch(localValue, sharedValue)) mergedData[key] = localValue;
+    else return null;
+  }
+  return {
+    ...localProject,
+    title,
+    updatedAt: Math.max(
+      Date.now(),
+      Number(localProject.updatedAt || 0) + 1,
+      Number(sharedProject.updatedAt || 0) + 1,
+    ),
+    data: mergedData,
+  };
+}
+
+function rememberSharedProjectVersions(store) {
+  if (!store || !Array.isArray(store.projects)) return;
+  sharedProjectIds.clear();
+  sharedProjectVersions.clear();
+  sharedProjectBases.clear();
+  store.projects.forEach((project) => {
+    if (!project?.id) return;
+    sharedProjectIds.add(project.id);
+    const updatedAt = Number(project.updatedAt || 0);
+    if (updatedAt > 0) sharedProjectVersions.set(project.id, updatedAt);
+    const base = sharedProjectBase(project);
+    if (base) sharedProjectBases.set(project.id, base);
+  });
+}
+
+function localConflictProject(project, occupiedIds) {
+  const suffix = Number(project.updatedAt || 0).toString(36);
+  const conflictRoot = typeof project.data?.__localConflictOf === "string"
+    ? project.data.__localConflictOf
+    : project.id;
+  const baseId = `${conflictRoot}_local_conflict_${suffix}`;
+  let id = baseId;
+  let index = 2;
+  while (occupiedIds.has(id)) {
+    id = `${baseId}_${index}`;
+    index += 1;
+  }
+  occupiedIds.add(id);
+  const baseTitle = normalizeConflictDraftTitle(project.title || projectTitleFromData(project.data))
+    .replace(/ · 冲突备份$/, "");
+  const title = `${baseTitle.slice(0, Math.max(1, 40 - " · 冲突备份".length))} · 冲突备份`;
+  return {
+    ...project,
+    id,
+    title: title.slice(0, 40),
+    updatedAt: nextProjectTimestamp(project),
+    data: { ...project.data, __localConflictOf: conflictRoot },
+  };
+}
+
+function reconcileLocalProjectsWithShared(localProjects, sharedProjects) {
+  const normalizedLocal = mergeProjectLists([], localProjects);
+  const normalizedShared = mergeProjectLists([], sharedProjects, { preferIncomingOnEqual: true });
+  if (!normalizedShared.length) return normalizedLocal;
+
+  const sharedById = new Map(normalizedShared.map((project) => [project.id, project]));
+  const occupiedIds = new Set([
+    ...normalizedLocal.map((project) => project.id),
+    ...normalizedShared.map((project) => project.id),
+  ]);
+  const localOnly = [];
+  const conflicts = [];
+  for (const localProject of normalizedLocal) {
+    const sharedProject = sharedById.get(localProject.id);
+    if (!sharedProject) {
+      localOnly.push(localProject);
+      continue;
+    }
+    if (
+      !projectRevisionMatches(localProject, sharedProject)
+      && Number(localProject.updatedAt || 0) > Number(sharedProject.updatedAt || 0)
+    ) {
+      conflicts.push(localConflictProject(localProject, occupiedIds));
+    }
+  }
+  return [...normalizedShared, ...conflicts, ...localOnly]
+    .sort((first, second) => Number(second.updatedAt || 0) - Number(first.updatedAt || 0))
+    .slice(0, MAX_PROJECTS);
+}
+
 function restoreImportedProjects(existingProjects, incomingProjects, deletedProjects = []) {
   const normalizedIncoming = (incomingProjects || []).map(normalizeProject).filter(Boolean);
   const importedIds = new Set(normalizedIncoming.map((project) => project.id));
@@ -2550,10 +2905,9 @@ async function hydrateProjectStoreFromIndexedDb() {
     const sharedProjects = shared && Array.isArray(shared.projects) ? shared.projects : [];
     const projectsBeforeHydration = state.projects;
     const activeBeforeHydration = projectsBeforeHydration.find((project) => project.id === state.currentProjectId);
-    const mergedCandidates = mergeProjectLists(
+    const mergedCandidates = reconcileLocalProjectsWithShared(
       mergeProjectLists(state.projects, storedProjects),
       sharedProjects,
-      { preferIncomingOnEqual: true },
     );
     const localDeletionIntents = promoteLocalDeletionIntents(
       mergeProjectDeletions(
@@ -2615,7 +2969,10 @@ async function hydrateProjectStoreFromIndexedDb() {
       updateProjectHistory();
     }
     state.localDatabaseHydrated = true;
-    saveProjectStore();
+    saveProjectStore({ scheduleDatabase: false });
+    await saveProjectStoreToIndexedDb(projectStoreSnapshot()).catch((error) => {
+      console.warn("合并后的共享草稿写入 IndexedDB 失败", error);
+    });
     const sharedDeletionById = new Map(sharedDeletions.map((deletion) => [deletion.id, deletion]));
     const pendingDeletionIntents = localDeletionIntents.filter((deletion) => {
       const confirmed = sharedDeletionById.get(deletion.id);
@@ -2698,14 +3055,14 @@ function normalizeProject(project) {
     : sourceUpdatedAt;
   return {
     id: project.id || `project_${updatedAt.toString(36)}`,
-    title: normalizeProjectTitle(project.title) || projectTitleFromData(data),
+    title: normalizeConflictDraftTitle(project.title) || projectTitleFromData(data),
     updatedAt,
     cloudBaseUpdatedAt,
     data,
   };
 }
 
-function saveProjectStore() {
+function saveProjectStore({ scheduleDatabase = true } = {}) {
   const snapshot = projectStoreSnapshot();
   rememberActiveProject(snapshot.activeId);
   let localStorageSaved = !projectStoreLocalStorageUnavailable;
@@ -2718,7 +3075,7 @@ function saveProjectStore() {
       console.warn("LocalStorage 草稿写入失败，后续改用 IndexedDB", error);
     }
   }
-  if (state.localDatabaseHydrated) {
+  if (state.localDatabaseHydrated && scheduleDatabase) {
     scheduleProjectStoreToIndexedDb();
   }
   return localStorageSaved;
@@ -2779,8 +3136,8 @@ function updatePersistenceControls(status = {}) {
   }
   if (els.historyNote) {
     els.historyNote.textContent = cloudConnected
-      ? "自动保存到云端，点击恢复"
-      : "自动保存到本机，点击恢复";
+      ? "云端最新版优先 · 停笔约 3–5 秒同步"
+      : "自动保存到本机 · 点击稿件恢复";
   }
   renderSaveCheckpoint();
   if (window.lucide) window.lucide.createIcons();
@@ -2855,6 +3212,7 @@ async function confirmCloudCheckpoint(projectId, updatedAt, { attempts = 7 } = {
         cloudUpdatedAt: cloudCheckpointIdentity(status).updatedAt,
         cloudSavedAt: status.lastSuccessAt || new Date().toISOString(),
         destination: "Supabase + 私有 TOS",
+        confirmation: "auto",
         error: "",
       });
       return true;
@@ -2996,7 +3354,13 @@ async function saveProjectNow() {
     };
     if (!manualSaveTargetMatches(generation, target)) return;
     if (!persisted.localSaved && !persisted.sharedSaved) throw new Error("浏览器数据库与本机项目文件均未确认保存");
-    if (!persisted.sharedSaved) throw new Error("本机项目文件尚未确认当前版本，暂不执行云同步");
+    if (!persisted.sharedSaved) {
+      throw new Error(
+        persisted.conflict
+          ? "检测到团队成员保存的新版本；旧缓存未覆盖云端，请重新打开该稿后再保存"
+          : "共享草稿库尚未确认当前版本，暂不执行云同步",
+      );
+    }
 
     els.status.textContent = "已保存本机副本，正在同步云端…";
     setSaveCheckpoint({
@@ -3024,6 +3388,7 @@ async function saveProjectNow() {
       cloudUpdatedAt: cloudCheckpointIdentity(status).updatedAt,
       cloudSavedAt: status.lastSuccessAt || new Date().toISOString(),
       destination: "Supabase + 私有 TOS",
+      confirmation: "manual",
       error: "",
     });
     els.status.textContent = `已保存到云端 · ${formatSavedTime(status.lastSuccessAt)}`;
@@ -3245,15 +3610,33 @@ function normalizeProjectTitle(value) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, 40);
 }
 
+function normalizeConflictDraftTitle(value) {
+  const title = normalizeProjectTitle(value) || "未命名图文";
+  const suffixPattern = /(?: · (?:本地未同步副本|冲突备份))+$/;
+  if (!suffixPattern.test(title)) return title;
+  const suffix = " · 冲突备份";
+  const base = title.replace(suffixPattern, "").trim() || "未命名图文";
+  return `${base.slice(0, Math.max(1, 40 - suffix.length))}${suffix}`;
+}
+
+function duplicateProjectTitle(title) {
+  const existingTitles = new Set(state.projects.map((project) => project.title));
+  const base = (normalizeProjectTitle(title) || "未命名图文")
+    .replace(/ · 副本(?: \d+)?$/, "");
+  let copyNumber = 1;
+  while (true) {
+    const suffix = copyNumber === 1 ? " · 副本" : ` · 副本 ${copyNumber}`;
+    const candidate = `${base.slice(0, Math.max(1, 40 - suffix.length))}${suffix}`;
+    if (!existingTitles.has(candidate)) return candidate;
+    copyNumber += 1;
+  }
+}
+
 function updateCurrentProjectTitle() {
   if (isBuiltInProjectId(state.currentProjectId)) return;
-  const current = state.projects.find((project) => project.id === state.currentProjectId);
-  if (!current) {
-    scheduleStateSave();
-    return;
-  }
-  current.title = normalizeProjectTitle(els.projectTitle?.value) || projectTitleFromData(current.data);
-  updateProjectHistory();
+  // Keep the persisted project untouched until saveState creates a real
+  // revision. Mutating it here makes saveState think the new title is already
+  // saved, so switching projects restores the old server title.
   scheduleStateSave();
 }
 
@@ -3310,12 +3693,21 @@ function updateProjectHistory() {
       ${
         builtIn
           ? '<span class="history-lock" title="内置说明书不可修改"><i data-lucide="lock"></i></span>'
-          : `<button type="button" class="history-delete" title="删除历史记录" aria-label="删除 ${escapeHtml(project.title || "未命名图文")}">
-              <i data-lucide="trash-2"></i>
-            </button>`
+          : `<span class="history-actions">
+              <button type="button" class="history-duplicate" title="复制一份" aria-label="复制 ${escapeHtml(project.title || "未命名图文")}">
+                <i data-lucide="copy-plus"></i>
+              </button>
+              <button type="button" class="history-delete" title="删除历史记录" aria-label="删除 ${escapeHtml(project.title || "未命名图文")}">
+                <i data-lucide="trash-2"></i>
+              </button>
+            </span>`
       }
     `;
     item.querySelector(".history-open").addEventListener("click", () => openProject(project.id));
+    item.querySelector(".history-duplicate")?.addEventListener("click", (event) => {
+      event.currentTarget.disabled = true;
+      void duplicateProject(project.id);
+    });
     item.querySelector(".history-delete")?.addEventListener("click", () => deleteProject(project.id));
     els.projectHistory.append(item);
   }
@@ -3347,9 +3739,41 @@ function toggleHistory() {
   setHistoryOpen(!els.historySidebar?.classList.contains("open"), true);
 }
 
+function cacheCurrentProjectPreview() {
+  const project = state.projects.find((item) => item.id === state.currentProjectId);
+  if (!project || state.appMode !== "cards" || !state.canvases.length) return;
+  projectPreviewCache.delete(project.id);
+  projectPreviewCache.set(project.id, {
+    updatedAt: Number(project.updatedAt || 0),
+    mode: state.mode,
+    canvases: [...state.canvases],
+  });
+  while (projectPreviewCache.size > MAX_PROJECT_PREVIEW_CACHE) {
+    projectPreviewCache.delete(projectPreviewCache.keys().next().value);
+  }
+}
+
+function restoreCachedProjectPreview(project) {
+  const cached = projectPreviewCache.get(project?.id);
+  if (
+    !cached
+    || project?.data?.appMode === "article"
+    || cached.mode !== state.mode
+    || Number(cached.updatedAt || 0) !== Number(project?.updatedAt || 0)
+  ) {
+    return false;
+  }
+  projectPreviewCache.delete(project.id);
+  projectPreviewCache.set(project.id, cached);
+  state.canvases = [...cached.canvases];
+  drawPreview(state.canvases);
+  return true;
+}
+
 async function openProject(projectId) {
   if (!projectId || projectId === state.currentProjectId) return;
   saveState();
+  cacheCurrentProjectPreview();
   const project = findHistoryProject(projectId);
   if (!project) return;
   state.currentProjectId = project.id;
@@ -3357,10 +3781,13 @@ async function openProject(projectId) {
   state.scrollOffset = 0;
   applyForm(project.data);
   syncGuideReadOnlyMode();
-  saveProjectStore();
   resetTextHistory();
   updateProjectHistory();
-  await render();
+  if (!restoreCachedProjectPreview(project)) {
+    // Do not reuse another project's canvases: renderPage mutates canvases in place.
+    state.canvases = [];
+    await render({ persist: false });
+  }
   els.status.textContent = isBuiltInProject(project) ? `已打开内置说明书：${project.title}` : `已打开：${project.title || "未命名图文"}`;
 }
 
@@ -3414,6 +3841,14 @@ async function deleteProject(projectId) {
   }
   const project = state.projects.find((item) => item.id === projectId);
   if (!project) return;
+  const projectName = project.title || "未命名图文";
+  const confirmed = window.confirm(
+    `确认删除“${projectName}”？\n\n删除后会从当前浏览器、共享草稿库和团队云端移除，无法直接找回。建议重要内容先复制一份。`,
+  );
+  if (!confirmed) {
+    els.status.textContent = `已取消删除：${projectName}`;
+    return;
+  }
   const deletingCurrent = project.id === state.currentProjectId;
   const deletedAt = Math.max(Date.now(), Number(project.updatedAt || 0) + 1);
   const deletionIntentSaved = await markPendingProjectDeletion({ id: project.id, deletedAt });
@@ -3490,6 +3925,54 @@ async function createNewProject() {
   updateProjectHistory();
   await render();
   els.status.textContent = "已新建图文，上一条已保存在历史记录";
+}
+
+async function duplicateProject(projectId) {
+  if (isBuiltInProjectId(projectId)) {
+    els.status.textContent = "内置说明书不可复制";
+    return;
+  }
+  saveState();
+  const source = state.projects.find((project) => project.id === projectId);
+  if (!source) {
+    els.status.textContent = "未找到要复制的草稿";
+    return;
+  }
+
+  const copiedData = JSON.parse(JSON.stringify(source.data));
+  const duplicate = createProject(copiedData);
+  duplicate.title = duplicateProjectTitle(source.title);
+  duplicate.updatedAt = Math.max(Date.now(), Number(source.updatedAt || 0) + 1);
+  state.projects = [duplicate, ...state.projects].slice(0, MAX_PROJECTS);
+  state.currentProjectId = duplicate.id;
+  rememberActiveProject(duplicate.id);
+  state.mode = "auto";
+  state.scrollOffset = 0;
+  applyForm(duplicate.data);
+  syncGuideReadOnlyMode();
+  resetTextHistory();
+  setSaveCheckpoint({
+    phase: "saving-local",
+    projectId: duplicate.id,
+    targetUpdatedAt: duplicate.updatedAt,
+    error: "",
+  });
+  saveProjectStore();
+  updateProjectHistory();
+  await render({ persist: false });
+
+  const persisted = state.localDatabaseHydrated
+    ? await flushProjectStoreToIndexedDb()
+    : null;
+  if (persisted?.sharedSaved) {
+    els.status.textContent = persistenceMode === "cloud"
+      ? `已复制：${duplicate.title}，正在同步云端`
+      : `已复制并保存到本机：${duplicate.title}`;
+  } else if (persisted?.localSaved) {
+    els.status.textContent = `已复制到本地数据库：${duplicate.title}；服务恢复后将继续同步`;
+  } else {
+    els.status.textContent = `已复制：${duplicate.title}；请点击保存确认落盘`;
+  }
 }
 
 function escapeHtml(value) {
@@ -3671,7 +4154,7 @@ function chooseAiOptimizeMode(mode, { focus = false } = {}) {
   renderAiChangeList([
     nextMode === "polish"
       ? "会对少量句子做局部润色，并重新标注视觉重点；确认应用前正文不会改变。"
-      : "正文逐字保持不变，只会为原文中的少量重点添加排版标记。",
+      : "正文逐字保持不变：主结论加粗，数字、结果和转折使用克制的浅黄底色。",
   ]);
   setAiOptimizeStatus(
     nextMode === "polish"
@@ -3705,6 +4188,22 @@ function renderAiChangeList(changes = []) {
   );
 }
 
+function layoutOnlyCopySignature(value) {
+  let text = String(value || "");
+  let previous = null;
+  while (previous !== text) {
+    previous = text;
+    text = text
+      .replace(/\{\{(?:color|bg):#[0-9a-fA-F]{3,8}\|([\s\S]*?)\}\}/g, "$1")
+      .replace(/\*\*([^*\n]+?)\*\*/g, "$1");
+  }
+  return text;
+}
+
+function layoutOnlyPreservesCopy(before, after) {
+  return layoutOnlyCopySignature(before) === layoutOnlyCopySignature(after);
+}
+
 async function runAiOptimization(mode) {
   if (!els.aiOptimizeModal || els.aiOptimizeModal.classList.contains("hidden")) return;
   const requestedMode = ["layout", "polish"].includes(mode) ? mode : selectedAiOptimizeMode();
@@ -3727,7 +4226,13 @@ async function runAiOptimization(mode) {
     saveState();
     const persisted = state.localDatabaseHydrated ? await flushProjectStoreToIndexedDb() : null;
     if (generation !== aiOptimizeRequestGeneration || els.aiOptimizeModal.classList.contains("hidden")) return;
-    if (!persisted?.sharedSaved) throw new Error("当前版本尚未写入本机项目文件，请稍后重试");
+    if (!persisted?.sharedSaved) {
+      throw new Error(
+        persisted?.conflict
+          ? "检测到团队成员保存的新版本；旧缓存没有覆盖云端，请重新打开该稿后再试"
+          : "当前版本尚未写入共享草稿库，请稍后重试",
+      );
+    }
     const project = state.projects.find((item) => item.id === state.currentProjectId);
     const before = els.content.value;
     const baseUpdatedAt = Number(project?.updatedAt || 0);
@@ -3765,6 +4270,9 @@ async function runAiOptimization(mode) {
     }
     if (typeof payload.optimizedContent !== "string" || !payload.optimizedContent.trim()) {
       throw new Error("AI 没有返回可用内容");
+    }
+    if (nextMode === "layout" && !layoutOnlyPreservesCopy(before, payload.optimizedContent)) {
+      throw new Error("AI 排版结果改动了正文，已阻止进入预览");
     }
 
     pendingAiOptimization = {
@@ -4163,7 +4671,13 @@ async function runIllustrationSearch() {
     saveState();
     const persisted = state.localDatabaseHydrated ? await flushProjectStoreToIndexedDb() : null;
     if (generation !== illustrationRequestGeneration) return;
-    if (!persisted?.sharedSaved) throw new Error("当前版本尚未写入本机项目文件，请稍后重试");
+    if (!persisted?.sharedSaved) {
+      throw new Error(
+        persisted?.conflict
+          ? "检测到团队成员保存的新版本；旧缓存没有覆盖云端，请重新打开该稿后再试"
+          : "当前版本尚未写入共享草稿库，请稍后重试",
+      );
+    }
 
     const project = findHistoryProject(state.currentProjectId);
     const before = els.content.value;
@@ -4556,20 +5070,54 @@ function wrapSelection(kind) {
   const textarea = els.content;
   const start = textarea.selectionStart;
   const end = textarea.selectionEnd;
-  const selected = textarea.value.slice(start, end) || "文字";
+  const current = textarea.value;
+  const selected = current.slice(start, end) || "文字";
   let next = selected;
   let cursorOffset = null;
 
-  if (kind === "bold") {
-    next = `**${selected}**`;
-    cursorOffset = selected === "文字" ? 2 : null;
-  } else if (kind === "italic") {
-    next = `*${selected}*`;
-    cursorOffset = selected === "文字" ? 1 : null;
+  if (kind === "bold" || kind === "italic") {
+    const marker = kind === "bold" ? "**" : "*";
+    const markerLength = marker.length;
+    const italicMarkersAreStandalone =
+      kind !== "italic" ||
+      (!selected.startsWith("**") &&
+        !selected.endsWith("**") &&
+        current.slice(start - 2, start - 1) !== "*" &&
+        current.slice(end + 1, end + 2) !== "*");
+    const selectedHasMarkers =
+      italicMarkersAreStandalone &&
+      selected.length >= markerLength * 2 &&
+      selected.startsWith(marker) &&
+      selected.endsWith(marker);
+    const selectionIsWrapped =
+      italicMarkersAreStandalone &&
+      start >= markerLength &&
+      current.slice(start - markerLength, start) === marker &&
+      current.slice(end, end + markerLength) === marker;
+
+    if (selectedHasMarkers) {
+      const unwrapped = selected.slice(markerLength, -markerLength);
+      textarea.value = `${current.slice(0, start)}${unwrapped}${current.slice(end)}`;
+      textarea.focus();
+      textarea.setSelectionRange(start, start + unwrapped.length);
+    } else if (selectionIsWrapped) {
+      const unwrappedStart = start - markerLength;
+      textarea.value = `${current.slice(0, unwrappedStart)}${selected}${current.slice(end + markerLength)}`;
+      textarea.focus();
+      textarea.setSelectionRange(unwrappedStart, unwrappedStart + selected.length);
+    } else {
+      next = `${marker}${selected}${marker}`;
+      textarea.value = `${current.slice(0, start)}${next}${current.slice(end)}`;
+      textarea.focus();
+      textarea.setSelectionRange(start + markerLength, start + markerLength + selected.length);
+    }
+    commitTextHistory();
+    requestRender();
+    return;
   } else if (kind === "h1" || kind === "h2" || kind === "quote") {
     const prefix = kind === "h1" ? "# " : kind === "h2" ? "## " : "> ";
-    const lineStart = textarea.value.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
-    textarea.value = `${textarea.value.slice(0, lineStart)}${prefix}${textarea.value.slice(lineStart)}`;
+    const lineStart = current.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+    textarea.value = `${current.slice(0, lineStart)}${prefix}${current.slice(lineStart)}`;
     textarea.focus();
     textarea.setSelectionRange(start + prefix.length, end + prefix.length);
     commitTextHistory();
@@ -4577,7 +5125,7 @@ function wrapSelection(kind) {
     return;
   }
 
-  textarea.value = `${textarea.value.slice(0, start)}${next}${textarea.value.slice(end)}`;
+  textarea.value = `${current.slice(0, start)}${next}${current.slice(end)}`;
   if (cursorOffset !== null) {
     textarea.setSelectionRange(start + cursorOffset, start + cursorOffset + selected.length);
   } else {
@@ -4624,14 +5172,19 @@ function enableColorBrush() {
   document.documentElement.style.setProperty("--brush-color", els.inlineColor.value);
   els.colorTool?.classList.add("active");
   els.bgColorTool?.classList.remove("active");
+  els.colorTool?.setAttribute("aria-pressed", "true");
+  els.bgColorTool?.setAttribute("aria-pressed", "false");
   els.colorMenu.open = false;
+  els.bgColorMenu.open = false;
   els.status.textContent = "刷色已开启，选中一段文字即可上色";
 }
 
-function disableColorBrush() {
+function disableColorBrush(announce = false) {
   state.colorBrush = false;
   els.colorTool?.classList.remove("active");
+  els.colorTool?.setAttribute("aria-pressed", "false");
   els.colorMenu.open = false;
+  if (announce) els.status.textContent = "文字上色已退出";
 }
 
 function enableBackgroundBrush() {
@@ -4640,14 +5193,40 @@ function enableBackgroundBrush() {
   document.documentElement.style.setProperty("--text-bg-brush-color", els.inlineBgColor.value);
   els.bgColorTool?.classList.add("active");
   els.colorTool?.classList.remove("active");
+  els.bgColorTool?.setAttribute("aria-pressed", "true");
+  els.colorTool?.setAttribute("aria-pressed", "false");
   els.bgColorMenu.open = false;
+  els.colorMenu.open = false;
   els.status.textContent = "背景上色已开启，选中一段文字即可加底色";
 }
 
-function disableBackgroundBrush() {
+function disableBackgroundBrush(announce = false) {
   state.bgColorBrush = false;
   els.bgColorTool?.classList.remove("active");
+  els.bgColorTool?.setAttribute("aria-pressed", "false");
   els.bgColorMenu.open = false;
+  if (announce) els.status.textContent = "背景上色已退出";
+}
+
+function toggleActiveBrushFromTool(event, kind) {
+  const isActive = kind === "color" ? state.colorBrush : state.bgColorBrush;
+  if (isActive) {
+    event.preventDefault();
+    if (kind === "color") {
+      disableColorBrush(true);
+    } else {
+      disableBackgroundBrush(true);
+    }
+    return;
+  }
+
+  if (kind === "color") disableBackgroundBrush();
+  else disableColorBrush();
+}
+
+function disableActiveBrushes() {
+  disableColorBrush();
+  disableBackgroundBrush();
 }
 
 function applyColorBrushToSelection() {
@@ -4664,7 +5243,8 @@ function applyBackgroundBrushToSelection() {
   if (document.activeElement !== els.content) return;
   if (els.content.selectionStart === els.content.selectionEnd) return;
   wrapSelectionWithBackground();
-  els.status.textContent = "已应用背景色，可继续选中文字刷色，点取消结束";
+  disableBackgroundBrush();
+  els.status.textContent = "已应用背景色，工具已自动退出";
 }
 
 function applyActiveBrushToSelection() {
@@ -7992,6 +8572,7 @@ async function render({ persist = true } = {}) {
 }
 
 function drawPreview(canvases) {
+  previewInlineEditor = null;
   els.pages.innerHTML = "";
   els.pages.className = "pages";
   els.pages.classList.toggle("scroll-mode", state.mode === "scroll");
@@ -8191,8 +8772,11 @@ function createImageEditLayer(canvas) {
     box.dataset.actualHeight = String(hit.actualHeight || hit.height);
     box.tabIndex = 0;
     box.setAttribute("role", "group");
-    box.setAttribute("aria-label", `图片 ${state.images[hit.imageId]?.name || hit.imageId}；可拖动调整顺序，Alt 加上下方向键也可移动`);
-    box.title = "拖左上角抓手调整上下顺序；右上角按钮逐项移动；拖右下角调整大小";
+    box.setAttribute("aria-label", `图片 ${state.images[hit.imageId]?.name || hit.imageId}；点击定位源码，可拖动调整顺序，Alt 加上下方向键也可移动`);
+    box.title = "点击定位左侧图片标记；悬浮后可移动、删除或调整大小";
+    if (previewEditorPin?.start === hit.sourceStart && previewEditorPin?.end === hit.sourceEnd) {
+      box.classList.add("is-source-linked");
+    }
     applyImageBoxStyle(box, hit);
 
     const dragHandle = document.createElement("button");
@@ -8219,6 +8803,16 @@ function createImageEditLayer(canvas) {
       orderBar.append(button);
     });
 
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "preview-image-delete";
+    deleteButton.title = "从正文删除（资源库仍保留）";
+    deleteButton.setAttribute("aria-label", "从正文删除这张图片，资源库仍保留");
+    deleteButton.innerHTML = '<i data-lucide="trash-2"></i>';
+    deleteButton.disabled = isBuiltInProjectId(state.currentProjectId);
+    deleteButton.addEventListener("click", deletePreviewImageReference);
+    orderBar.append(deleteButton);
+
     const alignBar = document.createElement("div");
     alignBar.className = "preview-image-align";
     [
@@ -8242,6 +8836,7 @@ function createImageEditLayer(canvas) {
     resize.addEventListener("pointerdown", startPreviewImageResize);
 
     box.addEventListener("keydown", handlePreviewImageOrderKeydown);
+    box.addEventListener("click", handlePreviewImageTarget);
     box.append(dragHandle, orderBar, alignBar, resize);
     layer.append(box);
   }
@@ -8271,7 +8866,7 @@ function createTextHitLayer(canvas) {
     target.style.height = `${(hit.height / CANVAS_HEIGHT) * 100}%`;
     target.dataset.start = String(hit.sourceStart);
     target.dataset.end = String(hit.sourceEnd);
-    target.title = "悬浮定位；点击后锁定编辑位置";
+    target.title = "点击定位源码并直接编辑卡片文字";
     if (previewEditorPin?.start === hit.sourceStart && previewEditorPin?.end === hit.sourceEnd) {
       target.classList.add("is-pinned");
       target.setAttribute("aria-pressed", "true");
@@ -8292,7 +8887,17 @@ function handlePreviewTextTarget(event) {
   if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) return;
   if (event.type === "pointerenter" && previewEditorPin) return;
   const shouldPin = event.type === "click";
+  if (shouldPin && previewInlineEditor?.target === event.currentTarget) {
+    previewInlineEditor.editable.focus({ preventScroll: true });
+    return;
+  }
+  if (shouldPin && previewInlineEditor?.dirty) {
+    els.status.textContent = "当前卡片文字尚未完成，请先点“完成”或按 Esc 取消";
+    previewInlineEditor.editable.focus({ preventScroll: true });
+    return;
+  }
   focusEditorRange(start, end, shouldPin);
+  if (shouldPin) openPreviewInlineEditor(event.currentTarget, start, end);
 }
 
 function focusEditorRange(start, end, pin = false) {
@@ -8302,6 +8907,10 @@ function focusEditorRange(start, end, pin = false) {
       const matches = Number(target.dataset.start) === start && Number(target.dataset.end) === end;
       target.classList.toggle("is-pinned", matches);
       target.setAttribute("aria-pressed", String(matches));
+    });
+    document.querySelectorAll(".preview-image-box").forEach((target) => {
+      const matches = Number(target.dataset.sourceStart) === start && Number(target.dataset.sourceEnd) === end;
+      target.classList.toggle("is-source-linked", matches);
     });
   }
   els.content.focus({ preventScroll: true });
@@ -8317,14 +8926,336 @@ function clearPreviewEditorPin() {
     target.classList.remove("is-pinned");
     target.setAttribute("aria-pressed", "false");
   });
+  document.querySelectorAll(".preview-image-box.is-source-linked").forEach((target) => {
+    target.classList.remove("is-source-linked");
+  });
 }
 
 function scrollTextareaToRange(index) {
-  const before = els.content.value.slice(0, index);
-  const lineIndex = before.split("\n").length - 1;
-  const lineHeight = Number.parseFloat(getComputedStyle(els.content).lineHeight) || 28;
-  const targetTop = Math.max(0, lineIndex * lineHeight - els.content.clientHeight / 2);
-  els.content.scrollTop = targetTop;
+  const textarea = els.content;
+  const computed = getComputedStyle(textarea);
+  const mirror = document.createElement("div");
+  const copiedProperties = [
+    "boxSizing", "fontFamily", "fontSize", "fontStyle", "fontWeight", "fontVariant",
+    "letterSpacing", "lineHeight", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+    "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth",
+    "wordBreak", "overflowWrap", "textTransform", "textIndent", "tabSize",
+  ];
+  mirror.className = "textarea-scroll-mirror";
+  mirror.style.width = `${textarea.offsetWidth}px`;
+  copiedProperties.forEach((property) => {
+    mirror.style[property] = computed[property];
+  });
+  mirror.append(document.createTextNode(textarea.value.slice(0, index)));
+  const marker = document.createElement("span");
+  marker.textContent = textarea.value.slice(index, index + 1) || "\u200b";
+  mirror.append(marker);
+  document.body.append(mirror);
+  const targetTop = marker.offsetTop - textarea.clientHeight * 0.38;
+  const maxScrollTop = Math.max(0, textarea.scrollHeight - textarea.clientHeight);
+  textarea.scrollTop = clamp(targetTop, 0, maxScrollTop);
+  mirror.remove();
+}
+
+function handlePreviewImageTarget(event) {
+  if (event.target.closest("button, [data-action='resize']")) return;
+  if (previewInlineEditor?.dirty) {
+    els.status.textContent = "当前卡片文字尚未完成，请先点“完成”或按 Esc 取消";
+    previewInlineEditor.editable.focus({ preventScroll: true });
+    return;
+  }
+  const box = event.currentTarget;
+  const start = Number(box.dataset.sourceStart);
+  const end = Number(box.dataset.sourceEnd);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return;
+  focusEditorRange(start, end, true);
+  els.status.textContent = "已定位左侧图片标记；可在图片右上角直接删除";
+}
+
+function sourceLineEditorModel(content, sourceIndex) {
+  const lineStart = content.lastIndexOf("\n", Math.max(0, sourceIndex - 1)) + 1;
+  const nextBreak = content.indexOf("\n", sourceIndex);
+  const lineEnd = nextBreak === -1 ? content.length : nextBreak;
+  const rawLine = content.slice(lineStart, lineEnd);
+  const leading = rawLine.match(/^\s*/)?.[0] || "";
+  const afterLeading = rawLine.slice(leading.length);
+  const markerMatch = afterLeading.match(/^(#{1,6}\s+|>\s+|(?:[-*+]|\d+[.)])\s+)/);
+  const marker = markerMatch?.[0] || "";
+  const body = afterLeading.slice(marker.length);
+  let blockType = "p";
+  if (/^#\s+$/.test(marker)) blockType = "h1";
+  else if (/^##\s+$/.test(marker)) blockType = "h2";
+  else if (/^#{3,6}\s+$/.test(marker)) blockType = "h3";
+  else if (/^>\s+$/.test(marker)) blockType = "quote";
+  else if (marker) blockType = "list";
+  return {
+    lineStart,
+    lineEnd,
+    leading,
+    marker,
+    body,
+    bodyStart: lineStart + leading.length + marker.length,
+    blockType,
+  };
+}
+
+function renderPreviewInlineEditorHtml(value) {
+  return parseInline(value)
+    .map((token) => {
+      let inner = escapeHtml(token.text);
+      if (token.bold) inner = `<strong>${inner}</strong>`;
+      if (token.italic) inner = `<em>${inner}</em>`;
+      if (token.color) inner = `<span data-inline-color="${escapeAttribute(token.color)}" style="color:${escapeAttribute(token.color)}">${inner}</span>`;
+      if (token.bgColor) inner = `<span data-inline-bg="${escapeAttribute(token.bgColor)}" style="background-color:${escapeAttribute(token.bgColor)}">${inner}</span>`;
+      return inner;
+    })
+    .join("");
+}
+
+function serializePreviewInlineNode(node) {
+  if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || "";
+  if (node.nodeType !== Node.ELEMENT_NODE) return "";
+  if (node.tagName === "BR") return " ";
+  let value = Array.from(node.childNodes, serializePreviewInlineNode).join("");
+  if (["STRONG", "B"].includes(node.tagName)) value = `**${value}**`;
+  if (["EM", "I"].includes(node.tagName)) value = `*${value}*`;
+  if (node.dataset.inlineColor) value = `{{color:${node.dataset.inlineColor}|${value}}}`;
+  if (node.dataset.inlineBg) value = `{{bg:${node.dataset.inlineBg}|${value}}}`;
+  return value;
+}
+
+function previewInlineVisibleRange(model, sourceStart, sourceEnd) {
+  let visibleOffset = 0;
+  let visibleStart = null;
+  let visibleEnd = null;
+  for (const token of parseInline(model.body, model.bodyStart)) {
+    if (visibleStart === null && sourceStart >= token.sourceStart && sourceStart <= token.sourceEnd) {
+      visibleStart = visibleOffset + clamp(sourceStart - token.sourceStart, 0, token.text.length);
+    }
+    if (visibleEnd === null && sourceEnd >= token.sourceStart && sourceEnd <= token.sourceEnd) {
+      visibleEnd = visibleOffset + clamp(sourceEnd - token.sourceStart, 0, token.text.length);
+    }
+    visibleOffset += token.text.length;
+  }
+  return {
+    start: visibleStart ?? visibleOffset,
+    end: visibleEnd ?? visibleStart ?? visibleOffset,
+  };
+}
+
+function setContentEditableSelection(root, start, end) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let offset = 0;
+  let startNode = null;
+  let endNode = null;
+  let startOffset = 0;
+  let endOffset = 0;
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const length = node.nodeValue?.length || 0;
+    if (!startNode && start <= offset + length) {
+      startNode = node;
+      startOffset = clamp(start - offset, 0, length);
+    }
+    if (!endNode && end <= offset + length) {
+      endNode = node;
+      endOffset = clamp(end - offset, 0, length);
+      break;
+    }
+    offset += length;
+  }
+  if (!startNode) return;
+  const range = document.createRange();
+  range.setStart(startNode, startOffset);
+  range.setEnd(endNode || startNode, endNode ? endOffset : startOffset);
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function closePreviewInlineEditor({ restoreFocus = false } = {}) {
+  const current = previewInlineEditor;
+  if (!current) return;
+  current.root.remove();
+  previewInlineEditor = null;
+  if (restoreFocus) current.target?.focus({ preventScroll: true });
+}
+
+function updatePreviewInlineBlockButtons() {
+  if (!previewInlineEditor) return;
+  previewInlineEditor.root.querySelectorAll("[data-preview-block]").forEach((button) => {
+    const active = button.dataset.previewBlock === previewInlineEditor.model.blockType;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
+function setPreviewInlineBlock(blockType) {
+  if (!previewInlineEditor) return;
+  const model = previewInlineEditor.model;
+  const requestedMarker = blockType === "h1" ? "# " : blockType === "h2" ? "## " : "";
+  if (model.blockType === blockType) {
+    model.blockType = "p";
+    model.marker = "";
+  } else {
+    model.blockType = blockType;
+    model.marker = requestedMarker;
+  }
+  previewInlineEditor.dirty = true;
+  previewInlineEditor.editable.className = `preview-inline-content is-${model.blockType}`;
+  updatePreviewInlineBlockButtons();
+  previewInlineEditor.editable.focus();
+}
+
+function applyPreviewInlineFormat(command) {
+  if (!previewInlineEditor || !["bold", "italic"].includes(command)) return;
+  previewInlineEditor.editable.focus();
+  document.execCommand(command, false, null);
+  previewInlineEditor.dirty = true;
+}
+
+async function finishPreviewInlineEditor() {
+  const current = previewInlineEditor;
+  if (!current || current.busy) return;
+  current.busy = true;
+  const serializedBody = Array.from(current.editable.childNodes, serializePreviewInlineNode).join("").replace(/\s*\n\s*/g, " ");
+  const nextLine = `${current.model.leading}${current.model.marker}${serializedBody}`;
+  const previousLine = els.content.value.slice(current.model.lineStart, current.model.lineEnd);
+  const nextContent = `${els.content.value.slice(0, current.model.lineStart)}${nextLine}${els.content.value.slice(current.model.lineEnd)}`;
+  const nextStart = current.model.lineStart + current.model.leading.length + current.model.marker.length;
+  closePreviewInlineEditor();
+  if (nextLine === previousLine) {
+    focusEditorRange(nextStart, nextStart + serializedBody.length, true);
+    els.status.textContent = "卡片文字未改动";
+    return;
+  }
+  const applied = await applyProgrammaticContent(nextContent, "卡片文字已更新");
+  if (applied) focusEditorRange(nextStart, Math.min(nextContent.length, nextStart + serializedBody.length), true);
+}
+
+function openPreviewInlineEditor(target, sourceStart, sourceEnd) {
+  if (isBuiltInProjectId(state.currentProjectId)) {
+    els.status.textContent = "内置说明书不可修改，请先复制或新建图文";
+    return;
+  }
+  if (previewInlineEditor?.target === target) return;
+  if (previewInlineEditor?.dirty) {
+    els.status.textContent = "当前卡片文字尚未完成，请先点“完成”或按 Esc 取消";
+    previewInlineEditor.editable.focus({ preventScroll: true });
+    return;
+  }
+  closePreviewInlineEditor();
+  const frame = target.closest(".page-frame");
+  if (!frame) return;
+  const model = sourceLineEditorModel(els.content.value, sourceStart);
+  if (!model.body.trim() || isMarkdownImageBlock(els.content.value.slice(model.lineStart, model.lineEnd).trim())) return;
+
+  const root = document.createElement("section");
+  root.className = "preview-inline-editor";
+  root.setAttribute("aria-label", "卡片内文字编辑器");
+  const toolbar = document.createElement("div");
+  toolbar.className = "preview-inline-toolbar";
+  toolbar.innerHTML = `
+    <span class="preview-inline-label"><i data-lucide="square-pen"></i> 卡片内编辑</span>
+    <span class="preview-inline-format-group">
+      <button type="button" data-preview-block="h1" aria-label="设为一级标题" aria-pressed="false">H1</button>
+      <button type="button" data-preview-block="h2" aria-label="设为二级标题" aria-pressed="false">H2</button>
+      <button type="button" data-preview-format="bold" aria-label="加粗"><strong>B</strong></button>
+      <button type="button" data-preview-format="italic" aria-label="斜体"><em>I</em></button>
+    </span>
+    <span class="preview-inline-actions">
+      <button type="button" data-preview-action="cancel" aria-label="取消编辑"><i data-lucide="x"></i></button>
+      <button type="button" class="preview-inline-done" data-preview-action="done"><i data-lucide="check"></i> 完成</button>
+    </span>`;
+  const editable = document.createElement("div");
+  editable.className = `preview-inline-content is-${model.blockType}`;
+  editable.contentEditable = "true";
+  editable.spellcheck = true;
+  editable.setAttribute("role", "textbox");
+  editable.setAttribute("aria-label", "直接编辑卡片文字；选中文字后可加粗或斜体");
+  editable.innerHTML = renderPreviewInlineEditorHtml(model.body);
+  root.append(toolbar, editable);
+  frame.append(root);
+
+  const targetRect = target.getBoundingClientRect();
+  const frameRect = frame.getBoundingClientRect();
+  const preferredTop = targetRect.bottom - frameRect.top + 8;
+  root.style.left = "12px";
+  root.style.right = "12px";
+  root.style.top = `${clamp(preferredTop, 12, Math.max(12, frameRect.height - 190))}px`;
+  previewInlineEditor = { root, target, editable, model, dirty: false, busy: false };
+
+  toolbar.querySelectorAll("button").forEach((button) => {
+    button.addEventListener("pointerdown", (event) => event.preventDefault());
+  });
+  toolbar.querySelectorAll("[data-preview-block]").forEach((button) => {
+    button.addEventListener("click", () => setPreviewInlineBlock(button.dataset.previewBlock));
+  });
+  toolbar.querySelectorAll("[data-preview-format]").forEach((button) => {
+    button.addEventListener("click", () => applyPreviewInlineFormat(button.dataset.previewFormat));
+  });
+  toolbar.querySelector("[data-preview-action='cancel']").addEventListener("click", () => closePreviewInlineEditor({ restoreFocus: true }));
+  toolbar.querySelector("[data-preview-action='done']").addEventListener("click", () => void finishPreviewInlineEditor());
+  editable.addEventListener("input", () => {
+    if (previewInlineEditor) previewInlineEditor.dirty = true;
+  });
+  editable.addEventListener("paste", (event) => {
+    event.preventDefault();
+    const text = (event.clipboardData?.getData("text/plain") || "").replace(/\s*\n+\s*/g, " ");
+    document.execCommand("insertText", false, text);
+  });
+  editable.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closePreviewInlineEditor({ restoreFocus: true });
+    } else if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void finishPreviewInlineEditor();
+    } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "b") {
+      event.preventDefault();
+      applyPreviewInlineFormat("bold");
+    }
+  });
+  updatePreviewInlineBlockButtons();
+  if (window.lucide) window.lucide.createIcons();
+  editable.focus({ preventScroll: true });
+  const visibleRange = previewInlineVisibleRange(model, sourceStart, sourceEnd);
+  setContentEditableSelection(editable, visibleRange.start, visibleRange.end);
+  els.status.textContent = "正在卡片内编辑；选中文字可加粗，按 Enter 完成，Esc 取消";
+}
+
+function removeContentLineAtRange(content, sourceStart, sourceEnd) {
+  let removeStart = content.lastIndexOf("\n", Math.max(0, sourceStart - 1)) + 1;
+  let removeEnd = content.indexOf("\n", Math.max(sourceEnd, sourceStart));
+  if (removeEnd === -1) {
+    removeEnd = content.length;
+    if (removeStart > 0) removeStart -= 1;
+  } else {
+    removeEnd += 1;
+  }
+  return {
+    content: `${content.slice(0, removeStart)}${content.slice(removeEnd)}`,
+    selection: removeStart,
+  };
+}
+
+function deletePreviewImageReference(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (imageReorderBusy || isBuiltInProjectId(state.currentProjectId)) return;
+  if (previewInlineEditor?.dirty) {
+    els.status.textContent = "当前卡片文字尚未完成，请先点“完成”或按 Esc 取消";
+    previewInlineEditor.editable.focus({ preventScroll: true });
+    return;
+  }
+  const box = event.currentTarget.closest(".preview-image-box");
+  const sourceStart = Number(box?.dataset.sourceStart);
+  const sourceEnd = Number(box?.dataset.sourceEnd);
+  if (!Number.isFinite(sourceStart) || !Number.isFinite(sourceEnd)) return;
+  const next = removeContentLineAtRange(els.content.value, sourceStart, sourceEnd);
+  closePreviewInlineEditor();
+  els.content.setSelectionRange(next.selection, next.selection);
+  void applyProgrammaticContent(next.content, "图片已从正文移除，资源库仍保留；可撤销");
 }
 
 function contentLineModel(content) {
@@ -8877,11 +9808,80 @@ async function downloadAll() {
   }
 }
 
-const debouncedRender = debounce(() => render({ persist: false }), 180);
+const debouncedRender = debounce(() => render({ persist: false }), CONTROL_PREVIEW_RENDER_DELAY);
+
+function runEditorPreviewRenderWhenIdle() {
+  const run = () => {
+    editorRenderIdleCallback = 0;
+    void render({ persist: false });
+  };
+  if ("requestIdleCallback" in window) {
+    editorRenderIdleCallback = window.requestIdleCallback(run, { timeout: EDITOR_PREVIEW_IDLE_TIMEOUT });
+  } else {
+    run();
+  }
+}
+
+const debouncedEditorRender = debounce(runEditorPreviewRenderWhenIdle, EDITOR_PREVIEW_RENDER_DELAY);
+
+function cancelEditorPreviewRender() {
+  debouncedEditorRender.cancel();
+  if (editorRenderIdleCallback && "cancelIdleCallback" in window) {
+    window.cancelIdleCallback(editorRenderIdleCallback);
+  }
+  editorRenderIdleCallback = 0;
+}
+
+function prioritizeEditorInput() {
+  renderGeneration += 1;
+  debouncedRender.cancel();
+  cancelEditorPreviewRender();
+}
 
 function requestRender() {
   scheduleStateSave();
+  renderGeneration += 1;
+  cancelEditorPreviewRender();
   debouncedRender();
+}
+
+function requestEditorRender() {
+  scheduleStateSave(EDITOR_STATE_SAVE_DELAY);
+  prioritizeEditorInput();
+  debouncedEditorRender();
+}
+
+function handleContentCompositionStart() {
+  editorCompositionActive = true;
+  prioritizeEditorInput();
+}
+
+function handleContentCompositionEnd() {
+  editorCompositionActive = false;
+  requestEditorRender();
+}
+
+function handleContentInput(event) {
+  scheduleTextHistoryCommit();
+  syncAiUndoAvailability();
+  const nextImageReferenceSignature = imageReferenceSignature(els.content.value);
+  const imageReferencesChanged = nextImageReferenceSignature !== lastEditorImageReferenceSignature;
+  lastEditorImageReferenceSignature = nextImageReferenceSignature;
+  scheduleCurrentProjectTextSave();
+  const composing = editorCompositionActive || event?.isComposing === true;
+
+  if (composing) {
+    scheduleStateSave(EDITOR_STATE_SAVE_DELAY);
+    prioritizeEditorInput();
+    return;
+  }
+  if (imageReferencesChanged) {
+    prioritizeEditorInput();
+    flushStateSave();
+    void render({ persist: false });
+    return;
+  }
+  requestEditorRender();
 }
 
 function positionToolPopover(menu) {
@@ -8973,7 +9973,10 @@ function bindEvents() {
   els.editorPanelToggle?.addEventListener("click", toggleEditorPanel);
 
   document.querySelectorAll("[data-format]").forEach((button) => {
-    button.addEventListener("click", () => wrapSelection(button.dataset.format));
+    button.addEventListener("click", () => {
+      disableActiveBrushes();
+      wrapSelection(button.dataset.format);
+    });
   });
 
   els.modeButtons.forEach((button) => {
@@ -8998,20 +10001,9 @@ function bindEvents() {
     button.addEventListener("click", (event) => setArticleOption("color", event.currentTarget.dataset.articleColor));
   });
 
-  els.content.addEventListener("input", () => {
-    scheduleTextHistoryCommit();
-    syncAiUndoAvailability();
-    const nextImageReferenceSignature = imageReferenceSignature(els.content.value);
-    const imageReferencesChanged = nextImageReferenceSignature !== lastEditorImageReferenceSignature;
-    lastEditorImageReferenceSignature = nextImageReferenceSignature;
-    scheduleCurrentProjectTextSave();
-    if (imageReferencesChanged) {
-      flushStateSave();
-      void render({ persist: false });
-      return;
-    }
-    requestRender();
-  });
+  els.content.addEventListener("compositionstart", handleContentCompositionStart);
+  els.content.addEventListener("compositionend", handleContentCompositionEnd);
+  els.content.addEventListener("input", handleContentInput);
   els.projectTitle?.addEventListener("input", updateCurrentProjectTitle);
   els.projectPublishStatus?.addEventListener("change", scheduleStateSave);
   els.content.addEventListener("pointerdown", clearPreviewEditorPin);
@@ -9064,7 +10056,8 @@ function bindEvents() {
   els.colorCancel.addEventListener("click", disableColorBrush);
   els.bgColorConfirm.addEventListener("click", enableBackgroundBrush);
   els.bgColorCancel.addEventListener("click", disableBackgroundBrush);
-  els.content.addEventListener("mouseup", applyActiveBrushToSelection);
+  els.colorTool?.addEventListener("click", (event) => toggleActiveBrushFromTool(event, "color"));
+  els.bgColorTool?.addEventListener("click", (event) => toggleActiveBrushFromTool(event, "background"));
   document.addEventListener("pointerup", applyActiveBrushToSelection);
   els.content.addEventListener("keyup", (event) => {
     if (event.key.startsWith("Arrow") || event.key === "Shift") {

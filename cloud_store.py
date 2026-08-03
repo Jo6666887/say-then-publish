@@ -621,7 +621,9 @@ class CloudStore:
             asset = assets_by_id.get(asset_id)
             if not asset:
                 continue
-            image["src"] = self._data_uri(asset["mime_type"], self._download_object(asset))
+            # Keep the project-store response small and fetch private images only
+            # when the browser actually renders them.
+            image["src"] = f"/api/assets/{quote(asset_id)}/content"
             image["cloudAssetId"] = asset_id
             image["cloudObjectKey"] = asset["object_key"]
         return {
@@ -665,6 +667,7 @@ class CloudStore:
     @classmethod
     def _logical_project_value(cls, value: Any) -> Any:
         if isinstance(value, dict):
+            cloud_asset_id = value.get("cloudAssetId")
             derived_keys = {
                 "cloudAssetId",
                 "cloudObjectKey",
@@ -673,7 +676,11 @@ class CloudStore:
                 CLOUD_BASE_UPDATED_AT_FIELD,
             }
             return {
-                key: cls._logical_project_value(item)
+                key: (
+                    f"cloud-asset:{cloud_asset_id}"
+                    if key == "src" and isinstance(cloud_asset_id, str) and cloud_asset_id
+                    else cls._logical_project_value(item)
+                )
                 for key, item in value.items()
                 if key not in derived_keys
             }
@@ -915,7 +922,8 @@ class CloudStore:
                         actual is None
                         or int(actual.get("updated_at_ms") or 0) != expected["updated_at_ms"]
                         or (actual.get("title") or "") != expected["title"]
-                        or (actual.get("project_data") or {}) != expected["project_data"]
+                        or self._logical_project_value(actual.get("project_data") or {})
+                        != self._logical_project_value(expected["project_data"])
                     ):
                         raise CloudStoreError(
                             f"Supabase 未精确确认项目 {expected['project_id']} 的完整版本"
