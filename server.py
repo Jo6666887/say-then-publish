@@ -364,6 +364,65 @@ CLOUD_STATUS = {
     "conflicts": [],
 }
 LOGGER = logging.getLogger("write-then-publish")
+
+# Loopback-only settings that the local UI may write into the gitignored .env.
+ENV_PATH = ROOT / ".env"
+ENV_WRITE_LOCK = threading.Lock()
+SETTINGS_ENV_GROUPS = {
+    "supabase": ["SUPABASE_URL", "SUPABASE_SECRET_KEY", "WRITE_THEN_PUBLISH_WORKSPACE_ID", "WRITE_THEN_PUBLISH_CLOUD_SYNC"],
+    "tos": ["TOS_ACCESS_KEY", "TOS_SECRET_KEY", "TOS_ENDPOINT", "TOS_REGION", "TOS_BUCKET", "TOS_KEY_PREFIX"],
+    "ai": ["WTP_AI_API_BASE", "WTP_AI_API_KEY", "WTP_AI_APP_ID", "WTP_AI_MODEL_ID", "WTP_AI_RESOURCE_ID"],
+}
+SETTINGS_ENV_ALLOWED = {key for keys in SETTINGS_ENV_GROUPS.values() for key in keys}
+# Values that must never be echoed back to the browser once stored.
+SETTINGS_ENV_SECRET = {"SUPABASE_SECRET_KEY", "TOS_ACCESS_KEY", "TOS_SECRET_KEY", "WTP_AI_API_KEY", "WTP_AI_APP_ID"}
+
+
+def read_env_file_map(path: Path) -> dict[str, str]:
+    result: dict[str, str] = {}
+    if not path.exists():
+        return result
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        if key:
+            result[key] = value
+    return result
+
+
+def write_env_updates(path: Path, updates: Mapping[str, str]) -> None:
+    """Merge `updates` into `.env`, preserving existing lines and comments, then
+    rewrite the file with owner-only permissions. Callers must reject values that
+    contain newlines so a single value cannot inject extra assignments."""
+    existing_lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    remaining = dict(updates)
+    out_lines: list[str] = []
+    for raw_line in existing_lines:
+        stripped = raw_line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key in remaining:
+                out_lines.append(f"{key}={remaining.pop(key)}")
+                continue
+        out_lines.append(raw_line)
+    for key, value in remaining.items():
+        out_lines.append(f"{key}={value}")
+    text = "\n".join(out_lines).strip("\n") + "\n"
+    descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 PUBLIC_STATIC_FILES = {"index.html"}
 PUBLIC_STATIC_ROOTS = {"src", "docs/screenshots"}
 PUBLIC_STATIC_SUFFIXES = {".css", ".gif", ".jpeg", ".jpg", ".js", ".png", ".svg", ".webp", ".woff2"}
@@ -969,6 +1028,31 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
         config = getattr(self.server, "runtime_config", None)
         return config if isinstance(config, ServerRuntimeConfig) else RUNTIME_CONFIG
 
+    def settings_endpoint_allowed(self) -> bool:
+        """Reading or writing .env secrets is only ever allowed from a loopback
+        client on a loopback-bound server, never from a public deployment."""
+        return self.runtime_config().bind_is_loopback and client_address_is_loopback(self.client_address)
+
+    def settings_env_status(self) -> dict:
+        stored = read_env_file_map(ENV_PATH)
+
+        def resolve(key: str) -> str:
+            value = stored.get(key)
+            if value is None:
+                value = os.environ.get(key, "")
+            return value or ""
+
+        groups: dict[str, dict] = {}
+        for group, keys in SETTINGS_ENV_GROUPS.items():
+            groups[group] = {}
+            for key in keys:
+                value = resolve(key)
+                entry = {"configured": bool(value.strip())}
+                if key not in SETTINGS_ENV_SECRET:
+                    entry["value"] = value  # non-secret values may prefill the form
+                groups[group][key] = entry
+        return {"fields": groups, "cloudSyncOn": bool(CLOUD.enabled), "envFile": ".env"}
+
     def reject_untrusted_host(self) -> bool:
         """Reject DNS-rebinding requests before any local data is read."""
 
@@ -1070,6 +1154,12 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
             return
         if path == "/api/health":
             self.send_health(include_body=True)
+            return
+        if path == "/api/settings/env-status":
+            if not self.settings_endpoint_allowed():
+                self.send_json({"error": "仅本机可访问设置"}, HTTPStatus.FORBIDDEN)
+                return
+            self.send_json(self.settings_env_status())
             return
         if path == "/api/project-store":
             if CLOUD.enabled and not CLOUD_INITIAL_SYNC_DONE.is_set():
@@ -1598,6 +1688,40 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
         if self.reject_unauthenticated(path):
             return
         if self.reject_cross_origin_mutation():
+            return
+        if path == "/api/settings/env":
+            if not self.settings_endpoint_allowed():
+                self.send_json({"error": "仅本机可写入配置"}, HTTPStatus.FORBIDDEN)
+                return
+            payload = self.read_json_body(maximum=65536)
+            values = payload.get("values") if isinstance(payload, dict) else None
+            if not isinstance(values, dict):
+                self.send_json({"error": "配置格式无效"}, HTTPStatus.BAD_REQUEST)
+                return
+            updates: dict[str, str] = {}
+            for key, value in values.items():
+                if key not in SETTINGS_ENV_ALLOWED:
+                    self.send_json({"error": f"不允许写入的字段：{key}"}, HTTPStatus.BAD_REQUEST)
+                    return
+                if value is None:
+                    value = ""
+                if not isinstance(value, str):
+                    self.send_json({"error": f"字段值必须是文本：{key}"}, HTTPStatus.BAD_REQUEST)
+                    return
+                if "\n" in value or "\r" in value:
+                    self.send_json({"error": f"字段值不能包含换行：{key}"}, HTTPStatus.BAD_REQUEST)
+                    return
+                updates[key] = value.strip()
+            if not updates:
+                self.send_json({"error": "没有要保存的字段"}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                with ENV_WRITE_LOCK:
+                    write_env_updates(ENV_PATH, updates)
+            except OSError:
+                self.send_json({"error": "写入 .env 失败，请检查文件权限"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+            self.send_json({"saved": sorted(updates.keys()), "restartRequired": True})
             return
         if path == "/api/projects":
             incoming = self.read_json_body(maximum=MAX_BODY_BYTES)

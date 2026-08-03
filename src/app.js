@@ -113,6 +113,8 @@ const els = {
   pageDock: $("#pageDock"),
   pageDockTrack: $("#pageDockTrack"),
   pageDockStatus: $("#pageDockStatus"),
+  stageNavPrev: $("#stageNavPrev"),
+  stageNavNext: $("#stageNavNext"),
   previewViewSwitch: $("#previewViewSwitch"),
   previewViewButtons: document.querySelectorAll("[data-preview-view]"),
   pageCount: $("#pageCount"),
@@ -133,6 +135,9 @@ const els = {
   helpClose: $("#helpCloseBtn"),
   workspaceSettingsMenu: $("#workspaceSettingsMenu"),
   uiThemeSwitch: $("#uiThemeSwitch"),
+  apiConfig: $("#apiConfig"),
+  apiConfigSaveBtn: $("#apiConfigSaveBtn"),
+  apiConfigStatus: $("#apiConfigStatus"),
   newProject: $("#newProjectBtn"),
   exportProjects: $("#exportProjectsBtn"),
   exportProjectsLabel: $("#exportProjectsLabel"),
@@ -386,7 +391,7 @@ function createEditorialCardTheme({
     group: "editorial",
     family: "editorial",
     previewColors: [bgColor, textColor, accentColor],
-    backgroundStyle: dark ? "midnight-paper" : "paper-wash",
+    backgroundStyle: "flat",
     secondaryColor,
     identityPlacement: "bottom",
     geometry: { sidePadding: 58, topWithAuthor: 78, topWithoutAuthor: 78, bottom: 1014 },
@@ -626,55 +631,55 @@ const CARD_THEMES = {
     id: "paper-ink",
     label: "纸墨经典",
     description: "黑墨与暖纸，适合商业评论、AI 随笔与产品思考。",
-    textColor: "#111111",
-    accentColor: "#31302d",
-    bgColor: "#f3f0e8",
-    secondaryColor: "#e5dfd2",
+    textColor: "#1c1b18",
+    accentColor: "#45423b",
+    bgColor: "#f7f6f2",
+    secondaryColor: "#dedad0",
   }),
   "porcelain-tech": createEditorialCardTheme({
     id: "porcelain-tech",
     label: "瓷蓝研究",
     description: "冷静瓷白与深蓝，适合科技、研究、数据与 AI。",
-    textColor: "#10243f",
-    accentColor: "#35628f",
-    bgColor: "#f1f4f6",
-    secondaryColor: "#dce5ed",
+    textColor: "#14263d",
+    accentColor: "#3f678f",
+    bgColor: "#f4f7f8",
+    secondaryColor: "#dce5eb",
   }),
   "forest-note": createEditorialCardTheme({
     id: "forest-note",
     label: "森林手记",
     description: "柔暖纸色与森林绿，适合自然、户外与生活观察。",
-    textColor: "#17281e",
-    accentColor: "#356c50",
-    bgColor: "#f4f1e8",
-    secondaryColor: "#d9e2d7",
+    textColor: "#1b2b22",
+    accentColor: "#3f7057",
+    bgColor: "#f1f4ee",
+    secondaryColor: "#dbe5dc",
   }),
   "kraft-memory": createEditorialCardTheme({
     id: "kraft-memory",
     label: "牛皮记忆",
     description: "旧纸与棕墨质感，适合手作、阅读、记忆和人物故事。",
-    textColor: "#2b2015",
-    accentColor: "#9a5c32",
-    bgColor: "#ecddc4",
-    secondaryColor: "#d8bd99",
+    textColor: "#30251b",
+    accentColor: "#9b6742",
+    bgColor: "#f0e2cc",
+    secondaryColor: "#ddc5a3",
   }),
   "dune-gallery": createEditorialCardTheme({
     id: "dune-gallery",
     label: "沙丘画廊",
     description: "低饱和沙色，适合作品集、设计与物件研究。",
-    textColor: "#211c16",
-    accentColor: "#846e4d",
-    bgColor: "#efe4cf",
-    secondaryColor: "#d7c6aa",
+    textColor: "#29241d",
+    accentColor: "#877354",
+    bgColor: "#f1e9dc",
+    secondaryColor: "#ddd0ba",
   }),
   "midnight-gilt": createEditorialCardTheme({
     id: "midnight-gilt",
     label: "午夜鎏金",
     description: "唯一深色纸墨主题，适合夜景、影视与暗色题材。",
-    textColor: "#eee3cf",
-    accentColor: "#d4a552",
-    bgColor: "#100f0d",
-    secondaryColor: "#2b2218",
+    textColor: "#f0e8da",
+    accentColor: "#caa15a",
+    bgColor: "#151513",
+    secondaryColor: "#332b20",
     dark: true,
   }),
   "swiss-blue": createSwissCardTheme({
@@ -1196,6 +1201,92 @@ function setUiTheme(theme, announce = false, persist = true) {
   }
   if (announce) {
     els.status.textContent = `软件界面已切换为${UI_THEME_LABELS[nextTheme]}，卡片成品颜色保持不变`;
+  }
+}
+
+function setupApiConfig() {
+  const root = els.apiConfig;
+  if (!root) return;
+  root.querySelectorAll("[data-api-tab]").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      const name = tab.dataset.apiTab;
+      root.querySelectorAll("[data-api-tab]").forEach((other) => {
+        const active = other === tab;
+        other.classList.toggle("active", active);
+        other.setAttribute("aria-selected", String(active));
+      });
+      root.querySelectorAll("[data-api-panel]").forEach((panel) => {
+        panel.hidden = panel.dataset.apiPanel !== name;
+      });
+    });
+  });
+  els.apiConfigSaveBtn?.addEventListener("click", () => void saveApiConfig());
+  els.workspaceSettingsMenu?.addEventListener("toggle", () => {
+    if (els.workspaceSettingsMenu.open) void loadApiConfig();
+  });
+}
+
+async function loadApiConfig() {
+  const root = els.apiConfig;
+  if (!root) return;
+  try {
+    const response = await fetch("/api/settings/env-status");
+    if (!response.ok) throw new Error(String(response.status));
+    const data = await response.json();
+    Object.values(data.fields || {}).forEach((group) => {
+      Object.entries(group).forEach(([key, info]) => {
+        const input = root.querySelector(`[data-env-key="${key}"]`);
+        if (!input) return;
+        if (input.type === "checkbox") {
+          input.checked = ["1", "true", "yes", "on"].includes(String(info.value || "").toLowerCase());
+        } else if (input.hasAttribute("data-env-secret")) {
+          input.value = "";
+          input.placeholder = info.configured ? "已配置（留空表示不修改）" : "未配置";
+        } else if (typeof info.value === "string") {
+          input.value = info.value;
+        }
+      });
+    });
+    if (els.apiConfigStatus) els.apiConfigStatus.textContent = data.cloudSyncOn ? "云端同步：已开启" : "";
+  } catch (error) {
+    if (els.apiConfigStatus) els.apiConfigStatus.textContent = "无法读取当前配置";
+  }
+}
+
+async function saveApiConfig() {
+  const root = els.apiConfig;
+  if (!root || !els.apiConfigSaveBtn) return;
+  const values = {};
+  root.querySelectorAll("[data-env-key]").forEach((input) => {
+    const key = input.dataset.envKey;
+    if (input.type === "checkbox") {
+      values[key] = input.checked ? "1" : "0";
+    } else {
+      const value = input.value.trim();
+      // Skip blanks so an empty secret field never wipes a stored value.
+      if (value) values[key] = value;
+    }
+  });
+  if (!Object.keys(values).length) {
+    if (els.apiConfigStatus) els.apiConfigStatus.textContent = "没有要保存的内容";
+    return;
+  }
+  els.apiConfigSaveBtn.disabled = true;
+  if (els.apiConfigStatus) els.apiConfigStatus.textContent = "正在写入 .env…";
+  try {
+    const response = await fetch("/api/settings/env", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ values }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || String(response.status));
+    if (els.apiConfigStatus) els.apiConfigStatus.textContent = "已保存到 .env，重启服务后生效";
+    void loadApiConfig();
+  } catch (error) {
+    if (els.apiConfigStatus) els.apiConfigStatus.textContent = `保存失败：${error.message || error}`;
+  } finally {
+    els.apiConfigSaveBtn.disabled = false;
   }
 }
 
@@ -8660,16 +8751,9 @@ function renderPageDock(canvases) {
     button.setAttribute("aria-label", `切换到第 ${index + 1} 张卡片`);
     button.title = `第 ${index + 1} 张卡片`;
 
-    const thumbnail = document.createElement("canvas");
-    thumbnail.width = 54;
-    thumbnail.height = 72;
-    thumbnail.setAttribute("aria-hidden", "true");
-    const context = thumbnail.getContext("2d");
-    if (context) context.drawImage(canvas, 0, 0, thumbnail.width, thumbnail.height);
-
     const number = document.createElement("span");
     number.textContent = String(index + 1).padStart(2, "0");
-    button.append(thumbnail, number);
+    button.append(number);
     button.addEventListener("click", () => setActivePreviewPage(index));
     button.addEventListener("keydown", handlePageDockKeydown);
     els.pageDockTrack.append(button);
@@ -8710,6 +8794,13 @@ function applyActivePreviewPage({ focus = false } = {}) {
   if (els.pageDockStatus) {
     els.pageDockStatus.textContent = `${activePreviewPageIndex + 1} / ${shells.length}`;
   }
+  const dockActive = els.previewPanel?.dataset.cardView === "dock";
+  const hasSiblings = shells.length > 1;
+  [els.stageNavPrev, els.stageNavNext].forEach((navButton) => {
+    if (navButton) navButton.hidden = !dockActive || !hasSiblings;
+  });
+  if (els.stageNavPrev) els.stageNavPrev.disabled = activePreviewPageIndex <= 0;
+  if (els.stageNavNext) els.stageNavNext.disabled = activePreviewPageIndex >= shells.length - 1;
   const activeButton = buttons[activePreviewPageIndex];
   if (activeButton) {
     activeButton.scrollIntoView({
@@ -8740,6 +8831,14 @@ function setActivePreviewPage(index, { focus = false } = {}) {
   if (!Number.isInteger(index)) return;
   activePreviewPageIndex = index;
   applyActivePreviewPage({ focus });
+}
+
+function movePreviewPage(delta, { focus = false } = {}) {
+  const total = els.pages ? els.pages.querySelectorAll(".page-shell").length : 0;
+  if (total < 2) return;
+  const next = clamp(activePreviewPageIndex + delta, 0, total - 1);
+  if (next === activePreviewPageIndex) return;
+  setActivePreviewPage(next, { focus });
 }
 
 function handlePageDockKeydown(event) {
@@ -9114,6 +9213,214 @@ function applyPreviewInlineFormat(command) {
   previewInlineEditor.dirty = true;
 }
 
+const PREVIEW_INLINE_SWATCHES = {
+  color: ["#2563eb", "#e11d48", "#15803d", "#b45309", "#7c3aed", "#111827"],
+  bg: ["#fff3a3", "#d6efd0", "#d6e6ff", "#ffd9e2", "#ffe1b8", "#ececec"],
+};
+
+function rememberPreviewInlineRange() {
+  const editor = previewInlineEditor;
+  if (!editor) return;
+  const selection = window.getSelection();
+  if (selection && selection.rangeCount) {
+    const range = selection.getRangeAt(0);
+    if (editor.editable.contains(range.commonAncestorContainer)) {
+      editor.savedRange = range.cloneRange();
+    }
+  }
+}
+
+function togglePreviewInlineSwatches(kind) {
+  const editor = previewInlineEditor;
+  if (!editor || !editor.swatchTray) return;
+  const tray = editor.swatchTray;
+  const toggles = editor.root.querySelectorAll("[data-preview-swatch]");
+  if (editor.swatchMode === kind && !tray.hidden) {
+    tray.hidden = true;
+    editor.swatchMode = null;
+    toggles.forEach((button) => button.setAttribute("aria-expanded", "false"));
+    editor.editable.focus();
+    return;
+  }
+  rememberPreviewInlineRange();
+  editor.swatchMode = kind;
+  const label = kind === "color" ? "文字颜色" : "背景高亮";
+  tray.innerHTML = "";
+  const caption = document.createElement("span");
+  caption.className = "preview-inline-swatch-label";
+  caption.textContent = label;
+  tray.append(caption);
+  PREVIEW_INLINE_SWATCHES[kind].forEach((color) => {
+    const dot = document.createElement("button");
+    dot.type = "button";
+    dot.className = "preview-inline-swatch";
+    dot.title = color;
+    dot.setAttribute("aria-label", `${label} ${color}`);
+    if (kind === "color") {
+      dot.style.color = color;
+      dot.textContent = "A";
+    } else {
+      dot.style.background = color;
+    }
+    dot.addEventListener("pointerdown", (event) => event.preventDefault());
+    dot.addEventListener("click", () => applyPreviewInlineColor(kind, color));
+    tray.append(dot);
+  });
+  const custom = document.createElement("label");
+  custom.className = "preview-inline-swatch preview-inline-swatch-custom";
+  custom.title = "自定义颜色";
+  const customInput = document.createElement("input");
+  customInput.type = "color";
+  customInput.value = kind === "color" ? "#2563eb" : "#fff3a3";
+  customInput.addEventListener("input", () => applyPreviewInlineColor(kind, customInput.value));
+  custom.append(customInput);
+  tray.append(custom);
+  const clear = document.createElement("button");
+  clear.type = "button";
+  clear.className = "preview-inline-swatch preview-inline-swatch-clear";
+  clear.textContent = "去掉";
+  clear.setAttribute("aria-label", kind === "color" ? "去掉文字颜色" : "去掉背景高亮");
+  clear.addEventListener("pointerdown", (event) => event.preventDefault());
+  clear.addEventListener("click", () => clearPreviewInlineColor(kind));
+  tray.append(clear);
+  tray.hidden = false;
+  toggles.forEach((button) => button.setAttribute("aria-expanded", String(button.dataset.previewSwatch === kind)));
+}
+
+function previewInlineNodeTextLength(node) {
+  if (node.nodeType === Node.TEXT_NODE) return node.nodeValue?.length || 0;
+  if (node.nodeType !== Node.ELEMENT_NODE) return 0;
+  if (node.tagName === "BR") return 1;
+  return Array.from(node.childNodes, previewInlineNodeTextLength).reduce((sum, value) => sum + value, 0);
+}
+
+function previewInlineOffsetOf(editable, container, offset) {
+  if (!editable.contains(container)) return null;
+  let total = 0;
+  const walker = document.createTreeWalker(editable, NodeFilter.SHOW_TEXT);
+  if (container.nodeType === Node.ELEMENT_NODE) {
+    // Boundary sits between child nodes; count text length of preceding children.
+    for (let i = 0; i < offset && i < container.childNodes.length; i += 1) {
+      total += previewInlineNodeTextLength(container.childNodes[i]);
+    }
+    if (container === editable) return total;
+    // Add the text length preceding `container` itself.
+    let before = 0;
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (container.contains(node)) break;
+      before += node.nodeValue?.length || 0;
+    }
+    return before + total;
+  }
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    if (node === container) return total + offset;
+    total += node.nodeValue?.length || 0;
+  }
+  return total;
+}
+
+function previewInlineSelectionOffsets(editable) {
+  const selection = window.getSelection();
+  let range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+  if ((!range || !editable.contains(range.commonAncestorContainer)) && previewInlineEditor?.savedRange) {
+    range = previewInlineEditor.savedRange;
+  }
+  if (!range || !editable.contains(range.commonAncestorContainer)) return [null, null];
+  let start = previewInlineOffsetOf(editable, range.startContainer, range.startOffset);
+  let end = previewInlineOffsetOf(editable, range.endContainer, range.endOffset);
+  if (start == null || end == null) return [null, null];
+  if (start > end) [start, end] = [end, start];
+  return [start, end];
+}
+
+function styleInlineTokensRange(tokens, from, to, patch) {
+  const out = [];
+  let offset = 0;
+  for (const token of tokens) {
+    const start = offset;
+    const end = offset + token.text.length;
+    offset = end;
+    const overlapStart = Math.max(start, from);
+    const overlapEnd = Math.min(end, to);
+    if (overlapEnd <= overlapStart) {
+      out.push(token);
+      continue;
+    }
+    if (start < overlapStart) out.push({ ...token, text: token.text.slice(0, overlapStart - start) });
+    const middle = { ...token, text: token.text.slice(overlapStart - start, overlapEnd - start) };
+    // Color and background are mutually exclusive on one span: the parser can
+    // only round-trip one macro per run, so applying one clears the other.
+    delete middle.color;
+    delete middle.bgColor;
+    if (patch.color) middle.color = patch.color;
+    else if (patch.bgColor) middle.bgColor = patch.bgColor;
+    out.push(middle);
+    if (end > overlapEnd) out.push({ ...token, text: token.text.slice(overlapEnd - start) });
+  }
+  return out;
+}
+
+function mergeInlineTokens(tokens) {
+  const out = [];
+  for (const token of tokens) {
+    const last = out[out.length - 1];
+    if (
+      last &&
+      !!last.bold === !!token.bold &&
+      !!last.italic === !!token.italic &&
+      (last.color || "") === (token.color || "") &&
+      (last.bgColor || "") === (token.bgColor || "")
+    ) {
+      last.text += token.text;
+    } else {
+      out.push({ ...token });
+    }
+  }
+  return out;
+}
+
+function inlineTokensToSource(tokens) {
+  return tokens
+    .map((token) => {
+      let value = token.text;
+      if (token.bold) value = `**${value}**`;
+      if (token.italic) value = `*${value}*`;
+      if (token.color) value = `{{color:${token.color}|${value}}}`;
+      else if (token.bgColor) value = `{{bg:${token.bgColor}|${value}}}`;
+      return value;
+    })
+    .join("");
+}
+
+function updatePreviewInlineRange(patch) {
+  const editor = previewInlineEditor;
+  if (!editor) return false;
+  const [from, to] = previewInlineSelectionOffsets(editor.editable);
+  if (from == null || from === to) {
+    els.status.textContent = "请先选中要上色的文字";
+    return false;
+  }
+  const body = Array.from(editor.editable.childNodes, serializePreviewInlineNode).join("");
+  const tokens = mergeInlineTokens(styleInlineTokensRange(parseInline(body), from, to, patch));
+  editor.editable.innerHTML = renderPreviewInlineEditorHtml(inlineTokensToSource(tokens));
+  setContentEditableSelection(editor.editable, from, to);
+  const selection = window.getSelection();
+  editor.savedRange = selection.rangeCount ? selection.getRangeAt(0).cloneRange() : null;
+  editor.dirty = true;
+  editor.editable.focus();
+  return true;
+}
+
+function applyPreviewInlineColor(kind, color) {
+  updatePreviewInlineRange(kind === "color" ? { color } : { bgColor: color });
+}
+
+function clearPreviewInlineColor() {
+  updatePreviewInlineRange({});
+}
+
 async function finishPreviewInlineEditor() {
   const current = previewInlineEditor;
   if (!current || current.busy) return;
@@ -9162,11 +9469,16 @@ function openPreviewInlineEditor(target, sourceStart, sourceEnd) {
       <button type="button" data-preview-block="h2" aria-label="设为二级标题" aria-pressed="false">H2</button>
       <button type="button" data-preview-format="bold" aria-label="加粗"><strong>B</strong></button>
       <button type="button" data-preview-format="italic" aria-label="斜体"><em>I</em></button>
+      <button type="button" data-preview-swatch="color" aria-label="文字上色" title="文字上色" aria-expanded="false"><span class="preview-inline-chip preview-inline-chip-text">A</span></button>
+      <button type="button" data-preview-swatch="bg" aria-label="背景高亮" title="背景高亮" aria-expanded="false"><span class="preview-inline-chip preview-inline-chip-bg">A</span></button>
     </span>
     <span class="preview-inline-actions">
       <button type="button" data-preview-action="cancel" aria-label="取消编辑"><i data-lucide="x"></i></button>
       <button type="button" class="preview-inline-done" data-preview-action="done"><i data-lucide="check"></i> 完成</button>
     </span>`;
+  const swatchTray = document.createElement("div");
+  swatchTray.className = "preview-inline-swatches";
+  swatchTray.hidden = true;
   const editable = document.createElement("div");
   editable.className = `preview-inline-content is-${model.blockType}`;
   editable.contentEditable = "true";
@@ -9174,7 +9486,7 @@ function openPreviewInlineEditor(target, sourceStart, sourceEnd) {
   editable.setAttribute("role", "textbox");
   editable.setAttribute("aria-label", "直接编辑卡片文字；选中文字后可加粗或斜体");
   editable.innerHTML = renderPreviewInlineEditorHtml(model.body);
-  root.append(toolbar, editable);
+  root.append(toolbar, swatchTray, editable);
   frame.append(root);
 
   const targetRect = target.getBoundingClientRect();
@@ -9183,7 +9495,7 @@ function openPreviewInlineEditor(target, sourceStart, sourceEnd) {
   root.style.left = "12px";
   root.style.right = "12px";
   root.style.top = `${clamp(preferredTop, 12, Math.max(12, frameRect.height - 190))}px`;
-  previewInlineEditor = { root, target, editable, model, dirty: false, busy: false };
+  previewInlineEditor = { root, target, editable, model, dirty: false, busy: false, swatchTray, swatchMode: null, savedRange: null };
 
   toolbar.querySelectorAll("button").forEach((button) => {
     button.addEventListener("pointerdown", (event) => event.preventDefault());
@@ -9193,6 +9505,9 @@ function openPreviewInlineEditor(target, sourceStart, sourceEnd) {
   });
   toolbar.querySelectorAll("[data-preview-format]").forEach((button) => {
     button.addEventListener("click", () => applyPreviewInlineFormat(button.dataset.previewFormat));
+  });
+  toolbar.querySelectorAll("[data-preview-swatch]").forEach((button) => {
+    button.addEventListener("click", () => togglePreviewInlineSwatches(button.dataset.previewSwatch));
   });
   toolbar.querySelector("[data-preview-action='cancel']").addEventListener("click", () => closePreviewInlineEditor({ restoreFocus: true }));
   toolbar.querySelector("[data-preview-action='done']").addEventListener("click", () => void finishPreviewInlineEditor());
@@ -9889,7 +10204,7 @@ function positionToolPopover(menu) {
   if (!popover) return;
 
   if (window.matchMedia("(max-width: 620px)").matches) {
-    ["position", "top", "left", "right", "max-height", "overflow-y"].forEach((property) => popover.style.removeProperty(property));
+    ["position", "top", "bottom", "left", "right", "max-height", "overflow-y"].forEach((property) => popover.style.removeProperty(property));
     return;
   }
 
@@ -9911,14 +10226,22 @@ function positionToolPopover(menu) {
   const placeBelow = availableBelow >= Math.min(naturalHeight, 240) || availableBelow >= availableAbove;
   const availableHeight = placeBelow ? availableBelow : availableAbove;
   const maxHeight = Math.max(120, Math.min(naturalHeight, availableHeight));
-  const top = placeBelow ? belowTop : Math.max(margin, menuRect.top - maxHeight - 8);
 
   popover.style.position = "fixed";
-  popover.style.top = `${Math.round(top)}px`;
   popover.style.left = `${Math.round(left)}px`;
   popover.style.right = "auto";
   popover.style.maxHeight = `${Math.round(maxHeight)}px`;
   popover.style.overflowY = "auto";
+  if (placeBelow) {
+    // Anchor the top just under the trigger so it hangs down from it.
+    popover.style.top = `${Math.round(belowTop)}px`;
+    popover.style.bottom = "auto";
+  } else {
+    // Anchor the bottom just above the trigger so it always hugs it, no matter
+    // how short the actual content ends up being.
+    popover.style.top = "auto";
+    popover.style.bottom = `${Math.round(window.innerHeight - menuRect.top + 8)}px`;
+  }
 }
 
 function positionOpenToolPopovers() {
@@ -9987,6 +10310,8 @@ function bindEvents() {
       setPreviewViewMode(button.dataset.previewView, { announce: true });
     });
   });
+  els.stageNavPrev?.addEventListener("click", () => movePreviewPage(-1));
+  els.stageNavNext?.addEventListener("click", () => movePreviewPage(1));
 
   els.articleThemeButtons.forEach((button) => {
     button.addEventListener("click", (event) => setArticleOption("theme", event.currentTarget.dataset.articleTheme));
@@ -10169,6 +10494,7 @@ function bindEvents() {
   els.uiThemeSwitch?.addEventListener("change", () => {
     setUiTheme(els.uiThemeSwitch.checked ? "dark" : "light", true, true);
   });
+  setupApiConfig();
   els.articleSettingsToggle?.addEventListener("click", toggleArticleSettings);
   els.exportScale?.addEventListener("change", () => setExportScale(els.exportScale.value));
   els.downloadZip.addEventListener("click", async () => {

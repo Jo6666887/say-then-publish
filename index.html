@@ -47,6 +47,51 @@
                 <i aria-hidden="true"></i>
                 <span>深色</span>
               </label>
+              <div class="settings-divider" role="separator"></div>
+              <div class="api-config" id="apiConfig">
+                <div class="workspace-settings-heading">
+                  <strong>API 配置</strong>
+                  <span>只做团队协作、或用 AI 优化排版时才需要。只本人本地使用可以跳过。密钥只写入本机的 <code>.env</code>，不会离开这台电脑。</span>
+                </div>
+                <div class="api-config-tabs" role="tablist" aria-label="API 配置分组">
+                  <button type="button" class="api-tab active" data-api-tab="supabase" role="tab" aria-selected="true">Supabase</button>
+                  <button type="button" class="api-tab" data-api-tab="tos" role="tab" aria-selected="false">火山 TOS</button>
+                  <button type="button" class="api-tab" data-api-tab="ai" role="tab" aria-selected="false">AI Key</button>
+                </div>
+                <div class="api-config-body">
+                  <div class="api-panel" data-api-panel="supabase">
+                    <a class="api-official" href="https://supabase.com/dashboard" target="_blank" rel="noopener noreferrer">去 Supabase 官网申请 ↗</a>
+                    <p class="api-panel-note">保存项目、版本基线和协作状态。</p>
+                    <label class="api-field"><span>Project URL</span><input data-env-key="SUPABASE_URL" type="text" autocomplete="off" placeholder="https://xxxx.supabase.co" /></label>
+                    <label class="api-field"><span>Secret Key</span><input data-env-key="SUPABASE_SECRET_KEY" data-env-secret type="password" autocomplete="off" placeholder="未配置" /></label>
+                    <label class="api-field"><span>协作 Workspace ID</span><input data-env-key="WRITE_THEN_PUBLISH_WORKSPACE_ID" type="text" autocomplete="off" placeholder="default-workspace" /></label>
+                    <label class="api-check"><input data-env-key="WRITE_THEN_PUBLISH_CLOUD_SYNC" type="checkbox" /><span>启用云端同步</span></label>
+                  </div>
+                  <div class="api-panel" data-api-panel="tos" hidden>
+                    <a class="api-official" href="https://www.volcengine.com/product/TOS" target="_blank" rel="noopener noreferrer">去火山引擎 TOS 申请 ↗</a>
+                    <p class="api-panel-note">私有对象存储，保存图片素材。</p>
+                    <label class="api-field"><span>Access Key</span><input data-env-key="TOS_ACCESS_KEY" data-env-secret type="password" autocomplete="off" placeholder="未配置" /></label>
+                    <label class="api-field"><span>Secret Key</span><input data-env-key="TOS_SECRET_KEY" data-env-secret type="password" autocomplete="off" placeholder="未配置" /></label>
+                    <label class="api-field"><span>Endpoint</span><input data-env-key="TOS_ENDPOINT" type="text" autocomplete="off" placeholder="tos-cn-beijing.volces.com" /></label>
+                    <label class="api-field"><span>Region</span><input data-env-key="TOS_REGION" type="text" autocomplete="off" placeholder="cn-beijing" /></label>
+                    <label class="api-field"><span>Bucket</span><input data-env-key="TOS_BUCKET" type="text" autocomplete="off" placeholder="your-bucket" /></label>
+                    <label class="api-field"><span>Key 前缀</span><input data-env-key="TOS_KEY_PREFIX" type="text" autocomplete="off" placeholder="write-then-publish/assets/" /></label>
+                  </div>
+                  <div class="api-panel" data-api-panel="ai" hidden>
+                    <a class="api-official" href="https://www.xfyun.cn/" target="_blank" rel="noopener noreferrer">去讯飞开放平台申请 ↗</a>
+                    <p class="api-panel-note">用于「AI 优化排版」。不填则该功能不可用，其余功能照常。</p>
+                    <label class="api-field"><span>API Base</span><input data-env-key="WTP_AI_API_BASE" type="text" autocomplete="off" placeholder="https://maas-api...xf-yun.com/v2" /></label>
+                    <label class="api-field"><span>API Key</span><input data-env-key="WTP_AI_API_KEY" data-env-secret type="password" autocomplete="off" placeholder="未配置" /></label>
+                    <label class="api-field"><span>App ID</span><input data-env-key="WTP_AI_APP_ID" data-env-secret type="password" autocomplete="off" placeholder="未配置" /></label>
+                    <label class="api-field"><span>Model ID</span><input data-env-key="WTP_AI_MODEL_ID" type="text" autocomplete="off" placeholder="xopkimik25" /></label>
+                    <label class="api-field"><span>Resource ID</span><input data-env-key="WTP_AI_RESOURCE_ID" type="text" autocomplete="off" placeholder="0" /></label>
+                  </div>
+                </div>
+                <div class="api-config-actions">
+                  <span id="apiConfigStatus" class="api-config-status" role="status" aria-live="polite"></span>
+                  <button type="button" id="apiConfigSaveBtn" class="primary-button">保存到 .env</button>
+                </div>
+              </div>
             </div>
           </details>
         </div>
@@ -434,6 +479,12 @@
           </div>
         </div>
         <div class="preview-body">
+          <button id="stageNavPrev" class="stage-nav prev" type="button" aria-label="上一张卡片" hidden>
+            <span class="stage-nav-badge" aria-hidden="true"><i data-lucide="chevron-left"></i></span>
+          </button>
+          <button id="stageNavNext" class="stage-nav next" type="button" aria-label="下一张卡片" hidden>
+            <span class="stage-nav-badge" aria-hidden="true"><i data-lucide="chevron-right"></i></span>
+          </button>
           <div id="pages" class="pages"></div>
           <aside id="articleSettings" class="article-settings" aria-label="长文设置" hidden>
             <section>

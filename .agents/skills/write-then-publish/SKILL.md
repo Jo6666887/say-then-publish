@@ -1,12 +1,23 @@
 ---
 name: write-then-publish
-description: Operate the local-first Write Then Publish creator workspace through its stable CLI. Use this skill whenever the user asks Codex to create, read, revise, synchronize, open, or mark a Write Then Publish project as published or unpublished. Also use it for requests to turn a local Markdown draft into a shared project that the cloud web collaborator can continue editing. Do not edit runtime-data/project-store.json directly.
+description: Say Then Publish — turn a conversation into publish-ready social image cards, all locally. Use this skill whenever the user, after chatting through an idea/recap/opinion in any agent window, wants it turned into 图文卡片; or asks to create, read, revise, synchronize, open, or mark a project as published/unpublished; or asks to 配图 / add illustrations to a project. Also use it to turn a local Markdown draft into a shared project a cloud web collaborator can keep editing. Do not edit runtime-data/project-store.json directly.
 compatibility: Requires Python 3 and the local Write Then Publish service in this repository.
 ---
 
-# Write Then Publish
+# Say Then Publish
 
-Use the product as the source of truth. Codex is one local client of the same project data that the browser and cloud collaborator use.
+The user talks; this skill turns the conversation into publish-ready image cards. You are one local client of the same project data the browser and cloud collaborator use — the product is the source of truth.
+
+## You understand the card layout language
+
+Don't just dump text into a card. This project exposes the 图文卡片 layout language as a stable interface, and you are expected to typeset like an editor would — that is the whole point of "say then publish":
+
+- `**加粗**` for the one main conclusion of a card.
+- `{{color:#RRGGBB|文字}}` to color a key phrase; `{{bg:#RRGGBB|文字}}` to highlight (yellow `#fff3a3` is the common default).
+- `# 大标题` / `## 小标题` for structure; a blank line splits paragraphs; put each card's content together so pagination lands cleanly.
+- Keep highlights sparing: emphasize the numbers, results, and turns — not whole sentences.
+
+Judge where emphasis belongs from the meaning, then write it into the Markdown. Producing well-emphasized, correctly paginated cards in one pass is the value you add over a human doing it by hand.
 
 ## Stable entrypoint
 
@@ -74,14 +85,35 @@ Open the web workspace for visual review:
 .venv/bin/python scripts/wtp.py open PROJECT_ID
 ```
 
-## Agent illustration workflow
+## Agent illustration workflow（配图 / 自动配图）
 
-The web editor intentionally does not search public image libraries. When the user asks for illustrations, the Agent owns the workflow:
+The web editor intentionally does not search public image libraries. When the user asks to 配图 / add illustrations, the Agent owns the workflow — **but check for the 小黑 image-generation skill first.**
+
+### Step 0 — Pre-check: is the 小黑 skill installed?
+
+Do NOT bundle, download, or install it yourself. Only check, then either proceed or hand the user an install link.
+
+Look for a 小黑 (xiaohei) image skill in the standard skill directories:
+
+```bash
+ls -d ~/.claude/skills/* ~/.codex/skills/* ~/.agents/skills/* ~/.grok/skills/* 2>/dev/null \
+  | grep -iE '小黑|xiaohei|xiao-?hei'
+```
+
+- **Not found** → stop before generating. Tell the user the 小黑 生图技能 is required for 配图 and give them the install link so they can set it up in one step, then continue once it is installed:
+
+  > 配图需要先安装「小黑生图技能」。安装地址：`<TODO: 小黑生图技能安装地址>`
+  > 装好后再对我说一次「帮我配图」即可。
+
+  （Replace the placeholder with the real 小黑 skill install URL. The check above matches by name; adjust the pattern if the installed skill uses a different identifier.）
+
+- **Found** → proceed to Step 1 and call that skill to generate images.
+
+### Steps 1–5 — generate and insert
 
 1. Run `get PROJECT_ID` and read the newest content and revision.
 2. Decide which exact sections genuinely need an image. Do not insert decorative filler into every card.
-3. Use the runtime-native image generation capability when available (for example Codex `imagegen`). Keep important text out of the generated raster unless the user explicitly requests text in the image.
-   - If the user says to use an established visual direction such as “小黑 style”, preserve that direction in the image-generation prompt and use Codex's native generator; do not replace it with public-image search.
+3. Call the installed 小黑 生图技能 to generate the images, preserving the "小黑 style" visual direction in the prompt. Keep important text out of the generated raster unless the user explicitly requests text in the image. Do not fall back to public-image search.
 4. Save each generated PNG, JPEG, or WebP to a real local file.
 5. Insert it through the CLI using a unique, exact line from the current draft as the anchor:
 

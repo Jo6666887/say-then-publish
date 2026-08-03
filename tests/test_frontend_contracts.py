@@ -504,7 +504,7 @@ class CompactWorkbenchContractTests(unittest.TestCase):
         self.assertIn("已保留两个版本", checkpoint)
         self.assertNotIn("检测到云端同时编辑", checkpoint)
 
-    def test_card_dock_has_accessible_navigation_and_real_thumbnails(self):
+    def test_card_dock_has_accessible_numbered_navigation(self):
         self.assertIn('id="pageDock"', HTML)
         self.assertIn('role="tablist"', HTML)
         self.assertIn('id="previewViewSwitch"', HTML)
@@ -513,8 +513,23 @@ class CompactWorkbenchContractTests(unittest.TestCase):
         render_dock = function_body("renderPageDock")
         self.assertIn('button.setAttribute("role", "tab")', render_dock)
         self.assertIn('button.setAttribute("aria-controls"', render_dock)
-        self.assertIn('context.drawImage(canvas', render_dock)
+        # The dock is now a compact numbered position bar, not a thumbnail strip.
+        self.assertIn('padStart(2, "0")', render_dock)
+        self.assertNotIn("context.drawImage(canvas", render_dock)
         self.assertIn("handlePageDockKeydown", render_dock)
+
+    def test_single_card_view_has_side_navigation(self):
+        # Clickable left/right edge controls to flip between cards in 逐张 view.
+        self.assertIn('id="stageNavPrev"', HTML)
+        self.assertIn('id="stageNavNext"', HTML)
+        self.assertIn('class="stage-nav prev"', HTML)
+        self.assertIn('class="stage-nav next"', HTML)
+        move = function_body("movePreviewPage")
+        self.assertIn("clamp(activePreviewPageIndex + delta", move)
+        apply_page = function_body("applyActivePreviewPage")
+        self.assertIn("els.stageNavPrev", apply_page)
+        self.assertIn("els.stageNavNext", apply_page)
+        self.assertIn('.preview-panel[data-card-view="dock"] .stage-nav', STYLES)
 
     def test_preview_switch_is_explicit_persistent_and_keeps_grid_pages_accessible(self):
         apply_page = function_body("applyActivePreviewPage")

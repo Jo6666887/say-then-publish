@@ -1,7 +1,7 @@
 {
   "name": "write-then-publish",
   "version": "1.0.0",
-  "description": "Local-first, Agent-ready workspace for turning Markdown into social cards and long-form content.",
+  "description": "Say Then Publish — local-first, Agent-native workspace: talk to an agent and it turns the conversation into publish-ready social cards (with auto-illustration and optional team sync).",
   "license": "MIT",
   "private": true,
   "repository": {
