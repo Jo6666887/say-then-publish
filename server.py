@@ -1436,6 +1436,14 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
                 target_updated_at=int(project["updatedAt"]),
                 wait_timeout=None,
             ) if CLOUD.enabled else False
+            if not CLOUD.enabled:
+                try:
+                    sync_local_asset_store()
+                except LocalAssetStoreError:
+                    # Project JSON already contains the embedded image bytes.
+                    # A local asset-library write failure must not roll back the
+                    # creator's successfully saved project revision.
+                    LOGGER.exception("Local asset sync failed after Agent project update")
             with STORE_LOCK:
                 confirmed_store = read_store()
                 confirmed_project = find_project(confirmed_store, project_id)

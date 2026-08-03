@@ -49,13 +49,21 @@ class LocalAssetStoreTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def test_default_directory_is_inside_explicit_data_dir(self):
+    def test_zero_config_uses_managed_local_directory_without_prompt(self):
         default_store = LocalAssetStore(self.root, data_dir=self.data_dir, env={})
         self.assertEqual(default_store.asset_dir, (self.data_dir / "assets").resolve())
         self.assertEqual(default_store.settings_file, self.data_dir.resolve() / "storage-settings.json")
-        self.assertTrue(default_store.directory_selection_required)
-        self.assertEqual(default_store.sync_store(project_store()), project_store())
-        self.assertFalse(default_store.asset_dir.exists())
+        self.assertFalse(default_store.directory_selection_required)
+
+        source = project_store()
+        enriched = default_store.sync_store(source)
+        first = enriched["projects"][0]["data"]["images"]["image-1"]
+        second = enriched["projects"][0]["data"]["images"]["image-2"]
+
+        self.assertTrue(default_store.asset_dir.is_dir())
+        self.assertEqual(first["localAssetId"], second["localAssetId"])
+        self.assertTrue((default_store.asset_dir / first["localAssetName"]).is_file())
+        self.assertTrue(default_store.manifest_file.is_file())
 
     def test_env_directory_takes_priority_over_settings(self):
         setting_directory = Path(self.temporary.name) / "from-setting"
@@ -239,8 +247,8 @@ class LocalAssetStoreTests(unittest.TestCase):
                 payload = server.local_asset_library_payload(reason="TOS 读取资源失败")
                 self.assertFalse(payload["cloudEnabled"])
                 self.assertEqual(payload["storageMode"], "local-server")
-                self.assertEqual(payload["folderName"], "")
-                self.assertTrue(payload["directorySelectionRequired"])
+                self.assertEqual(payload["folderName"], "assets")
+                self.assertFalse(payload["directorySelectionRequired"])
             finally:
                 with server.CLOUD_STATUS_LOCK:
                     server.CLOUD_STATUS.clear()

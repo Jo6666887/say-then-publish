@@ -571,7 +571,7 @@ class StaticFileBoundaryTests(unittest.TestCase):
         cls.httpd.server_close()
         cls.thread.join(timeout=2)
 
-    def request_status(self, path, *, method="GET", headers=None, data=None):
+    def request_status(self, path, *, method="GET", headers=None, data=None, timeout=3):
         request = urllib.request.Request(
             f"{self.base_url}{path}",
             method=method,
@@ -579,7 +579,7 @@ class StaticFileBoundaryTests(unittest.TestCase):
             data=data,
         )
         try:
-            with urllib.request.urlopen(request, timeout=3) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 return response.status, response.read()
         except urllib.error.HTTPError as error:
             return error.code, error.read()
@@ -1369,6 +1369,76 @@ class StaticFileBoundaryTests(unittest.TestCase):
         self.assertEqual(response["project"]["title"], "Codex 新项目")
         self.assertEqual(response["project"]["cloudBaseUpdatedAt"], response["project"]["updatedAt"])
 
+    def test_agent_image_update_uses_zero_config_local_asset_library(self):
+        disabled_cloud = SimpleNamespace(
+            enabled=False,
+            disabled_reason="WRITE_THEN_PUBLISH_CLOUD_SYNC 未开启",
+        )
+        current = {
+            "activeId": "project-1",
+            "projects": [
+                {
+                    "id": "project-1",
+                    "title": "本地项目",
+                    "updatedAt": 200,
+                    "cloudBaseUpdatedAt": 0,
+                    "data": {"content": "## 01 本地配图", "images": {}},
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            data_dir = Path(temporary) / "runtime-data"
+            store_file = data_dir / "project-store.json"
+            data_dir.mkdir(parents=True)
+            store_file.write_text(json.dumps(current), encoding="utf-8")
+            local_assets = server.LocalAssetStore(server.ROOT, data_dir=data_dir, env={})
+            with (
+                mock.patch.object(server, "STORE_FILE", store_file),
+                mock.patch.object(server, "DATA_DIR", data_dir),
+                mock.patch.object(server, "LOCAL_ASSETS", local_assets),
+                mock.patch.object(server, "CLOUD", disabled_cloud),
+                mock.patch.dict(
+                    server.CLOUD_STATUS,
+                    {
+                        **enabled_cloud_status(),
+                        "enabled": False,
+                        "fallbackToLocal": True,
+                    },
+                    clear=True,
+                ),
+            ):
+                status, body = self.request_status(
+                    "/api/projects/project-1",
+                    method="PATCH",
+                    headers={"Content-Type": "application/json"},
+                    data=json.dumps(
+                        {
+                            "expectedUpdatedAt": 200,
+                            "content": "## 01 本地配图\n\n[[image:img-agent]]",
+                            "addImage": {
+                                "id": "img-agent",
+                                "image": {
+                                    "src": "data:image/png;base64,dGVzdA==",
+                                    "name": "Agent 本地配图.png",
+                                },
+                            },
+                        }
+                    ).encode("utf-8"),
+                )
+                saved = json.loads(store_file.read_text(encoding="utf-8"))
+                saved_image = saved["projects"][0]["data"]["images"]["img-agent"]
+                local_asset_exists = (
+                    local_assets.asset_dir / saved_image["localAssetName"]
+                ).is_file()
+
+        self.assertEqual(status, 200)
+        response = json.loads(body)
+        self.assertTrue(response["localSaved"])
+        self.assertFalse(response["cloudSynced"])
+        self.assertTrue(saved_image["localAssetId"])
+        self.assertTrue(saved_image["localAssetName"])
+        self.assertTrue(local_asset_exists)
+
     def test_conditional_project_store_put_requires_the_expected_base_revision(self):
         fake_cloud = FakeCloudStore()
         current = {
@@ -1627,7 +1697,11 @@ class StaticFileBoundaryTests(unittest.TestCase):
                 side_effect=lambda reason=None: {"reason": reason},
             ),
         ):
-            status, body = self.request_status("/api/assets")
+            # The shared test server can still be draining a background cloud-save
+            # worker from the concurrency tests above. Give this redaction boundary
+            # enough time to observe the response without turning scheduler jitter
+            # into a false negative.
+            status, body = self.request_status("/api/assets", timeout=10)
 
         self.assertEqual(status, 200)
         response_text = body.decode("utf-8")

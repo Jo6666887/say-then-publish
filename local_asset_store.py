@@ -143,9 +143,14 @@ class LocalAssetStore:
 
     @property
     def directory_selection_required(self) -> bool:
-        """True until a user or environment explicitly chooses a directory."""
+        """Whether saving must wait for a folder choice.
 
-        return self._directory_source == "default"
+        The managed ``runtime-data/assets`` directory is a safe zero-config
+        default. Users may still move the library with the native picker, but
+        local-first saving must never be blocked by that optional choice.
+        """
+
+        return False
 
     @property
     def directory_source(self) -> str:
@@ -486,8 +491,6 @@ class LocalAssetStore:
 
         with self._lock:
             enriched = copy.deepcopy(local_store)
-            if self.directory_selection_required:
-                return enriched
             manifest = self._read_manifest()
             tombstones = self._read_tombstones().get("assets", {})
             assets = manifest["assets"]

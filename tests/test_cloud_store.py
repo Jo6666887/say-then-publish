@@ -1,5 +1,9 @@
 import copy
+import os
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from cloud_store import CloudConfig, CloudStore, CloudStoreError
 
@@ -96,6 +100,16 @@ class FakeMetadataRest:
 
 
 class CloudStoreTests(unittest.TestCase):
+    def test_zero_config_stays_local_without_requiring_cloud_credentials(self):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(os.environ, {}, clear=True):
+            config = CloudConfig.from_env(Path(temporary))
+
+        store = CloudStore(config)
+        self.assertFalse(config.enabled)
+        self.assertFalse(config.ready)
+        self.assertFalse(store.enabled)
+        self.assertEqual(store.disabled_reason, "WRITE_THEN_PUBLISH_CLOUD_SYNC 未开启")
+
     def test_data_uri_round_trip(self):
         source = "data:image/png;base64,aGVsbG8="
         mime_type, raw = CloudStore._parse_data_uri(source)

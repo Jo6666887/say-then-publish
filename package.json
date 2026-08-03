@@ -1,8 +1,21 @@
 {
   "name": "write-then-publish",
   "version": "1.0.0",
+  "description": "Local-first, Agent-ready workspace for turning Markdown into social cards and long-form content.",
   "license": "MIT",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Jo6666887/write-then-publish.git"
+  },
+  "keywords": [
+    "local-first",
+    "content-creator",
+    "codex",
+    "agent",
+    "markdown",
+    "xiaohongshu"
+  ],
   "scripts": {
     "open": "open index.html",
     "start": "zsh scripts/start-server.zsh"
