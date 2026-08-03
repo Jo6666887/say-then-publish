@@ -621,6 +621,65 @@ class StaticFileBoundaryTests(unittest.TestCase):
         status, _ = self.request_status("/.env", method="HEAD")
         self.assertEqual(status, 404)
 
+    def test_write_env_updates_merges_and_preserves_comments(self):
+        import pathlib
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / ".env"
+            path.write_text("# keep me\nTOS_BUCKET=old\nSUPABASE_URL=u\n", encoding="utf-8")
+            server.write_env_updates(path, {"TOS_BUCKET": "new", "WTP_AI_APP_ID": "app-1"})
+            text = path.read_text(encoding="utf-8")
+            resolved = server.read_env_file_map(path)
+            self.assertEqual(resolved["TOS_BUCKET"], "new")
+            self.assertEqual(resolved["SUPABASE_URL"], "u")
+            self.assertEqual(resolved["WTP_AI_APP_ID"], "app-1")
+            self.assertIn("# keep me", text)
+
+    def test_settings_env_status_never_returns_secret_values(self):
+        status, body = self.request_status("/api/settings/env-status")
+        self.assertEqual(status, 200)
+        fields = json.loads(body.decode("utf-8"))["fields"]
+        for group in fields.values():
+            for key, info in group.items():
+                self.assertIn("configured", info)
+                if key in server.SETTINGS_ENV_SECRET:
+                    self.assertNotIn("value", info)
+
+    def test_settings_env_rejects_unknown_key(self):
+        data = json.dumps({"values": {"PATH": "/tmp"}}).encode("utf-8")
+        status, _ = self.request_status(
+            "/api/settings/env", method="POST", headers={"Content-Type": "application/json"}, data=data
+        )
+        self.assertEqual(status, 400)
+
+    def test_settings_env_rejects_newline_injection(self):
+        data = json.dumps({"values": {"TOS_BUCKET": "a\nSUPABASE_SECRET_KEY=leak"}}).encode("utf-8")
+        status, _ = self.request_status(
+            "/api/settings/env", method="POST", headers={"Content-Type": "application/json"}, data=data
+        )
+        self.assertEqual(status, 400)
+
+    def test_settings_env_write_targets_only_whitelisted_keys(self):
+        import pathlib
+        import tempfile
+
+        original = server.ENV_PATH
+        with tempfile.TemporaryDirectory() as directory:
+            server.ENV_PATH = pathlib.Path(directory) / ".env"
+            server.ENV_PATH.write_text("# comment\nTOS_BUCKET=old\n", encoding="utf-8")
+            try:
+                data = json.dumps({"values": {"TOS_BUCKET": "new-bucket"}}).encode("utf-8")
+                status, _ = self.request_status(
+                    "/api/settings/env", method="POST", headers={"Content-Type": "application/json"}, data=data
+                )
+                self.assertEqual(status, 200)
+                text = server.ENV_PATH.read_text(encoding="utf-8")
+                self.assertIn("TOS_BUCKET=new-bucket", text)
+                self.assertIn("# comment", text)
+            finally:
+                server.ENV_PATH = original
+
     def test_project_store_remains_api_only(self):
         status, body = self.request_status("/api/project-store")
         self.assertEqual(status, 200)

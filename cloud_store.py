@@ -715,17 +715,24 @@ class CloudStore:
         return value if value >= 0 else None
 
     @classmethod
-    def _conflict_copy(
-        cls,
-        project: dict,
-        *,
-        original_id: str,
-        remote_updated_at: int,
-    ) -> dict:
+    def _conflict_signature(cls, project: dict) -> str:
+        """Content fingerprint of a project's document, independent of id,
+        updatedAt, title and conflict bookkeeping. Re-syncing the same unsynced
+        local edits therefore maps to one conflict copy instead of a new one
+        every sync cycle."""
+        data = project.get("data") if isinstance(project.get("data"), dict) else {}
+        logical = cls._logical_project_value(data)
+        if isinstance(logical, dict):
+            logical = {key: item for key, item in logical.items() if key != LOCAL_CONFLICT_OF_FIELD}
+        blob = json.dumps(logical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:12]
+
+    @classmethod
+    def _conflict_copy(cls, project: dict, *, original_id: str) -> dict:
         copy_project = copy.deepcopy(project)
-        local_updated_at = cls._project_timestamp(project)
-        suffix = format(max(local_updated_at, remote_updated_at, 1), "x")
-        copy_project["id"] = f"{original_id}_local_conflict_{suffix}"
+        # Content-derived id: the same unsynced local state always maps to the
+        # same conflict copy, so repeated syncs stop piling up duplicates.
+        copy_project["id"] = f"{original_id}_local_conflict_{cls._conflict_signature(project)}"
         title = str(copy_project.get("title") or "未命名项目")
         if not title.endswith("（冲突副本）"):
             copy_project["title"] = f"{title[:32]}（冲突副本）"
@@ -776,22 +783,33 @@ class CloudStore:
             remote_changed_from_base = local_base is not None and remote_timestamp != local_base
             if local_has_unsynced_changes and remote_changed_from_base:
                 merged[project_id] = remote_project
-                conflict_copy = cls._conflict_copy(
-                    local_project,
-                    original_id=project_id,
-                    remote_updated_at=remote_timestamp,
+                # Anchor the copy to the ROOT original so a conflict copy that
+                # itself diverges cannot spawn nested "_local_conflict_" chains.
+                local_data = local_project.get("data") if isinstance(local_project.get("data"), dict) else {}
+                root_original_id = local_data.get(LOCAL_CONFLICT_OF_FIELD) or project_id
+                conflict_copy = cls._conflict_copy(local_project, original_id=root_original_id)
+                conflict_id = conflict_copy["id"]
+                # A copy with this id already carries the same content signature,
+                # so reuse it instead of re-minting and re-flagging every sync.
+                existing = (
+                    merged.get(conflict_id)
+                    or remote_projects.get(conflict_id)
+                    or local_projects.get(conflict_id)
                 )
-                merged[conflict_copy["id"]] = conflict_copy
-                conflicts.append(
-                    {
-                        "projectId": project_id,
-                        "conflictProjectId": conflict_copy["id"],
-                        "localUpdatedAt": local_timestamp,
-                        "remoteUpdatedAt": remote_timestamp,
-                    }
-                )
+                if existing is None:
+                    merged[conflict_id] = conflict_copy
+                    conflicts.append(
+                        {
+                            "projectId": project_id,
+                            "conflictProjectId": conflict_id,
+                            "localUpdatedAt": local_timestamp,
+                            "remoteUpdatedAt": remote_timestamp,
+                        }
+                    )
+                else:
+                    merged[conflict_id] = existing
                 if local.get("activeId") == project_id:
-                    active_conflict_id = conflict_copy["id"]
+                    active_conflict_id = conflict_id
                 continue
 
             if local_timestamp > remote_timestamp:

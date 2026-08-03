@@ -445,6 +445,83 @@ class CloudStoreTests(unittest.TestCase):
         self.assertEqual(by_id[conflict_id]["cloudBaseUpdatedAt"], 0)
         self.assertEqual(merged["activeId"], conflict_id)
 
+    def test_merge_stores_does_not_duplicate_conflict_copies_on_resync(self):
+        def diverging(local_content, remote_content, local_ts, remote_ts, extra_local=None):
+            local = {
+                "activeId": "project-1",
+                "projects": [
+                    {
+                        "id": "project-1",
+                        "title": "本机稿",
+                        "updatedAt": local_ts,
+                        "cloudBaseUpdatedAt": 200,
+                        "data": {"content": local_content},
+                    }
+                ]
+                + (extra_local or []),
+            }
+            remote = {
+                "activeId": "project-1",
+                "projects": [
+                    {
+                        "id": "project-1",
+                        "title": "云端稿",
+                        "updatedAt": remote_ts,
+                        "cloudBaseUpdatedAt": remote_ts,
+                        "data": {"content": remote_content},
+                    }
+                ],
+            }
+            return CloudStore._merge_stores(local, remote)
+
+        merged_first = diverging("本机修改", "伙伴修改", 220, 210)
+        copies_first = [p for p in merged_first["projects"] if "_local_conflict_" in p["id"]]
+        self.assertEqual(len(copies_first), 1)
+        conflict_copy = copies_first[0]
+
+        # A later sync where the same unsynced local content meets an advanced
+        # cloud must reuse the existing copy, not mint a second one.
+        merged_second = diverging("本机修改", "伙伴又改", 240, 230, extra_local=[conflict_copy])
+        copies_second = [p for p in merged_second["projects"] if "_local_conflict_" in p["id"]]
+        self.assertEqual(len(copies_second), 1)
+        self.assertEqual(copies_second[0]["id"], conflict_copy["id"])
+        self.assertEqual(merged_second["conflicts"], [])
+
+    def test_merge_stores_conflict_copy_divergence_stays_rooted(self):
+        conflict_copy_id = "project-1_local_conflict_abc123"
+        local = {
+            "activeId": conflict_copy_id,
+            "projects": [
+                {
+                    "id": conflict_copy_id,
+                    "title": "副本",
+                    "updatedAt": 320,
+                    "cloudBaseUpdatedAt": 300,
+                    "data": {"content": "副本又改", "__localConflictOf": "project-1"},
+                }
+            ],
+        }
+        remote = {
+            "activeId": conflict_copy_id,
+            "projects": [
+                {
+                    "id": conflict_copy_id,
+                    "title": "副本云端",
+                    "updatedAt": 310,
+                    "cloudBaseUpdatedAt": 310,
+                    "data": {"content": "副本伙伴改", "__localConflictOf": "project-1"},
+                }
+            ],
+        }
+
+        merged = CloudStore._merge_stores(local, remote)
+
+        new_conflict_id = merged["conflicts"][0]["conflictProjectId"]
+        self.assertTrue(new_conflict_id.startswith("project-1_local_conflict_"))
+        self.assertNotIn("abc123_local_conflict_", new_conflict_id)
+        by_id = {project["id"]: project for project in merged["projects"]}
+        self.assertEqual(by_id[new_conflict_id]["data"]["__localConflictOf"], "project-1")
+
     def test_cloud_base_cursor_is_not_written_into_publishable_cloud_project(self):
         store = RecordingCloudStore()
         _, cloud_project = store._encode_project(
