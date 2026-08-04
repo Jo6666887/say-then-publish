@@ -23,13 +23,39 @@
 >
 > _前身「写了就发 / Write Then Publish」解决的是「自己写、自己发」——左边写 Markdown，右边实时出卡片。「说了就发」更进一步，把重点放在和 Agent 协同：我们把这套图文卡片的表达语言（加粗 / 上色 / 高亮 / 分页 / 15 套主题）做成了一个 Skill——Codex 装上就能直接读懂并在本地使用，其他能读取 Skill、调用本地命令的 Agent 也能接入。你不必再自己排版，把话说清楚就行。_
 
-## 它现在就是一个可直接下载的 Skill
+## 给人类：下载、安装、开始使用
 
-不需要先学项目结构，也不需要从 GitHub clone 代码。直接下载下面这个压缩包，放进 Codex 的 Skill 目录，然后对 Codex 说“初始化说了就发”即可。Claude Code 或其他能够读取 Skill、执行本地命令的 Agent 也可以接入：
+完整程序已经封装在 Skill 压缩包里，不需要先学习项目结构，也不需要自己配置数据库。任选下面一种方式即可。
 
-### [下载 Say Then Publish Skill](release/say-then-publish-skill.zip?raw=1)
+### 方法一：直接让 Codex 安装（推荐）
 
-完整程序已经封装在 Skill 里面。第一次使用只会询问两件事：**你的小红书账号名称**，以及**平时存放社媒内容的文件夹**。没有配置 Supabase/TOS 时自动使用本地模式；配置后则继续支持线上团队协作。
+把下面这句话完整发给 Codex：
+
+> 请帮我安装 Say Then Publish Skill。下载 `https://raw.githubusercontent.com/Jo6666887/say-then-publish/main/release/say-then-publish-skill.zip`，解压到 `~/.codex/skills/`；保留 `~/.say-then-publish/` 里的个人记忆。安装完成后告诉我重新开一个任务测试。
+
+### 方法二：复制三行命令安装
+
+在 macOS 或 Linux 的终端中运行：
+
+```bash
+mkdir -p ~/.codex/skills
+curl -L https://raw.githubusercontent.com/Jo6666887/say-then-publish/main/release/say-then-publish-skill.zip -o /tmp/say-then-publish-skill.zip
+unzip -q -n /tmp/say-then-publish-skill.zip -d ~/.codex/skills
+```
+
+### 方法三：直接下载压缩包
+
+- 最简单：点击 **[下载 Say Then Publish Skill](release/say-then-publish-skill.zip?raw=1)**；
+- 也可以点击 GitHub 页面右上角绿色的 **Code → Download ZIP**。这个按钮下载的是整个仓库，解压后请进入 `release/`，再解压里面的 `say-then-publish-skill.zip`；
+- 最后把解压得到的 `say-then-publish` 文件夹放进 `~/.codex/skills/`。
+
+安装后重新打开一个 Codex 任务，对它说：
+
+> 初始化 Say Then Publish
+
+第一次使用只会询问两件事：**你的小红书账号名称**，以及**平时存放社媒内容的文件夹**。没有配置 Supabase/TOS 时自动使用本地模式；配置后继续支持线上团队协作。
+
+> 已经 clone 过仓库或已经安装过 Skill 的用户不需要重复下载。仓库开发者在项目目录运行 `npm start`；Skill 用户直接对 Codex 说“启动 Say Then Publish”即可。
 
 ### Codex 原生，但不把你锁在某个模型或语言里
 
