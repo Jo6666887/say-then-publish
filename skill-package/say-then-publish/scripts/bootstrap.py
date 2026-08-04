@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from pathlib import Path
@@ -99,6 +101,35 @@ def remembered_account_name() -> str | None:
             if value and not value.startswith(("http://", "https://")):
                 return value
     return None
+
+
+def remembered_creator_defaults() -> dict[str, str]:
+    """Return non-secret card defaults that may be injected into a new project."""
+    try:
+        entries = load_memory(create=False).get("entries", [])
+    except (CreatorMemoryError, OSError, ValueError):
+        return {}
+    latest: dict[tuple[str, str], str] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        category = str(entry.get("category", "")).strip()
+        key = str(entry.get("key", "")).strip()
+        value = str(entry.get("value", "")).strip()
+        if value:
+            latest[(category, key)] = value
+    defaults: dict[str, str] = {}
+    display_name = latest.get(("identity", "小红书账号名称")) or latest.get(("identity", "小红书名称"))
+    handle = latest.get(("device", "小红书账号 ID")) or latest.get(("device", "当前设备的小红书账号"))
+    theme = latest.get(("layout", "默认卡片主题"))
+    if display_name:
+        defaults["--display-name"] = display_name
+    if handle:
+        defaults["--handle"] = handle if handle.startswith("@") else f"@{handle}"
+    if theme:
+        match = re.search(r"\(([a-z0-9-]+)\)\s*$", theme, re.IGNORECASE)
+        defaults["--card-theme"] = match.group(1) if match else theme
+    return defaults
 
 
 def write_config(config: dict[str, Any]) -> None:
@@ -328,10 +359,33 @@ def run_cli(config: dict[str, Any], arguments: list[str]) -> int:
         raise BootstrapError("cli 后需要提供 list、get、create、update 等命令。")
     if not health(base_url(config)):
         start_application(config, open_browser=False)
+    operation = arguments[0]
+    effective_arguments = list(arguments)
+    if operation == "create":
+        for flag, value in remembered_creator_defaults().items():
+            if flag not in effective_arguments:
+                effective_arguments.extend((flag, value))
     app_dir = Path(config["appDir"])
     python = ensure_dependencies(app_dir)
-    command = [str(python), str(app_dir / "scripts" / "wtp.py"), "--url", base_url(config), *arguments]
-    return subprocess.run(command, check=False).returncode
+    command = [str(python), str(app_dir / "scripts" / "wtp.py"), "--url", base_url(config), *effective_arguments]
+    completed = subprocess.run(command, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if completed.stdout:
+        sys.stdout.write(completed.stdout)
+    if completed.stderr:
+        sys.stderr.write(completed.stderr)
+    if completed.returncode == 0 and operation in {"create", "update", "add-image"}:
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            payload = {}
+        project = payload.get("project") if isinstance(payload, dict) else None
+        project_id = project.get("id") if isinstance(project, dict) else None
+        if not project_id and operation in {"update", "add-image"} and len(arguments) > 1:
+            project_id = arguments[1]
+        if isinstance(project_id, str) and project_id:
+            url = f"{base_url(config).rstrip('/')}?project={urllib.parse.quote(project_id, safe='')}"
+            webbrowser.open(url)
+    return completed.returncode
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -1485,6 +1485,14 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
                         self.send_json({"error": "published 必须是布尔值"}, HTTPStatus.BAD_REQUEST)
                         return
                     data["published"] = incoming["published"]
+                for field, maximum in (("displayName", 80), ("handle", 80), ("cardTheme", 80)):
+                    if field not in incoming:
+                        continue
+                    value = incoming.get(field)
+                    if not isinstance(value, str) or not value.strip() or len(value.strip()) > maximum:
+                        self.send_json({"error": f"{field} 格式无效"}, HTTPStatus.BAD_REQUEST)
+                        return
+                    data[field] = value.strip()
                 if "addImage" in incoming:
                     addition = incoming.get("addImage")
                     image_id = addition.get("id") if isinstance(addition, dict) else None
@@ -1732,6 +1740,15 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
             if not isinstance(content, str) or not isinstance(title, str):
                 self.send_json({"error": "标题或正文格式无效"}, HTTPStatus.BAD_REQUEST)
                 return
+            creator_fields: dict[str, str] = {}
+            for field, maximum in (("displayName", 80), ("handle", 80), ("cardTheme", 80)):
+                if field not in incoming:
+                    continue
+                value = incoming.get(field)
+                if not isinstance(value, str) or not value.strip() or len(value.strip()) > maximum:
+                    self.send_json({"error": f"{field} 格式无效"}, HTTPStatus.BAD_REQUEST)
+                    return
+                creator_fields[field] = value.strip()
             now = next_server_revision()
             project_id = f"project_{now:x}_{uuid.uuid4().hex[:6]}"
             project = {
@@ -1743,6 +1760,7 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
                     "content": content,
                     "published": incoming.get("published") is True,
                     "images": {},
+                    **creator_fields,
                 },
             }
             with STORE_LOCK:
