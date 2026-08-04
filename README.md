@@ -185,18 +185,13 @@ Codex 可以带你逐项完成，通常不需要自己理解数据库或对象�
 
 ## 给 Agent · For Agent
 
-「说了就发」的核心，就是这一层：Agent 通过一套稳定 CLI（`scripts/wtp.py`）和项目技能，把对话变成排好版的图文卡片，再配图、校验版本——**这套排版语言（加粗 / 上色 / 高亮 / 标题 / 分页 / 主题）机器都能读懂并稳定写出**，所以成稿即成图。
+「说了就发」的核心，就是这一层：Agent 通过 Say Then Publish Skill 和一套稳定 CLI，把对话变成排好版的图文卡片，再配图、校验版本——**这套排版语言（加粗 / 上色 / 高亮 / 标题 / 分页 / 主题）机器都能读懂并稳定写出**，所以成稿即成图。
 
 同一份本机项目库，网页和 Agent 读写的是同一份数据。约定很克制：Agent 先读最新版本，再做有条件的更新；插图必须锚定正文里唯一的标题行，找不到或重复时会停下，而不是猜位置。
 
 配图前，技能会先检查本机是否装了**小黑生图技能**：没装就给出安装链接让你一键配置（不内置、不代装），装了就直接生图并插到对应小节。
 
-**优先装进 Codex，也可以接入其他 Agent。** 技能就放在仓库的 `.agents/skills/write-then-publish/`；软链到对应 Agent 的技能目录即可被读取：
-
-```bash
-ln -s "$(pwd)/.agents/skills/write-then-publish" ~/.codex/skills/write-then-publish     # Codex
-ln -s "$(pwd)/.agents/skills/write-then-publish" ~/.claude/skills/write-then-publish   # Claude Code（可选）
-```
+公开 Skill 的唯一名称是 **Say Then Publish**，唯一源码位于 `skill-package/say-then-publish/`，发布包位于 `release/say-then-publish-skill.zip`。不再同时维护 `Write Then Publish` 项目 Skill，避免 Codex 出现两个名字和两套规则。
 
 之后在任意 Agent 窗口里聊完，说一句「把这段整理成图文卡片」或「帮我配图」，它就会走上面这套 CLI 流程。
 
@@ -317,7 +312,7 @@ git diff --check
 ├── src/                           # 前端交互与样式
 ├── server.py                      # 本地项目 / 资源 / 云同步服务
 ├── scripts/wtp.py                 # Agent 稳定 CLI
-├── .agents/skills/                # Codex 项目 Skill
+├── skill-package/say-then-publish/ # Say Then Publish 唯一 Skill 源码
 ├── local_asset_store.py           # 零配置本机素材库
 ├── cloud_store.py                 # 可选云端协作
 ├── runtime-data/                  # 本机数据，Git 忽略
