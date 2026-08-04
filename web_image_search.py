@@ -32,7 +32,7 @@ from ai_layout import AILayoutService
 WIKIMEDIA_API_URL = "https://commons.wikimedia.org/w/api.php"
 PEXELS_API_URL = "https://api.pexels.com/v1/search"
 PEXELS_LICENSE_URL = "https://www.pexels.com/license/"
-APP_USER_AGENT = "WriteThenPublish/1.0 (+https://github.com/Jo6666887/write-then-publish)"
+APP_USER_AGENT = "SayThenPublish/1.0 (local creator workspace)"
 
 OFFICIAL_API_HOSTS = frozenset({"commons.wikimedia.org", "api.pexels.com"})
 WIKIMEDIA_IMAGE_HOSTS = frozenset({"upload.wikimedia.org"})

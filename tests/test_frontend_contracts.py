@@ -122,12 +122,15 @@ class SharedProjectConflictContractTests(unittest.TestCase):
         self.assertNotIn("current.title =", rename)
 
     def test_project_delete_requires_explicit_confirmation_before_any_tombstone(self):
+        request = function_body("requestProjectDeletion")
         remove = function_body("deleteProject")
 
-        self.assertIn("window.confirm", remove)
-        self.assertIn("无法直接找回", remove)
-        self.assertLess(remove.index("window.confirm"), remove.index("markPendingProjectDeletion"))
-        self.assertIn("已取消删除", remove)
+        self.assertNotIn("window.confirm", remove)
+        self.assertIn("pendingHistoryDeleteProjectId === project.id", request)
+        self.assertIn("确认删除", request)
+        self.assertIn("deleteProject(project.id, { confirmed: true })", request)
+        self.assertIn("confirmed !== true", remove)
+        self.assertLess(remove.index("confirmed !== true"), remove.index("markPendingProjectDeletion"))
 
 
 class PreviewDirectEditingContractTests(unittest.TestCase):
@@ -237,71 +240,22 @@ class EditorTypingPerformanceContractTests(unittest.TestCase):
         self.assertIn("cancelEditorPreviewRender()", prioritize)
 
 
-class AiOptimizeInteractionContractTests(unittest.TestCase):
-    def test_modal_starts_unselected_and_requires_explicit_generate(self):
-        for element_id in ("aiModeLayout", "aiModePolish"):
-            tag = button_tag(element_id)
-            self.assertIn('role="radio"', tag)
-            self.assertIn('aria-checked="false"', tag)
-            self.assertNotRegex(tag, r'class="[^"]*\bactive\b')
+class AgentNativeLayoutContractTests(unittest.TestCase):
+    def test_external_ai_layout_controls_are_not_exposed(self):
+        for element_id in (
+            "aiOptimizeBtn",
+            "aiUndoBtn",
+            "aiOptimizeModal",
+            "aiOptimizeGenerateBtn",
+            "aiOptimizeApplyBtn",
+        ):
+            self.assertNotIn(f'id="{element_id}"', HTML)
+        self.assertNotIn('data-api-tab="ai"', HTML)
+        self.assertNotIn('data-api-panel="ai"', HTML)
 
-        generate = button_tag("aiOptimizeGenerateBtn")
-        self.assertIn("disabled", generate)
-        self.assertIn('type="button"', generate)
-
-        apply_button = button_tag("aiOptimizeApplyBtn")
-        self.assertIn("disabled", apply_button)
-        self.assertIn("hidden", apply_button)
-
-    def test_opening_modal_never_starts_or_saves_ai_request(self):
-        body = function_body("openAiOptimizeModal")
-        self.assertNotIn("runAiOptimization(", body)
-        self.assertNotIn("fetch(", body)
-        self.assertNotIn("saveState(", body)
-        self.assertIn("setAiOptimizeMode(null)", body)
-        self.assertIn('els.workspace?.setAttribute("inert", "")', body)
-        self.assertIn('els.workspace?.removeAttribute("inert")', function_body("closeAiOptimizeModal"))
-
-    def test_modes_only_select_and_generate_button_is_only_request_trigger(self):
-        bind = function_body("bindEvents")
-        mode_binding = re.search(
-            r"\[els\.aiModeLayout,\s*els\.aiModePolish\]\.forEach\(\(button\)\s*=>\s*\{"
-            r"(?P<body>.*?)^\s*\}\);",
-            bind,
-            re.MULTILINE | re.DOTALL,
-        )
-        self.assertIsNotNone(mode_binding)
-        self.assertIn("chooseAiOptimizeMode", mode_binding.group("body"))
-        self.assertNotIn("runAiOptimization", mode_binding.group("body"))
-
-        generate_start = bind.index("els.aiOptimizeGenerate")
-        generate_binding = bind[generate_start : generate_start + 260]
-        self.assertIn('addEventListener("click"', generate_binding)
-        self.assertIn("runAiOptimization(", generate_binding)
-        self.assertEqual(
-            APP.count("runAiOptimization("),
-            2,
-            "AI requests must only have the function definition and explicit Generate binding",
-        )
-
-    def test_no_mode_selection_cannot_fall_back_to_layout(self):
-        selected = function_body("selectedAiOptimizeMode")
-        self.assertIn("return null", selected)
-        run = function_body("runAiOptimization")
-        self.assertIn("!requestedMode", run)
-        self.assertIn("fetch(AI_OPTIMIZE_URL", run)
-
-    def test_layout_mode_rechecks_copy_before_showing_preview(self):
-        signature = function_body("layoutOnlyCopySignature")
-        preserves = function_body("layoutOnlyPreservesCopy")
-        run = function_body("runAiOptimization")
-
-        self.assertIn("color|bg", signature)
-        self.assertIn("layoutOnlyCopySignature(before)", preserves)
-        self.assertIn("layoutOnlyCopySignature(after)", preserves)
-        self.assertIn('nextMode === "layout"', run)
-        self.assertIn("layoutOnlyPreservesCopy(before, payload.optimizedContent)", run)
-        self.assertIn("已阻止进入预览", run)
+    def test_help_routes_layout_work_to_the_agent(self):
+        self.assertIn("把当前项目整理为 8 张图文卡片", HTML)
+        self.assertIn("Agent 会读取当前项目、按版本安全修改", HTML)
 
 
 class IllustrationInteractionContractTests(unittest.TestCase):

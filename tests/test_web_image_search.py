@@ -271,7 +271,7 @@ class WebImageSearchTests(unittest.TestCase):
         url, kwargs = service._session.calls[0]
         self.assertEqual(url, "https://commons.wikimedia.org/w/api.php")
         self.assertFalse(kwargs["allow_redirects"])
-        self.assertTrue(kwargs["headers"]["User-Agent"].startswith("WriteThenPublish/"))
+        self.assertTrue(kwargs["headers"]["User-Agent"].startswith("SayThenPublish/"))
 
     def test_search_results_are_cached_without_repeating_provider_call(self):
         service = self.make_service([FakeResponse(payload=wikimedia_payload())])

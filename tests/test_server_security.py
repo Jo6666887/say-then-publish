@@ -628,12 +628,12 @@ class StaticFileBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / ".env"
             path.write_text("# keep me\nTOS_BUCKET=old\nSUPABASE_URL=u\n", encoding="utf-8")
-            server.write_env_updates(path, {"TOS_BUCKET": "new", "WTP_AI_APP_ID": "app-1"})
+            server.write_env_updates(path, {"TOS_BUCKET": "new", "TOS_KEY_PREFIX": "cards/"})
             text = path.read_text(encoding="utf-8")
             resolved = server.read_env_file_map(path)
             self.assertEqual(resolved["TOS_BUCKET"], "new")
             self.assertEqual(resolved["SUPABASE_URL"], "u")
-            self.assertEqual(resolved["WTP_AI_APP_ID"], "app-1")
+            self.assertEqual(resolved["TOS_KEY_PREFIX"], "cards/")
             self.assertIn("# keep me", text)
 
     def test_settings_env_status_never_returns_secret_values(self):

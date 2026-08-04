@@ -51,12 +51,11 @@
               <div class="api-config" id="apiConfig">
                 <div class="workspace-settings-heading">
                   <strong>API 配置</strong>
-                  <span>只做团队协作、或用 AI 优化排版时才需要。只本人本地使用可以跳过。密钥只写入本机的 <code>.env</code>，不会离开这台电脑。</span>
+                  <span>只做团队协作时才需要。只本人本地使用可以跳过。密钥只写入本机的 <code>.env</code>，不会离开这台电脑。</span>
                 </div>
                 <div class="api-config-tabs" role="tablist" aria-label="API 配置分组">
                   <button type="button" class="api-tab active" data-api-tab="supabase" role="tab" aria-selected="true">Supabase</button>
                   <button type="button" class="api-tab" data-api-tab="tos" role="tab" aria-selected="false">火山 TOS</button>
-                  <button type="button" class="api-tab" data-api-tab="ai" role="tab" aria-selected="false">AI Key</button>
                 </div>
                 <div class="api-config-body">
                   <div class="api-panel" data-api-panel="supabase">
@@ -77,15 +76,6 @@
                     <label class="api-field"><span>Bucket</span><input data-env-key="TOS_BUCKET" type="text" autocomplete="off" placeholder="your-bucket" /></label>
                     <label class="api-field"><span>Key 前缀</span><input data-env-key="TOS_KEY_PREFIX" type="text" autocomplete="off" placeholder="write-then-publish/assets/" /></label>
                   </div>
-                  <div class="api-panel" data-api-panel="ai" hidden>
-                    <a class="api-official" href="https://www.xfyun.cn/" target="_blank" rel="noopener noreferrer">去讯飞开放平台申请 ↗</a>
-                    <p class="api-panel-note">用于「AI 优化排版」。不填则该功能不可用，其余功能照常。</p>
-                    <label class="api-field"><span>API Base</span><input data-env-key="WTP_AI_API_BASE" type="text" autocomplete="off" placeholder="https://maas-api...xf-yun.com/v2" /></label>
-                    <label class="api-field"><span>API Key</span><input data-env-key="WTP_AI_API_KEY" data-env-secret type="password" autocomplete="off" placeholder="未配置" /></label>
-                    <label class="api-field"><span>App ID</span><input data-env-key="WTP_AI_APP_ID" data-env-secret type="password" autocomplete="off" placeholder="未配置" /></label>
-                    <label class="api-field"><span>Model ID</span><input data-env-key="WTP_AI_MODEL_ID" type="text" autocomplete="off" placeholder="xopkimik25" /></label>
-                    <label class="api-field"><span>Resource ID</span><input data-env-key="WTP_AI_RESOURCE_ID" type="text" autocomplete="off" placeholder="0" /></label>
-                  </div>
                 </div>
                 <div class="api-config-actions">
                   <span id="apiConfigStatus" class="api-config-status" role="status" aria-live="polite"></span>
@@ -104,7 +94,7 @@
           <div class="project-heading">
             <label class="project-title-control">
               <span>当前项目</span>
-              <input id="projectTitleInput" type="text" maxlength="40" placeholder="例如：千问 Token Plan 优化版" aria-label="项目标题" />
+              <input id="projectTitleInput" type="text" maxlength="40" placeholder="例如：我的小红书选题" aria-label="项目标题" />
             </label>
             <label class="project-publish-control">
               <span>发布状态</span>
@@ -163,15 +153,7 @@
             <button type="button" class="tool-button" data-format="bold" title="加粗；再次点击取消加粗"><strong>B</strong></button>
             <button type="button" class="tool-button" data-format="italic" title="斜体；再次点击取消斜体"><em>I</em></button>
             <button type="button" class="tool-button" data-format="quote" title="重点引用"><i data-lucide="quote"></i></button>
-            <span class="toolbar-group-label">智能与素材</span>
-            <button id="aiOptimizeBtn" class="ai-toolbar-button" type="button" title="让 AI 自动识别重点并优化当前排版">
-              <i data-lucide="sparkles"></i>
-              <span>AI 优化排版</span>
-            </button>
-            <button id="aiUndoBtn" class="ai-toolbar-button ai-undo-button" type="button" title="撤回上一次 AI 优化" hidden>
-              <i data-lucide="undo-2"></i>
-              <span>撤回 AI</span>
-            </button>
+            <span class="toolbar-group-label">素材</span>
             <label class="tool-button file-tool" title="插入图片" aria-label="插入图片">
               <i data-lucide="image-plus"></i>
               <input id="contentImageInput" type="file" accept="image/*" multiple tabindex="-1" />
@@ -590,66 +572,6 @@
       </div>
     </div>
 
-    <div id="aiOptimizeModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="aiOptimizeTitle" aria-describedby="aiOptimizeDescription">
-      <div class="modal-card ai-optimize-card">
-        <div class="modal-head">
-          <div>
-            <h3 id="aiOptimizeTitle">AI 优化当前内容</h3>
-            <p id="aiOptimizeDescription">先查看优化前后差异，确认后才会替换正文；应用后仍可撤回。</p>
-          </div>
-          <button id="aiOptimizeCloseBtn" class="icon-button ghost" type="button" title="关闭 AI 优化" aria-label="关闭 AI 优化">
-            <i data-lucide="x"></i>
-          </button>
-        </div>
-        <div class="ai-optimize-body">
-          <div id="aiOptimizeStatus" class="ai-optimize-status" role="status" aria-live="polite">选择优化方式后开始生成建议。</div>
-          <div class="ai-mode-switch" role="radiogroup" aria-label="AI 优化方式">
-            <button id="aiModeLayout" class="ai-mode-button" type="button" data-ai-mode="layout" role="radio" aria-checked="false" tabindex="0">
-              <i data-lucide="wand-sparkles"></i>
-              <span><strong>只优化排版</strong><small>正文逐字不改：主结论加粗，数字、结果和转折用浅黄底色</small></span>
-            </button>
-            <button id="aiModePolish" class="ai-mode-button" type="button" data-ai-mode="polish" role="radio" aria-checked="false" tabindex="-1">
-              <i data-lucide="message-square-text"></i>
-              <span><strong>润色并排版</strong><small>会修改少量文案表达，再添加视觉重点；图片、数字和链接受保护</small></span>
-            </button>
-          </div>
-          <div class="ai-compare-grid">
-            <section class="ai-compare-pane" aria-labelledby="aiBeforeTitle">
-              <div class="ai-compare-heading">
-                <h4 id="aiBeforeTitle">优化前</h4>
-                <span>当前编辑内容</span>
-              </div>
-              <pre id="aiBeforePreview" class="ai-copy-preview" tabindex="0">等待读取当前正文…</pre>
-            </section>
-            <section class="ai-compare-pane ai-after-pane" aria-labelledby="aiAfterTitle">
-              <div class="ai-compare-heading">
-                <h4 id="aiAfterTitle">优化后</h4>
-                <span>AI 建议版本</span>
-              </div>
-              <pre id="aiAfterPreview" class="ai-copy-preview" tabindex="0">生成完成后将在这里展示完整结果。</pre>
-            </section>
-          </div>
-          <section class="ai-change-summary" aria-labelledby="aiChangeTitle">
-            <h4 id="aiChangeTitle">本次调整</h4>
-            <ul id="aiChangeList">
-              <li>尚未生成优化建议。</li>
-            </ul>
-          </section>
-        </div>
-        <div class="ai-optimize-actions">
-          <button id="aiOptimizeCancelBtn" class="secondary-button" type="button">关闭（不应用）</button>
-          <button id="aiOptimizeGenerateBtn" class="primary-button" type="button" disabled>
-            <i data-lucide="sparkles"></i>
-            <span>开始生成建议</span>
-          </button>
-          <button id="aiOptimizeApplyBtn" class="primary-button" type="button" disabled hidden>
-            <i data-lucide="check"></i>
-            <span>应用到正文</span>
-          </button>
-        </div>
-      </div>
-    </div>
-
     <div id="themeLibraryModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="themeLibraryTitle" aria-describedby="themeLibraryDescription">
       <div class="modal-card theme-library-card">
         <div class="modal-head">
@@ -782,6 +704,7 @@
     <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/lucide@1.8.0/dist/umd/lucide.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
-    <script src="src/app.js?v=20260802-team-sync-v2"></script>
+    <script src="src/user-profile.js"></script>
+    <script src="src/app.js?v=20260803-inline-delete-confirm"></script>
   </body>
 </html>
