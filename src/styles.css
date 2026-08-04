@@ -1218,6 +1218,10 @@ body[data-guide-readonly="true"] .editor-textarea:focus {
   overflow: visible !important;
 }
 
+.history-actions.confirming .history-duplicate {
+  display: none;
+}
+
 .history-duplicate,
 .history-delete {
   width: 30px;
@@ -1238,6 +1242,23 @@ body[data-guide-readonly="true"] .editor-textarea:focus {
   background: rgba(239, 68, 68, 0.12);
   color: #ef4444;
   opacity: 1;
+}
+
+.history-delete.confirming,
+.history-delete.confirming:hover {
+  width: auto;
+  gap: 4px;
+  padding: 0 8px;
+  color: #ffffff;
+  background: #dc2626;
+  opacity: 1;
+}
+
+.history-delete.confirming span {
+  overflow: visible;
+  color: inherit;
+  font-size: 11px;
+  font-weight: 850;
 }
 
 .history-duplicate svg,

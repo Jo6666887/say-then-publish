@@ -122,12 +122,15 @@ class SharedProjectConflictContractTests(unittest.TestCase):
         self.assertNotIn("current.title =", rename)
 
     def test_project_delete_requires_explicit_confirmation_before_any_tombstone(self):
+        request = function_body("requestProjectDeletion")
         remove = function_body("deleteProject")
 
-        self.assertIn("window.confirm", remove)
-        self.assertIn("无法直接找回", remove)
-        self.assertLess(remove.index("window.confirm"), remove.index("markPendingProjectDeletion"))
-        self.assertIn("已取消删除", remove)
+        self.assertNotIn("window.confirm", remove)
+        self.assertIn("pendingHistoryDeleteProjectId === project.id", request)
+        self.assertIn("确认删除", request)
+        self.assertIn("deleteProject(project.id, { confirmed: true })", request)
+        self.assertIn("confirmed !== true", remove)
+        self.assertLess(remove.index("confirmed !== true"), remove.index("markPendingProjectDeletion"))
 
 
 class PreviewDirectEditingContractTests(unittest.TestCase):

@@ -26,6 +26,7 @@ const LOCAL_ASSET_DIRECTORY_KEY = "assetLibraryDirectoryHandle";
 const LOCAL_STATE_SAVE_DELAY = 450;
 const LOCAL_STATE_SAVE_MAX_WAIT = 5000;
 const LOCAL_DATABASE_SAVE_DELAY = 1200;
+const HISTORY_DELETE_CONFIRM_TIMEOUT = 5000;
 const EDITOR_STATE_SAVE_DELAY = 900;
 const CONTROL_PREVIEW_RENDER_DELAY = 180;
 const EDITOR_PREVIEW_RENDER_DELAY = 520;
@@ -778,6 +779,8 @@ let localDatabaseSaveTimer = 0;
 let localDatabaseSaveChain = Promise.resolve(true);
 let pendingProjectDeletionSaveChain = Promise.resolve({ saved: true, deletions: [] });
 let pendingProjectDeletionsCache = null;
+let pendingHistoryDeleteProjectId = null;
+let pendingHistoryDeleteTimer = 0;
 let legacyStateLocalStorageUnavailable = false;
 let projectStoreLocalStorageUnavailable = false;
 let sharedProjectStoreAvailable = null;
@@ -3751,6 +3754,37 @@ function projectTypeLabel(type) {
   return type === "article" ? "长文" : "图文";
 }
 
+function clearHistoryDeleteConfirmation({ render = true } = {}) {
+  if (pendingHistoryDeleteTimer) window.clearTimeout(pendingHistoryDeleteTimer);
+  pendingHistoryDeleteTimer = 0;
+  pendingHistoryDeleteProjectId = null;
+  if (render) updateProjectHistory();
+}
+
+function requestProjectDeletion(projectId) {
+  const project = state.projects.find((item) => item.id === projectId);
+  if (!project || isBuiltInProject(project)) return;
+  const projectName = project.title || "未命名图文";
+  if (pendingHistoryDeleteProjectId === project.id) {
+    clearHistoryDeleteConfirmation({ render: false });
+    updateProjectHistory();
+    void deleteProject(project.id, { confirmed: true });
+    return;
+  }
+
+  if (pendingHistoryDeleteTimer) window.clearTimeout(pendingHistoryDeleteTimer);
+  pendingHistoryDeleteProjectId = project.id;
+  els.status.textContent = `再次点击“确认删除”才会永久删除：${projectName}`;
+  updateProjectHistory();
+  pendingHistoryDeleteTimer = window.setTimeout(() => {
+    if (pendingHistoryDeleteProjectId !== project.id) return;
+    pendingHistoryDeleteProjectId = null;
+    pendingHistoryDeleteTimer = 0;
+    els.status.textContent = `已取消删除：${projectName}`;
+    updateProjectHistory();
+  }, HISTORY_DELETE_CONFIRM_TIMEOUT);
+}
+
 function updateProjectHistory() {
   if (!els.projectHistory) return;
   els.projectHistory.innerHTML = "";
@@ -3776,6 +3810,7 @@ function updateProjectHistory() {
   for (const project of visibleProjects) {
     const type = projectType(project);
     const builtIn = isBuiltInProject(project);
+    const confirmingDelete = pendingHistoryDeleteProjectId === project.id;
     const item = document.createElement("div");
     item.className = "history-item";
     item.classList.toggle("built-in", builtIn);
@@ -3790,12 +3825,13 @@ function updateProjectHistory() {
       ${
         builtIn
           ? '<span class="history-lock" title="内置说明书不可修改"><i data-lucide="lock"></i></span>'
-          : `<span class="history-actions">
+          : `<span class="history-actions${confirmingDelete ? " confirming" : ""}">
               <button type="button" class="history-duplicate" title="复制一份" aria-label="复制 ${escapeHtml(project.title || "未命名图文")}">
                 <i data-lucide="copy-plus"></i>
               </button>
-              <button type="button" class="history-delete" title="删除历史记录" aria-label="删除 ${escapeHtml(project.title || "未命名图文")}">
+              <button type="button" class="history-delete${confirmingDelete ? " confirming" : ""}" title="${confirmingDelete ? "再次点击确认永久删除" : "删除历史记录"}" aria-label="${confirmingDelete ? "确认删除" : "删除"} ${escapeHtml(project.title || "未命名图文")}">
                 <i data-lucide="trash-2"></i>
+                ${confirmingDelete ? "<span>确认删除</span>" : ""}
               </button>
             </span>`
       }
@@ -3805,7 +3841,7 @@ function updateProjectHistory() {
       event.currentTarget.disabled = true;
       void duplicateProject(project.id);
     });
-    item.querySelector(".history-delete")?.addEventListener("click", () => deleteProject(project.id));
+    item.querySelector(".history-delete")?.addEventListener("click", () => requestProjectDeletion(project.id));
     els.projectHistory.append(item);
   }
   if (window.lucide) window.lucide.createIcons();
@@ -3931,7 +3967,7 @@ async function retryPendingProjectDeletions(deletions) {
   }
 }
 
-async function deleteProject(projectId) {
+async function deleteProject(projectId, { confirmed = false } = {}) {
   if (isBuiltInProjectId(projectId)) {
     els.status.textContent = "内置说明书不可删除";
     return;
@@ -3939,11 +3975,8 @@ async function deleteProject(projectId) {
   const project = state.projects.find((item) => item.id === projectId);
   if (!project) return;
   const projectName = project.title || "未命名图文";
-  const confirmed = window.confirm(
-    `确认删除“${projectName}”？\n\n删除后会从当前浏览器、共享草稿库和团队云端移除，无法直接找回。建议重要内容先复制一份。`,
-  );
-  if (!confirmed) {
-    els.status.textContent = `已取消删除：${projectName}`;
+  if (confirmed !== true) {
+    els.status.textContent = `删除未执行：请先在历史记录中再次点击“确认删除”`;
     return;
   }
   const deletingCurrent = project.id === state.currentProjectId;
