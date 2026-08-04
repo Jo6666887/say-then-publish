@@ -155,7 +155,32 @@ Say Then Publish 有两条可以公开迭代的升级线，以及一层只属于
 
 > 另外还有荧光笔记、极简观点，以及纸墨经典、瓷蓝研究、森林手记、牛皮记忆、沙丘画廊、午夜鎏金、瑞士柠黄、瑞士安全橙等，覆盖商业评论、科技研究、自然生活到风险决策等题材。
 
-![多列专注预览](docs/screenshots/wanfen-focus-grid.jpg)
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="docs/screenshots/社交原生.png" alt="社交原生主题预览">
+      <br><strong>社交原生</strong><br>
+      <sub>熟悉的小红书信息结构，适合教程、复盘与个人 IP</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="docs/screenshots/荧光笔记.png" alt="荧光笔记主题预览">
+      <br><strong>荧光笔记</strong><br>
+      <sub>纸张质感与克制高亮，适合方法、清单与重点摘录</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="docs/screenshots/观点杂志.png" alt="观点杂志主题预览">
+      <br><strong>观点杂志</strong><br>
+      <sub>宋体正文与杂志留白，适合评论、随笔与长观点</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="docs/screenshots/瑞士蓝.png" alt="瑞士蓝主题预览">
+      <br><strong>瑞士蓝</strong><br>
+      <sub>严格网格与高纯度蓝，适合 AI、产品与方法论</sub>
+    </td>
+  </tr>
+</table>
 
 ### 支持团队协作（可选）
 
