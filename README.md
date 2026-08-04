@@ -2,7 +2,7 @@
 
 # 说了就发 · Say Then Publish
 
-### 在 Codex 里聊，聊完自动变成可以发布的图文卡片。
+### 在 Agent 里聊，聊完自动变成可以发布的小红书图文卡片。
 
 本地优先 · Agent 原生 · 小红书图文卡片 · Agent 直接排版 · 自动配图 · 可选团队协作
 
@@ -13,55 +13,47 @@
 
 </div>
 
-![说了就发工作台：左边在 Codex 里聊，中间直接编辑，右边实时预览图文卡片](docs/screenshots/首图更新.png)
+![说了就发工作台：左边和 Agent 对话，右边实时预览小红书图文卡片](docs/screenshots/首图更新.png)
 
 > **你负责说，它负责发。**
 >
 > 很多时候想法早就有了，真正卡住你的，是把它传递给读者的那段路：整理成正文、加粗挑重点、上色高亮、分页、对齐、选样式、配图……链条又长又碎，几乎全是重复的 dirty work。
 >
-> 「说了就发」就是把这段路整个交给 Agent。在 Codex 里聊你的想法、复盘、观点，触发这个技能，Codex 就把对话整理成结构化正文、自动排进右侧可以直接发布的图文卡片；你只在卡片上改字、上色、换样式，满意了再让它自动配图——最后本地保存，或同步给线上团队。
+> 「说了就发」就是把这段路整个交给 Agent。在你常用的 Agent 里聊想法、复盘和观点，触发这个技能，它就把对话整理成结构化正文、自动排进右侧可以直接发布的小红书图文卡片；你只需要审阅、调整和导出——最后本地保存，或同步给线上团队。
 >
-> _前身「写了就发 / Write Then Publish」解决的是「自己写、自己发」——左边写 Markdown，右边实时出卡片。「说了就发」更进一步，把重点放在和 Agent 协同：我们把这套图文卡片的表达语言（加粗 / 上色 / 高亮 / 分页 / 15 套主题）做成了一个 Skill——Codex 装上就能直接读懂并在本地使用，其他能读取 Skill、调用本地命令的 Agent 也能接入。你不必再自己排版，把话说清楚就行。_
+> _前身「写了就发 / Write Then Publish」解决的是「自己写、自己发」——左边写 Markdown，右边实时出卡片。「说了就发」更进一步，把重点放在和 Agent 协同：我们把这套图文卡片的表达语言（加粗 / 上色 / 高亮 / 分页 / 15 套主题）做成了一个 Skill。只要 Agent 能读取 Skill 并操作本地文件，就能直接使用。你不必再自己排版，把话说清楚就行。_
 
 ## 给人类：下载、安装、开始使用
 
 完整程序已经封装在 Skill 压缩包里，不需要先学习项目结构，也不需要自己配置数据库。任选下面一种方式即可。
 
-### 方法一：直接让 Codex 安装（推荐）
+### 方法一：直接让 Agent 安装（推荐）
 
-把下面这句话完整发给 Codex：
+把这个仓库链接发给 **Claude Code、Codex 或其他能够安装 Skill 的 Agent**：
 
-> 请帮我安装 Say Then Publish Skill。下载 `https://raw.githubusercontent.com/Jo6666887/say-then-publish/main/release/say-then-publish-skill.zip`，解压到 `~/.codex/skills/`；保留 `~/.say-then-publish/` 里的个人记忆。安装完成后告诉我重新开一个任务测试。
+> 请帮我安装并启动这个 Say Then Publish Skill：`https://github.com/Jo6666887/say-then-publish`
 
-### 方法二：复制三行命令安装
+剩下的下载、解压和初始化都让 Agent 完成即可。
 
-在 macOS 或 Linux 的终端中运行：
+### 方法二：直接下载压缩包
 
-```bash
-mkdir -p ~/.codex/skills
-curl -L https://raw.githubusercontent.com/Jo6666887/say-then-publish/main/release/say-then-publish-skill.zip -o /tmp/say-then-publish-skill.zip
-unzip -q -n /tmp/say-then-publish-skill.zip -d ~/.codex/skills
-```
+- 点击 **[下载 Say Then Publish Skill](release/say-then-publish-skill.zip?raw=1)**；
+- 下载完成后，把压缩包直接交给你的 AI；
+- 对它说：“帮我安装并启动这个 Skill。”
 
-### 方法三：直接下载压缩包
+安装后重新打开一个 Agent 对话，对它说：
 
-- 最简单：点击 **[下载 Say Then Publish Skill](release/say-then-publish-skill.zip?raw=1)**；
-- 也可以点击 GitHub 页面右上角绿色的 **Code → Download ZIP**。这个按钮下载的是整个仓库，解压后请进入 `release/`，再解压里面的 `say-then-publish-skill.zip`；
-- 最后把解压得到的 `say-then-publish` 文件夹放进 `~/.codex/skills/`。
+> 启动 Say Then Publish
 
-安装后重新打开一个 Codex 任务，对它说：
+第一次使用时，AI 会先检查已有程序和个人记忆；只有确实没有记录，才会询问**你的小红书账号名称**和**平时存放社媒内容的文件夹**。没有配置 Supabase/TOS 时自动使用本地模式；配置后继续支持线上团队协作。
 
-> 初始化 Say Then Publish
+> 已经安装过 Skill 的用户不需要重复下载，直接对 Agent 说“启动 Say Then Publish”即可。
 
-第一次使用只会询问两件事：**你的小红书账号名称**，以及**平时存放社媒内容的文件夹**。没有配置 Supabase/TOS 时自动使用本地模式；配置后继续支持线上团队协作。
+### 可以在你常用的 Agent 里直接打开
 
-> 已经 clone 过仓库或已经安装过 Skill 的用户不需要重复下载。仓库开发者在项目目录运行 `npm start`；Skill 用户直接对 Codex 说“启动 Say Then Publish”即可。
+它不是某个 Agent 的专属功能。你可以在 Claude Code、Codex，或其他能够读取 Skill、操作本地文件的 Agent 中使用。聊完告诉它“整理成小红书图文卡片”，工作台就会打开，排版结果始终可以看见、可以继续修改。
 
-### Codex 原生，但不把你锁在某个模型或语言里
-
-这一版把 **Codex 作为第一使用场景**：聊天、排版、配图、保存和打开工作台都可以由 Codex 直接完成，不需要回到网页逐个点“AI 按钮”。但底层接口并不依赖某个模型厂商：Skill 负责描述规则，本地 CLI 负责稳定执行，正文使用 UTF-8 Markdown，命令结果使用 JSON。
-
-因此，只要一个 Agent 能读取指令并调用本地命令，它就能接入同一套工作流。你可以使用中文、英文或其他模型能够理解的自然语言交流；项目数据、排版标记和版本保护仍然走同一套确定的接口。
+![在 Claude Code 等 Agent 中聊天，右侧直接打开 Say Then Publish 工作台](docs/screenshots/claudecode.webp)
 
 ## 从「说」到「发」，一条主线
 
