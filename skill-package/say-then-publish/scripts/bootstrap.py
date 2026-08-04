@@ -17,7 +17,8 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
-from creator_memory import initialize_identity
+from creator_memory import MemoryError as CreatorMemoryError
+from creator_memory import initialize_identity, load_memory
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +55,84 @@ def read_config() -> dict[str, Any]:
     if not app_dir.is_dir():
         raise BootstrapError("已配置的应用目录不存在，请重新运行 init。")
     return payload
+
+
+def is_application_directory(path: Path) -> bool:
+    """Return whether path is an unpacked Say Then Publish application."""
+    return all(
+        marker.is_file()
+        for marker in (
+            path / "server.py",
+            path / "index.html",
+            path / "requirements.txt",
+            path / "scripts" / "wtp.py",
+            path / "src" / "app.js",
+        )
+    )
+
+
+def find_current_application() -> Path | None:
+    """Find an existing application at or above the Agent's working directory."""
+    current = Path.cwd().resolve()
+    for candidate in (current, *current.parents):
+        if is_application_directory(candidate):
+            return candidate
+        if candidate == Path.home().resolve():
+            break
+    return None
+
+
+def remembered_account_name() -> str | None:
+    """Reuse a public display name without exposing the rest of creator memory."""
+    try:
+        entries = load_memory(create=False).get("entries", [])
+    except (CreatorMemoryError, OSError, ValueError):
+        return None
+    preferred_keys = ("小红书账号名称", "小红书名称")
+    for preferred_key in preferred_keys:
+        for entry in reversed(entries):
+            if not isinstance(entry, dict) or entry.get("category") != "identity":
+                continue
+            if str(entry.get("key", "")).strip() != preferred_key:
+                continue
+            value = " ".join(str(entry.get("value", "")).split())
+            if value and not value.startswith(("http://", "https://")):
+                return value
+    return None
+
+
+def write_config(config: dict[str, Any]) -> None:
+    atomic_write(config_file(), json.dumps(config, ensure_ascii=False, indent=2) + "\n")
+
+
+def recover_config_from_current_directory() -> dict[str, Any] | None:
+    """Adopt an existing local checkout instead of onboarding the user again."""
+    app_dir = find_current_application()
+    if app_dir is None:
+        return None
+    config = {
+        "schema": CONFIG_SCHEMA,
+        "platform": PLATFORM,
+        "accountName": remembered_account_name() or "小红书创作者",
+        "contentDir": str(app_dir),
+        "appDir": str(app_dir),
+        "port": DEFAULT_PORT,
+        "installationMode": "existing-app",
+        "recoveredFrom": "current-directory",
+    }
+    write_config(config)
+    return config
+
+
+def resolve_config(*, recover: bool = True) -> tuple[dict[str, Any], bool]:
+    try:
+        return read_config(), False
+    except BootstrapError as error:
+        if recover:
+            recovered = recover_config_from_current_directory()
+            if recovered is not None:
+                return recovered, True
+        raise error
 
 
 def atomic_write(path: Path, text: str, mode: int = 0o600) -> None:
@@ -200,7 +279,7 @@ def start_application(config: dict[str, Any], *, open_browser: bool) -> dict[str
 def initialize(args: argparse.Namespace) -> dict[str, Any]:
     if not 1 <= int(args.port) <= 65535:
         raise BootstrapError("端口必须在 1 到 65535 之间。")
-    account_name = validate_account_name(prompt_value("小红书账号名称", args.account_name))
+    account_name = validate_account_name(prompt_value("小红书账号名称", args.account_name or remembered_account_name()))
     initialize_identity(account_name)
     default_content = str(Path.home() / "Documents" / "小红书内容")
     content_input = prompt_value("常用内容文件夹", args.content_dir, default_content)
@@ -216,7 +295,7 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
         "appDir": str(app_dir),
         "port": int(args.port),
     }
-    atomic_write(config_file(), json.dumps(config, ensure_ascii=False, indent=2) + "\n")
+    write_config(config)
     result: dict[str, Any] = {
         "ok": True,
         "initialized": True,
@@ -281,10 +360,19 @@ def main() -> int:
         if args.command == "init":
             result = initialize(args)
         elif args.command == "start":
-            result = start_application(read_config(), open_browser=not args.no_open)
+            config, recovered = resolve_config()
+            result = start_application(config, open_browser=not args.no_open)
+            result["recoveredExistingApp"] = recovered
         elif args.command == "status":
-            config = read_config()
-            result = {"ok": True, "installed": True, "serviceHealthy": bool(health(base_url(config))), **config, "url": base_url(config)}
+            config, recovered = resolve_config()
+            result = {
+                "ok": True,
+                "installed": True,
+                "recoveredExistingApp": recovered,
+                "serviceHealthy": bool(health(base_url(config))),
+                **config,
+                "url": base_url(config),
+            }
         elif args.command == "stop":
             result = stop_application()
         elif args.command == "cli":
