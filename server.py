@@ -371,11 +371,10 @@ ENV_WRITE_LOCK = threading.Lock()
 SETTINGS_ENV_GROUPS = {
     "supabase": ["SUPABASE_URL", "SUPABASE_SECRET_KEY", "WRITE_THEN_PUBLISH_WORKSPACE_ID", "WRITE_THEN_PUBLISH_CLOUD_SYNC"],
     "tos": ["TOS_ACCESS_KEY", "TOS_SECRET_KEY", "TOS_ENDPOINT", "TOS_REGION", "TOS_BUCKET", "TOS_KEY_PREFIX"],
-    "ai": ["WTP_AI_API_BASE", "WTP_AI_API_KEY", "WTP_AI_APP_ID", "WTP_AI_MODEL_ID", "WTP_AI_RESOURCE_ID"],
 }
 SETTINGS_ENV_ALLOWED = {key for keys in SETTINGS_ENV_GROUPS.values() for key in keys}
 # Values that must never be echoed back to the browser once stored.
-SETTINGS_ENV_SECRET = {"SUPABASE_SECRET_KEY", "TOS_ACCESS_KEY", "TOS_SECRET_KEY", "WTP_AI_API_KEY", "WTP_AI_APP_ID"}
+SETTINGS_ENV_SECRET = {"SUPABASE_SECRET_KEY", "TOS_ACCESS_KEY", "TOS_SECRET_KEY"}
 
 
 def read_env_file_map(path: Path) -> dict[str, str]:

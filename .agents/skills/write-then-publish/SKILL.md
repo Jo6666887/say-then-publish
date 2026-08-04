@@ -19,6 +19,37 @@ Don't just dump text into a card. This project exposes the 图文卡片 layout l
 
 Judge where emphasis belongs from the meaning, then write it into the Markdown. Producing well-emphasized, correctly paginated cards in one pass is the value you add over a human doing it by hand.
 
+## Private creator memory
+
+This repository Skill is also personalized through a separate local memory file. Before drafting, revising, formatting or illustrating, read it:
+
+```bash
+.venv/bin/python skill-package/say-then-publish/scripts/creator_memory.py show
+```
+
+When the user explicitly asks you to remember a public social-media name, a non-secret device/account label, or a durable layout/writing/visual/workflow preference, save one concise rule:
+
+```bash
+.venv/bin/python skill-package/say-then-publish/scripts/creator_memory.py remember \
+  --category layout \
+  --key "高亮密度" \
+  --value "每张卡只高亮一个最重要结论"
+```
+
+The memory lives at `~/.say-then-publish/creator-memory.json`, outside this repository and outside every shareable zip. Never commit or bundle it. Never store passwords, verification codes, cookies, tokens, API keys or full private drafts. Use `forget` when the user asks to remove a remembered item.
+
+## Agent-native layout rule
+
+Do layout work directly through the Markdown interface above. Never call an external layout/polish AI, never use `/api/ai/optimize-layout`, and never tell the user to look for an “AI 优化排版” button. That web entry has intentionally been removed.
+
+When the user asks to 优化排版、整理重点、拆成卡片 or make the draft easier to scan:
+
+1. Read private creator memory, then read the newest project revision with `get`.
+2. Preserve the user's meaning and image markers unless they explicitly ask for rewriting.
+3. Apply remembered preferences, headings, bold, sparse color/background highlights and deliberate page breaks yourself.
+4. Write the result with the conditional `update` command.
+5. Read the saved revision again and report local/cloud confirmation separately.
+
 ## Stable entrypoint
 
 From the repository root, call:

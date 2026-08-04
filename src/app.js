@@ -297,6 +297,12 @@ const sampleImage =
   <text x="600" y="598" text-anchor="middle" font-size="36" fill="#ffffff" font-family="Arial, sans-serif">Image placeholder</text>
 </svg>`);
 
+const creatorProfile = Object.freeze({
+  platform: String(window.SAY_THEN_PUBLISH_PROFILE?.platform || "小红书").trim() || "小红书",
+  displayName: String(window.SAY_THEN_PUBLISH_PROFILE?.displayName || "你的小红书账号").trim() || "你的小红书账号",
+  handle: String(window.SAY_THEN_PUBLISH_PROFILE?.handle || "小红书").trim() || "小红书",
+});
+
 const verifiedBadgeSrc =
   "data:image/svg+xml;charset=utf-8," +
   encodeURIComponent(`
@@ -816,8 +822,8 @@ function defaultFormState() {
   return {
     content: defaultText,
     published: false,
-    displayName: "捏捏番茄（AI图文版）",
-    handle: "@heytomato",
+    displayName: creatorProfile.displayName,
+    handle: creatorProfile.handle,
     textColor: "#202938",
     accentColor: "#2563eb",
     bgColor: "#ffffff",
@@ -1088,8 +1094,8 @@ function applyForm(data) {
   if (els.projectPublishStatus) {
     els.projectPublishStatus.value = data.published === true ? "published" : "unpublished";
   }
-  els.displayName.value = data.displayName ?? "捏捏番茄（AI图文版）";
-  els.handle.value = data.handle ?? "@heytomato";
+  els.displayName.value = data.displayName ?? creatorProfile.displayName;
+  els.handle.value = data.handle ?? creatorProfile.handle;
   els.textColor.value = normalizeHexColor(data.textColor, "#202938");
   els.accentColor.value = normalizeHexColor(data.accentColor, "#2563eb");
   els.bgColor.value = normalizeHexColor(data.bgColor, "#ffffff");
@@ -10412,7 +10418,6 @@ function bindEvents() {
     if (event.key === "Escape" && !els.cropModal.classList.contains("hidden")) closeCropper();
     if (event.key === "Escape" && !els.importPreviewModal?.classList.contains("hidden")) closeProjectImportPreview();
     if (event.key === "Escape" && !els.assetLibraryModal?.classList.contains("hidden")) closeAssetLibrary();
-    if (event.key === "Escape" && !els.aiOptimizeModal?.classList.contains("hidden")) closeAiOptimizeModal();
     if (event.key === "Escape" && !els.illustrationModal?.classList.contains("hidden")) closeIllustrationModal();
     if (event.key === "Escape" && !els.themeLibraryModal?.classList.contains("hidden")) closeThemeLibrary();
     if (event.key === "Escape" && !els.helpModal?.classList.contains("hidden")) closeHelp();

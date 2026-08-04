@@ -1,0 +1,7 @@
+interface:
+  display_name: "说了就发"
+  short_description: "把对话直接变成可发布的小红书图文卡片"
+  default_prompt: "Use $say-then-publish to initialize my local Xiaohongshu workspace and turn this conversation into image cards."
+
+policy:
+  allow_implicit_invocation: true
