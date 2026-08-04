@@ -7,18 +7,28 @@ description: Self-contained local Xiaohongshu creator workspace. Use when a user
 
 Turn what the user says into publish-ready Xiaohongshu cards. The bundled app is the source of truth; the web UI is the visual workspace and the CLI is the safe mutation interface.
 
-## First initialization
+## Start with discovery
 
 Resolve `SKILL_ROOT` as the directory containing this `SKILL.md`. Never search GitHub or clone another repository: the complete application is already under `assets/app/`.
 
-On the first “初始化” or “启动” request, collect exactly two values if they are not already configured:
+On every “初始化” or “启动” request, run this before asking the user anything:
+
+```bash
+python3 "$SKILL_ROOT/scripts/bootstrap.py" start
+```
+
+This command first checks the saved installation record. If none exists, it checks whether the Agent's current working directory (or one of its parents) already contains the complete application. When those files exist, it adopts that application, reuses the Xiaohongshu display name from personal creator memory when available, writes the missing local installation record, and starts without onboarding questions.
+
+Only when `start` returns “尚未初始化” may you collect the values that are still unavailable:
 
 1. The user's Xiaohongshu account display name.
 2. The absolute folder where they normally keep social-content files.
 
+Never ask for a value already present in creator memory or the installation record. If the display name is remembered, `init` reuses it automatically, so pass only the missing content directory.
+
 The platform is always `小红书`; do not ask for it. Recommend a dedicated local folder such as `~/Documents/小红书内容` when the user has no preference.
 
-Run:
+For a genuinely new installation, run:
 
 ```bash
 python3 "$SKILL_ROOT/scripts/bootstrap.py" init \
@@ -51,7 +61,7 @@ Use `identity` for public social-media names, `device` for non-secret device/acc
 
 ## Start and inspect
 
-For later “启动” requests:
+For every “启动” request (including a new Codex task window):
 
 ```bash
 python3 "$SKILL_ROOT/scripts/bootstrap.py" start
