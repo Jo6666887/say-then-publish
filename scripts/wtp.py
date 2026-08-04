@@ -164,6 +164,12 @@ def add_content_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--content", help="直接传入正文")
 
 
+def add_creator_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--display-name", help="卡片展示的创作者名称")
+    parser.add_argument("--handle", help="卡片展示的账号 ID")
+    parser.add_argument("--card-theme", help="卡片主题 ID，例如 swiss-blue")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="wtp", description="Codex 操作写了就发的稳定本地入口")
     parser.add_argument("--url", default=os.getenv("WTP_URL", DEFAULT_URL), help="本地服务地址")
@@ -179,11 +185,13 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser = subparsers.add_parser("create", help="创建项目并进入现有云同步")
     create_parser.add_argument("--title", required=True)
     add_content_arguments(create_parser)
+    add_creator_arguments(create_parser)
 
     update_parser = subparsers.add_parser("update", help="基于读取到的版本安全更新项目")
     update_parser.add_argument("project_id")
     update_parser.add_argument("--title")
     add_content_arguments(update_parser)
+    add_creator_arguments(update_parser)
     publish_group = update_parser.add_mutually_exclusive_group()
     publish_group.add_argument("--published", action="store_true")
     publish_group.add_argument("--unpublished", action="store_true")
@@ -221,10 +229,18 @@ def run(args: argparse.Namespace) -> dict:
         return result if args.include_image_data else omit_project_image_bytes(result)
     if args.command == "create":
         content = read_text(args.from_file, args.content)
+        payload = {"title": args.title, "content": content or ""}
+        for field, value in (
+            ("displayName", args.display_name),
+            ("handle", args.handle),
+            ("cardTheme", args.card_theme),
+        ):
+            if value is not None:
+                payload[field] = value
         return client.request(
             "POST",
             "/api/projects",
-            {"title": args.title, "content": content or ""},
+            payload,
         )
     if args.command == "update":
         project_id = urllib.parse.quote(args.project_id, safe="")
@@ -235,6 +251,12 @@ def run(args: argparse.Namespace) -> dict:
             payload["content"] = content
         if args.title is not None:
             payload["title"] = args.title
+        if args.display_name is not None:
+            payload["displayName"] = args.display_name
+        if args.handle is not None:
+            payload["handle"] = args.handle
+        if args.card_theme is not None:
+            payload["cardTheme"] = args.card_theme
         if args.published:
             payload["published"] = True
         elif args.unpublished:

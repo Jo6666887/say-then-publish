@@ -20,6 +20,8 @@ class ShareSkillPackageTests(unittest.TestCase):
         self.assertIn("checks whether the Agent's current working directory", text)
         self.assertIn("Never call an external layout or polish AI", text)
         self.assertIn("Personal creator memory", text)
+        self.assertIn("automatically applies remembered display name, account ID and default card theme", text)
+        self.assertIn("automatically open the exact project", text)
         self.assertIn("assets/app/", text)
         self.assertNotIn("git clone", text)
 

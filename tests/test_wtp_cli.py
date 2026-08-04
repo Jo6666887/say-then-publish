@@ -92,6 +92,60 @@ class WtpCliTests(unittest.TestCase):
             [("POST", "/api/projects", {"title": "新项目", "content": "# 标题\n\n正文"})],
         )
 
+    def test_create_includes_remembered_creator_fields_passed_by_wrapper(self):
+        client = FakeClient()
+        args = wtp.build_parser().parse_args([
+            "create",
+            "--title",
+            "新项目",
+            "--content",
+            "正文",
+            "--display-name",
+            "示例创作者",
+            "--handle",
+            "@example",
+            "--card-theme",
+            "swiss-blue",
+        ])
+        with mock.patch.object(wtp, "Client", return_value=client):
+            wtp.run(args)
+
+        self.assertEqual(
+            client.calls[0][2],
+            {
+                "title": "新项目",
+                "content": "正文",
+                "displayName": "示例创作者",
+                "handle": "@example",
+                "cardTheme": "swiss-blue",
+            },
+        )
+
+    def test_update_can_apply_creator_identity_and_theme_safely(self):
+        client = FakeClient()
+        args = wtp.build_parser().parse_args([
+            "update",
+            "project-1",
+            "--display-name",
+            "示例创作者",
+            "--handle",
+            "@example",
+            "--card-theme",
+            "swiss-blue",
+        ])
+        with mock.patch.object(wtp, "Client", return_value=client):
+            wtp.run(args)
+
+        self.assertEqual(
+            client.calls[1][2],
+            {
+                "expectedUpdatedAt": 200,
+                "displayName": "示例创作者",
+                "handle": "@example",
+                "cardTheme": "swiss-blue",
+            },
+        )
+
     def test_update_without_changes_is_rejected(self):
         client = FakeClient()
         args = wtp.build_parser().parse_args(["update", "project-1"])

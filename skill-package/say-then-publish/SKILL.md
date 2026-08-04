@@ -95,11 +95,14 @@ When asked to 优化排版、整理重点、拆卡 or make the content easier to
 ## Project workflow
 
 1. Run `status` and confirm the local service is healthy.
-2. Run `cli list`; never guess an ID when titles repeat.
-3. Run `cli get PROJECT_ID` before every mutation.
-4. Create or update through the wrapper. Never edit project JSON, browser storage or cloud rows directly.
-5. Treat `localSaved` and `cloudSynced` as separate gates.
-6. On `DRAFT_VERSION_CONFLICT`, stop changing the original and report both preserved versions.
+2. Read personal creator memory before creating a project. The wrapper automatically applies remembered display name, account ID and default card theme to new projects.
+3. Run `cli list`; never guess an ID when titles repeat.
+4. Run `cli get PROJECT_ID` before every mutation.
+5. Create or update through the wrapper. Never edit project JSON, browser storage or cloud rows directly.
+6. Treat `localSaved` and `cloudSynced` as separate gates.
+7. On `DRAFT_VERSION_CONFLICT`, stop changing the original and report both preserved versions.
+
+Successful `create`, `update` and `add-image` commands automatically open the exact project in the visual workspace. Do not leave the user looking at an older project, and do not treat reporting a project ID as a substitute for showing the result.
 
 Create from Markdown:
 
@@ -149,4 +152,4 @@ If the line is missing or duplicated, stop and ask for a better anchor instead o
 
 ## Completion report
 
-Report the project title, ID, revision, published/unpublished state, local save result and cloud confirmation. Mention preserved conflict-copy IDs when present.
+Confirm that the exact saved project is open in the workspace, then report the project title, ID, revision, published/unpublished state, local save result and cloud confirmation. Mention preserved conflict-copy IDs when present.
