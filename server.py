@@ -61,6 +61,7 @@ STORE_FILE = DATA_DIR / "project-store.json"
 MAX_BODY_BYTES = 384 * 1024 * 1024
 MAX_TEXT_PATCH_BYTES = 2 * 1024 * 1024
 MAX_AI_TEXT_BYTES = 2 * 1024 * 1024
+MAX_PROJECTS = 120
 SAVE_PROTOCOL_HEADER = "X-WTP-Save-Protocol"
 SAVE_PROTOCOL_VERSION = "2"
 STORE_LOCK = threading.Lock()
@@ -641,20 +642,27 @@ def merge_store(current: dict, incoming: dict) -> dict:
         previous = merged.get(project["id"])
         # Equal revisions are immutable. Keeping the existing complete object avoids
         # a late text-only/cache response replacing images or layout at the same time.
-        if previous is None or project_timestamp(project) > project_timestamp(previous):
-            winner = project
-            if previous is not None:
-                # The browser can save again before the asynchronous cloud
-                # confirmation has refreshed its local snapshot. Never let that
-                # stale snapshot move the server's confirmed cloud cursor
-                # backwards; doing so makes the next linear edit look like a
-                # two-sided conflict and creates a new backup on every autosave.
-                previous_cloud_base = parse_updated_at(previous.get("cloudBaseUpdatedAt")) or 0
-                incoming_cloud_base = parse_updated_at(project.get("cloudBaseUpdatedAt")) or 0
-                if previous_cloud_base > incoming_cloud_base:
-                    winner = dict(project)
-                    winner["cloudBaseUpdatedAt"] = previous_cloud_base
-            merged[project["id"]] = winner
+        if previous is None:
+            merged[project["id"]] = project
+            continue
+
+        previous_timestamp = project_timestamp(previous)
+        incoming_timestamp = project_timestamp(project)
+        winner = project if incoming_timestamp > previous_timestamp else previous
+
+        # Cloud confirmation of revision N can finish after the browser has
+        # already saved revision N+1. Preserve that confirmed cursor regardless
+        # of which payload is newer. Otherwise the newer payload keeps base 0,
+        # and every following autosave is mistaken for a fresh two-sided conflict.
+        confirmed_cloud_base = max(
+            parse_updated_at(previous.get("cloudBaseUpdatedAt")) or 0,
+            parse_updated_at(project.get("cloudBaseUpdatedAt")) or 0,
+        )
+        winner_cloud_base = parse_updated_at(winner.get("cloudBaseUpdatedAt")) or 0
+        if winner_cloud_base < confirmed_cloud_base <= project_timestamp(winner):
+            winner = dict(winner)
+            winner["cloudBaseUpdatedAt"] = confirmed_cloud_base
+        merged[project["id"]] = winner
 
     deletions: dict[str, dict] = {}
     for deletion in [*normalized_deletions(current), *normalized_deletions(incoming)]:
@@ -673,7 +681,7 @@ def merge_store(current: dict, incoming: dict) -> dict:
         for project_id, project in merged.items()
         if project_id not in winning_deletions
     ]
-    projects = sorted(projects, key=project_timestamp, reverse=True)[:24]
+    projects = sorted(projects, key=project_timestamp, reverse=True)[:MAX_PROJECTS]
     project_ids = {project["id"] for project in projects}
     incoming_active = incoming.get("activeId")
     current_active = current.get("activeId")
@@ -1666,7 +1674,7 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
                 self.send_json({"error": "找不到对应草稿"}, HTTPStatus.NOT_FOUND)
                 return
 
-            projects = sorted(projects, key=project_timestamp, reverse=True)[:24]
+            projects = sorted(projects, key=project_timestamp, reverse=True)[:MAX_PROJECTS]
             store = {
                 "activeId": project_id,
                 "projects": projects,

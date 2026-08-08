@@ -26,15 +26,15 @@ const LOCAL_DATABASE_STORE = "snapshots";
 const LOCAL_DATABASE_PROJECTS_KEY = "projects";
 const LOCAL_DATABASE_PENDING_PROJECT_DELETIONS_KEY = "pendingProjectDeletions";
 const LOCAL_ASSET_DIRECTORY_KEY = "assetLibraryDirectoryHandle";
-const LOCAL_STATE_SAVE_DELAY = 450;
-const LOCAL_STATE_SAVE_MAX_WAIT = 5000;
-const LOCAL_DATABASE_SAVE_DELAY = 1200;
+const LOCAL_STATE_SAVE_DELAY = 1500;
+const LOCAL_STATE_SAVE_MAX_WAIT = 15000;
+const LOCAL_DATABASE_SAVE_DELAY = 3000;
 const HISTORY_DELETE_CONFIRM_TIMEOUT = 5000;
 const EDITOR_STATE_SAVE_DELAY = 900;
 const CONTROL_PREVIEW_RENDER_DELAY = 180;
 const EDITOR_PREVIEW_RENDER_DELAY = 520;
 const EDITOR_PREVIEW_IDLE_TIMEOUT = 900;
-const AUTO_SAVE_EXPLANATION = "停笔约 2 秒写入共享库，约 3–5 秒确认云端";
+const AUTO_SAVE_EXPLANATION = "编辑仅保存本机防丢草稿；点击“保存”后才同步云端";
 const SHARED_PROJECT_STORE_URL = "/api/project-store";
 const SHARED_PROJECT_TEXT_URL = "/api/project-store/current-text";
 const SHARED_SAVE_PROTOCOL_HEADER = "X-WTP-Save-Protocol";
@@ -50,7 +50,7 @@ const ILLUSTRATION_MAX_TOTAL_BYTES = 12 * 1024 * 1024;
 const ASSET_LIBRARY_URL = "/api/assets";
 const MAX_DECODED_IMAGE_CACHE = 64;
 const MAX_PROJECT_PREVIEW_CACHE = 2;
-const MAX_PROJECTS = 24;
+const MAX_PROJECTS = 120;
 const BUILT_IN_PROJECT_PREFIX = "guide_";
 const GUIDE_CARDS_PROJECT_ID = `${BUILT_IN_PROJECT_PREFIX}cards`;
 const GUIDE_ARTICLE_PROJECT_ID = `${BUILT_IN_PROJECT_PREFIX}article`;
@@ -1390,7 +1390,7 @@ function applyCardThemeId(value) {
   updateHeaderModeButton();
   requestRender();
   flushAppearanceSaveIfHydrated();
-  els.status.textContent = `已应用「${theme.label}」模板；正文和图片顺序未改变，模板将随当前项目自动保存`;
+  els.status.textContent = `已应用「${theme.label}」模板；已记录到本机防丢草稿，点击“保存”后同步云端`;
 }
 
 function applyCardTheme(event) {
@@ -1526,7 +1526,7 @@ function applyCardPalette(event) {
   syncCardPaletteControls();
   requestRender();
   flushAppearanceSaveIfHydrated();
-  els.status.textContent = `页面配色已切换为「${palette.label}」，将随当前项目自动保存`;
+  els.status.textContent = `页面配色已切换为「${palette.label}」；已记录到本机防丢草稿`;
 }
 
 function ensureCardColorContrast(source = "background") {
@@ -1548,8 +1548,8 @@ function ensureCardColorContrast(source = "background") {
     els.status.textContent = `已自动修正${adjusted.join("和")}，避免页面配色影响阅读`;
   } else {
     els.status.textContent = source === "background"
-      ? "已使用自定义页面背景，将随当前项目自动保存"
-      : "页面文字配色已更新，将随当前项目自动保存";
+      ? "已使用自定义页面背景；已记录到本机防丢草稿"
+      : "页面文字配色已更新；已记录到本机防丢草稿";
   }
 }
 
@@ -1850,22 +1850,22 @@ function renderSaveCheckpoint() {
 
   if (isBuiltInProjectId(state.currentProjectId)) {
     label = "内置说明书 · 只读";
-    meta = "这里不会覆盖你的草稿；新建项目后会自动保存";
+    meta = "这里不会覆盖你的草稿；新建项目后会低频保存本机防丢稿";
   } else if (phase === "dirty") {
     label = "有未保存修改";
     meta = `${AUTO_SAVE_EXPLANATION} · ${lastConfirmedCheckpointText()}`;
   } else if (phase === "saving-local") {
-    label = "正在保存当前版本…";
-    meta = `${version} · 正在写入浏览器副本与共享库`;
+    label = "正在保存本机防丢草稿…";
+    meta = `${version} · 不会写入共享库或云端`;
   } else if (phase === "saved-local") {
-    label = "当前版本已保存到本机";
-    meta = `${version} · ${formatSavedTime(saveCheckpoint.serverSavedAt || saveCheckpoint.localSavedAt)} · ${saveCheckpoint.destination}`;
+    label = "防丢草稿已保存在本机";
+    meta = `${version} · ${formatSavedTime(saveCheckpoint.localSavedAt)} · 点击“保存”后同步云端`;
   } else if (phase === "syncing-cloud") {
     label = "本机已保存，正在同步云端…";
     meta = `${version} · ${saveCheckpoint.destination}`;
   } else if (phase === "saved-cloud") {
     label = saveCheckpoint.confirmation === "manual" ? "已手动确认云端最新版" : "当前版本已保存到云端";
-    meta = `${version} · 确认于 ${formatSavedTime(saveCheckpoint.cloudSavedAt)} · ${AUTO_SAVE_EXPLANATION}`;
+    meta = `${version} · 确认于 ${formatSavedTime(saveCheckpoint.cloudSavedAt)} · 后续修改需再次点击“保存”`;
   } else if (phase === "degraded") {
     label = "当前版本已保存到本机";
     meta = `${version} · 云端不可用 · ${saveCheckpoint.destination}${saveCheckpoint.error ? ` · ${saveCheckpoint.error}` : ""}`;
@@ -2021,7 +2021,7 @@ function saveState() {
   } catch (error) {
     console.error(error);
     setSaveCheckpoint({ phase: "error", error: "请点击“立即保存”重试" });
-    els.status.textContent = "本次内容未能自动保存，请立即导出草稿备份";
+    els.status.textContent = "本机防丢草稿未能保存，请点击“保存”或立即导出备份";
     return { changed: false, project: null, error };
   }
 }
@@ -2601,10 +2601,52 @@ async function flushProjectStoreToIndexedDb() {
   return queuedSave;
 }
 
+async function flushProjectStoreToLocalDatabase() {
+  if (!state.localDatabaseHydrated) return { localSaved: false, projectUpdatedAt: 0 };
+  window.clearTimeout(localDatabaseSaveTimer);
+  localDatabaseSaveTimer = 0;
+  const queuedSave = localDatabaseSaveChain
+    .catch(() => false)
+    .then(async () => {
+      const snapshot = projectStoreSnapshot();
+      const targetProject = snapshot.projects.find((project) => project.id === snapshot.activeId);
+      const projectId = targetProject?.id || snapshot.activeId;
+      const projectUpdatedAt = Number(targetProject?.updatedAt || 0);
+      let localSaved = false;
+      try {
+        localSaved = await saveProjectStoreToIndexedDb(snapshot);
+      } catch (error) {
+        console.warn("IndexedDB 防丢草稿写入失败", error);
+      }
+
+      const current = state.projects.find((project) => project.id === projectId);
+      const stillCurrent = state.currentProjectId === projectId
+        && Number(current?.updatedAt || 0) === projectUpdatedAt
+        && current?.data?.content === els.content.value
+        && saveCheckpoint.phase !== "dirty";
+      if (stillCurrent && localSaved) {
+        setSaveCheckpoint({
+          phase: "saved-local",
+          projectId,
+          targetUpdatedAt: projectUpdatedAt,
+          localSavedAt: new Date().toISOString(),
+          destination: "浏览器本地数据库",
+          confirmation: "auto",
+          error: "",
+        });
+      } else if (stillCurrent && !localSaved) {
+        setSaveCheckpoint({ phase: "error", error: "浏览器防丢草稿未能写入，请点击“保存”" });
+      }
+      return { localSaved, snapshot, projectId, projectUpdatedAt };
+    });
+  localDatabaseSaveChain = queuedSave;
+  return queuedSave;
+}
+
 function scheduleProjectStoreToIndexedDb() {
   if (!state.localDatabaseHydrated) return;
   if (localDatabaseSaveTimer) return;
-  localDatabaseSaveTimer = window.setTimeout(flushProjectStoreToIndexedDb, LOCAL_DATABASE_SAVE_DELAY);
+  localDatabaseSaveTimer = window.setTimeout(flushProjectStoreToLocalDatabase, LOCAL_DATABASE_SAVE_DELAY);
 }
 
 async function loadProjectStoreFromIndexedDb() {
@@ -3249,7 +3291,7 @@ function updatePersistenceControls(status = {}) {
   }
   if (els.exportProjects) {
     els.exportProjects.title = cloudConnected
-      ? "当前内容会自动保存；点击可立即保存并同步到 Supabase 与私有 TOS"
+      ? "编辑时仅保存本机防丢草稿；点击后写入项目文件并同步到 Supabase 与私有 TOS"
       : "导出全部草稿、图片和排版设置，供本地恢复或迁移";
     els.exportProjects.setAttribute("aria-label", cloudConnected ? "立即保存到云端" : "导出 JSON 备份");
     const icon = els.exportProjects.querySelector("[data-lucide]");
@@ -3257,8 +3299,8 @@ function updatePersistenceControls(status = {}) {
   }
   if (els.historyNote) {
     els.historyNote.textContent = cloudConnected
-      ? "云端最新版优先 · 停笔约 3–5 秒同步"
-      : "自动保存到本机 · 点击稿件恢复";
+      ? "编辑仅本机防丢 · 点击保存同步云端"
+      : "低频保存本机防丢草稿 · 点击稿件恢复";
   }
   renderSaveCheckpoint();
   if (window.lucide) window.lucide.createIcons();
@@ -3536,7 +3578,7 @@ async function saveProjectNow() {
         destination: persisted?.sharedSaved ? "本机项目文件" : "浏览器本地数据库",
         error: "云端不可用，当前版本的本机副本已保留",
       });
-      els.status.textContent = `已自动保存到本机；云端不可用，可点击“导出 JSON”备份${status.lastError ? `（${status.lastError}）` : ""}`;
+      els.status.textContent = `当前版本已保存到本机；云端不可用，可点击“导出 JSON”备份${status.lastError ? `（${status.lastError}）` : ""}`;
     } else {
       setSaveCheckpoint({
         phase: persisted?.sharedSaved || persisted?.localSaved ? "saved-local" : "error",
@@ -3601,7 +3643,7 @@ async function importProjectBackupPayload(payload) {
   await render();
   els.status.textContent = databaseSaved
     ? `已导入并写入本地数据库：${importedProjects.length} 篇（新增 ${addedCount}，恢复覆盖 ${updatedCount}）`
-    : `已导入 ${importedProjects.length} 篇（新增 ${addedCount}，恢复覆盖 ${updatedCount}）；建议等待自动保存后再刷新`;
+    : `已导入 ${importedProjects.length} 篇（新增 ${addedCount}，恢复覆盖 ${updatedCount}）；请点击“保存”后再刷新`;
 }
 
 function inspectProjectBackupPayload(payload) {
@@ -3775,6 +3817,40 @@ function projectTypeLabel(type) {
   return type === "article" ? "长文" : "图文";
 }
 
+function projectConflictRoot(project) {
+  return typeof project?.data?.__localConflictOf === "string"
+    ? project.data.__localConflictOf
+    : "";
+}
+
+function isConflictBackupProject(project) {
+  return Boolean(projectConflictRoot(project));
+}
+
+function compactHistoryProjects(projects) {
+  const latestConflictByRoot = new Map();
+  const visible = [];
+  for (const project of projects || []) {
+    const conflictRoot = projectConflictRoot(project);
+    if (!conflictRoot) {
+      visible.push(project);
+      continue;
+    }
+    const current = latestConflictByRoot.get(conflictRoot);
+    const projectIsActive = project.id === state.currentProjectId;
+    const currentIsActive = current?.id === state.currentProjectId;
+    if (
+      !current
+      || projectIsActive
+      || (!currentIsActive && Number(project.updatedAt || 0) > Number(current.updatedAt || 0))
+    ) {
+      latestConflictByRoot.set(conflictRoot, project);
+    }
+  }
+  return [...visible, ...latestConflictByRoot.values()]
+    .sort((first, second) => Number(second.updatedAt || 0) - Number(first.updatedAt || 0));
+}
+
 function clearHistoryDeleteConfirmation({ render = true } = {}) {
   if (pendingHistoryDeleteTimer) window.clearTimeout(pendingHistoryDeleteTimer);
   pendingHistoryDeleteTimer = 0;
@@ -3815,15 +3891,17 @@ function updateProjectHistory() {
     button.setAttribute("aria-pressed", String(active));
   });
 
-  const visibleProjects = allHistoryProjects().filter((project) => {
-    if (state.historyFilter === "all") return true;
-    return projectType(project) === state.historyFilter;
-  });
+  const visibleProjects = state.historyFilter === "backups"
+    ? allHistoryProjects().filter(isConflictBackupProject)
+    : compactHistoryProjects(allHistoryProjects()).filter((project) => {
+      if (state.historyFilter === "all") return true;
+      return projectType(project) === state.historyFilter;
+    });
 
   if (!visibleProjects.length) {
     const empty = document.createElement("div");
     empty.className = "history-empty";
-    empty.textContent = state.historyFilter === "article" ? "暂无长文记录" : state.historyFilter === "cards" ? "暂无图文记录" : "暂无历史记录";
+    empty.textContent = state.historyFilter === "article" ? "暂无长文记录" : state.historyFilter === "cards" ? "暂无图文记录" : state.historyFilter === "backups" ? "暂无冲突备份" : "暂无历史记录";
     els.projectHistory.append(empty);
     return;
   }
@@ -3831,6 +3909,7 @@ function updateProjectHistory() {
   for (const project of visibleProjects) {
     const type = projectType(project);
     const builtIn = isBuiltInProject(project);
+    const conflictBackup = isConflictBackupProject(project);
     const confirmingDelete = pendingHistoryDeleteProjectId === project.id;
     const item = document.createElement("div");
     item.className = "history-item";
@@ -3841,7 +3920,7 @@ function updateProjectHistory() {
     item.innerHTML = `
       <button type="button" class="history-open">
         <span>${escapeHtml(project.title || "未命名图文")}</span>
-        <small><b>${builtIn ? "说明" : projectTypeLabel(type)}</b>${builtIn ? projectTypeLabel(type) : formatProjectTime(project.updatedAt)}</small>
+        <small><b>${builtIn ? "说明" : conflictBackup ? "备份" : projectTypeLabel(type)}</b>${builtIn ? projectTypeLabel(type) : formatProjectTime(project.updatedAt)}</small>
       </button>
       ${
         builtIn
@@ -3869,7 +3948,7 @@ function updateProjectHistory() {
 }
 
 function setHistoryFilter(filter) {
-  state.historyFilter = ["all", "cards", "article"].includes(filter) ? filter : "all";
+  state.historyFilter = ["all", "cards", "article", "backups"].includes(filter) ? filter : "all";
   updateProjectHistory();
 }
 
@@ -6148,7 +6227,7 @@ async function insertAssetFromLibrary(asset, button) {
     insertImageTagsAtCursor([`[[image:${localId}]]`]);
     closeAssetLibrary();
     const saved = await persistCurrentDraftImmediately();
-    els.status.textContent = saved ? "已从资源库插入图片并保存" : "已从资源库插入图片，正在自动保存";
+    els.status.textContent = saved ? "已从资源库插入图片并保存" : "已从资源库插入图片，并记录到本机防丢草稿";
   } catch (error) {
     console.error(error);
     setAssetLibraryStatus(error.message || "图片插入失败", "error");
@@ -10650,14 +10729,12 @@ function bindEvents() {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") {
       if (localStateSaveTimer || localStateSaveMaxTimer) flushStateSave();
-      if (localDatabaseSaveTimer) void flushProjectStoreToIndexedDb();
-      if (sharedTextSaveTimer) void saveCurrentProjectTextToSharedServer({ keepalive: true });
+      if (localDatabaseSaveTimer) void flushProjectStoreToLocalDatabase();
     }
   });
   window.addEventListener("pagehide", () => {
     if (localStateSaveTimer || localStateSaveMaxTimer) flushStateSave();
-    if (localDatabaseSaveTimer) void flushProjectStoreToIndexedDb();
-    if (sharedTextSaveTimer) void saveCurrentProjectTextToSharedServer({ keepalive: true });
+    if (localDatabaseSaveTimer) void flushProjectStoreToLocalDatabase();
   });
 }
 

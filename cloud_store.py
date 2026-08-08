@@ -33,6 +33,7 @@ TOS_DELETED_PREFIX = "tos-deleted://"
 PROJECT_TOMBSTONE_FIELD = "__writeThenPublishDeletedAt"
 CLOUD_BASE_UPDATED_AT_FIELD = "cloudBaseUpdatedAt"
 LOCAL_CONFLICT_OF_FIELD = "__localConflictOf"
+MAX_PROJECTS = 120
 
 
 def _safe_asset_source(image: dict[str, Any]) -> dict[str, str] | None:
@@ -852,7 +853,7 @@ class CloudStore:
         projects = [
             project for project_id, project in merged.items() if project_id not in winning_deletions
         ]
-        projects = sorted(projects, key=cls._project_timestamp, reverse=True)[:24]
+        projects = sorted(projects, key=cls._project_timestamp, reverse=True)[:MAX_PROJECTS]
         project_ids = {project["id"] for project in projects}
         active_id = active_conflict_id if active_conflict_id in project_ids else local.get("activeId") if local.get("activeId") in project_ids else remote.get("activeId")
         if active_id not in project_ids:

@@ -128,6 +128,29 @@ class SharedProjectConflictContractTests(unittest.TestCase):
         self.assertIn("scheduleStateSave()", rename)
         self.assertNotIn("current.title =", rename)
 
+    def test_typing_only_schedules_a_low_frequency_local_draft(self):
+        schedule_database = function_body("scheduleProjectStoreToIndexedDb")
+        local_flush = function_body("flushProjectStoreToLocalDatabase")
+        manual_save = function_body("saveProjectNow")
+
+        self.assertIn("LOCAL_STATE_SAVE_DELAY = 1500", APP)
+        self.assertIn("LOCAL_DATABASE_SAVE_DELAY = 3000", APP)
+        self.assertIn("flushProjectStoreToLocalDatabase", schedule_database)
+        self.assertIn("saveProjectStoreToIndexedDb(snapshot)", local_flush)
+        self.assertNotIn("saveProjectStoreToSharedServer", local_flush)
+        self.assertIn("flushProjectStoreToIndexedDb()", manual_save)
+        self.assertNotIn("saveCurrentProjectTextToSharedServer({ keepalive: true })", APP)
+
+    def test_history_keeps_more_projects_and_compacts_conflict_backups(self):
+        compact = function_body("compactHistoryProjects")
+        history = function_body("updateProjectHistory")
+
+        self.assertIn("MAX_PROJECTS = 120", APP)
+        self.assertIn('data-history-filter="backups"', HTML)
+        self.assertIn("latestConflictByRoot", compact)
+        self.assertIn('state.historyFilter === "backups"', history)
+        self.assertIn("compactHistoryProjects(allHistoryProjects())", history)
+
     def test_project_delete_requires_explicit_confirmation_before_any_tombstone(self):
         request = function_body("requestProjectDeletion")
         remove = function_body("deleteProject")

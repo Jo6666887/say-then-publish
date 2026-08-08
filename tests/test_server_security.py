@@ -2037,6 +2037,49 @@ class ProjectStoreMergeTests(unittest.TestCase):
         self.assertEqual(merged["projects"][0]["data"]["content"], "第二版")
         self.assertEqual(merged["projects"][0]["cloudBaseUpdatedAt"], 200)
 
+    def test_late_cloud_confirmation_advances_newer_browser_revision_cursor(self):
+        newer_browser_revision = {
+            "id": "project-1",
+            "title": "继续编辑",
+            "updatedAt": 201,
+            "cloudBaseUpdatedAt": 0,
+            "data": {"content": "第二版"},
+        }
+        confirmed_older_revision = {
+            "id": "project-1",
+            "title": "云端已确认",
+            "updatedAt": 200,
+            "cloudBaseUpdatedAt": 200,
+            "data": {"content": "第一版"},
+        }
+
+        merged = server.merge_store(
+            {"activeId": "project-1", "projects": [newer_browser_revision]},
+            {"activeId": "project-1", "projects": [confirmed_older_revision]},
+        )
+
+        self.assertEqual(merged["projects"][0]["data"]["content"], "第二版")
+        self.assertEqual(merged["projects"][0]["cloudBaseUpdatedAt"], 200)
+
+    def test_store_retains_up_to_configured_project_limit(self):
+        projects = [
+            {
+                "id": f"project-{index}",
+                "title": f"稿件 {index}",
+                "updatedAt": index + 1,
+                "data": {"content": str(index)},
+            }
+            for index in range(server.MAX_PROJECTS + 5)
+        ]
+
+        merged = server.merge_store(
+            {"activeId": projects[-1]["id"], "projects": []},
+            {"activeId": projects[-1]["id"], "projects": projects},
+        )
+
+        self.assertEqual(len(merged["projects"]), server.MAX_PROJECTS)
+        self.assertEqual(merged["projects"][0]["id"], projects[-1]["id"])
+
 
 if __name__ == "__main__":
     unittest.main()
