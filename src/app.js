@@ -2,6 +2,9 @@ const CANVAS_WIDTH = 864;
 const CANVAS_HEIGHT = 1152;
 const CARD_SIDE_PADDING = 42;
 const CARD_CONTENT_WIDTH = CANVAS_WIDTH - CARD_SIDE_PADDING * 2;
+const IMAGE_EDGE_GUTTER = 18;
+const MAX_IMAGE_WIDTH_PERCENT = 125;
+const MAX_IMAGE_FIXED_WIDTH = CANVAS_WIDTH - IMAGE_EDGE_GUTTER * 2;
 const EXPORT_IMAGE_MIME = "image/png";
 const EXPORT_IMAGE_EXTENSION = ".png";
 const EXPORT_ZIP_COMPRESSION = "STORE";
@@ -80,6 +83,7 @@ let pendingIllustrationSearch = null;
 let themeLibraryReturnFocus = null;
 let themeLibraryFilter = "all";
 let helpReturnFocus = null;
+let imagePreviewReturnFocus = null;
 let imageReorderDrag = null;
 let imageReorderBusy = false;
 let articleSettingsOpen = false;
@@ -258,6 +262,11 @@ const els = {
   cropApply: $("#cropApplyBtn"),
   cropReset: $("#cropResetBtn"),
   ratioButtons: document.querySelectorAll("[data-ratio]"),
+  imagePreviewModal: $("#imagePreviewModal"),
+  imagePreviewImage: $("#imagePreviewImage"),
+  imagePreviewTitle: $("#imagePreviewTitle"),
+  imagePreviewDescription: $("#imagePreviewDescription"),
+  imagePreviewClose: $("#imagePreviewCloseBtn"),
 };
 
 const sampleAvatar =
@@ -6748,7 +6757,7 @@ function updateImageList() {
 }
 
 function defaultNewImageLayout() {
-  const fixedWidth = normalizeFixedImageDimension(els.fixedImageWidth?.value, CARD_CONTENT_WIDTH);
+  const fixedWidth = normalizeFixedImageDimension(els.fixedImageWidth?.value, MAX_IMAGE_FIXED_WIDTH);
   const fixedHeight = normalizeFixedImageDimension(els.fixedImageHeight?.value, 760);
   if (fixedWidth && fixedHeight) {
     return {
@@ -6761,8 +6770,9 @@ function defaultNewImageLayout() {
   const percent = Number(els.imageWidthPercent?.value);
   if (!Number.isFinite(percent)) return null;
   return {
-    widthPercent: clamp(percent, 25, 100),
+    widthPercent: clamp(percent, 25, MAX_IMAGE_WIDTH_PERCENT),
     align: "center",
+    allowExtendedHeight: percent > 100,
   };
 }
 
@@ -6773,7 +6783,7 @@ function applyImageWidthToAll() {
     return;
   }
 
-  const widthPercent = clamp(Number(els.imageWidthPercent?.value) || 100, 25, 100);
+  const widthPercent = clamp(Number(els.imageWidthPercent?.value) || 100, 25, MAX_IMAGE_WIDTH_PERCENT);
   if (els.imageWidthPercent) els.imageWidthPercent.value = String(Math.round(widthPercent));
 
   for (const [, image] of entries) {
@@ -6782,6 +6792,7 @@ function applyImageWidthToAll() {
       widthPercent,
       fixedWidth: null,
       fixedHeight: null,
+      allowExtendedHeight: true,
     };
   }
 
@@ -6798,7 +6809,7 @@ function applyFixedImageSizeToAll() {
     return;
   }
 
-  const fixedWidth = normalizeFixedImageDimension(els.fixedImageWidth?.value, CARD_CONTENT_WIDTH);
+  const fixedWidth = normalizeFixedImageDimension(els.fixedImageWidth?.value, MAX_IMAGE_FIXED_WIDTH);
   const fixedHeight = normalizeFixedImageDimension(els.fixedImageHeight?.value, 760);
   if (!fixedWidth || !fixedHeight) {
     els.status.textContent = "请输入固定宽度和固定高度";
@@ -6814,6 +6825,7 @@ function applyFixedImageSizeToAll() {
       fixedWidth,
       fixedHeight,
       widthPercent: null,
+      allowExtendedHeight: false,
     };
   }
 
@@ -7586,26 +7598,19 @@ function getImageSourceRect(image, crop) {
   return clampCropRect(crop, image);
 }
 
-function imageBlockSize(sourceRect, maxWidth, maxHeight, layout = null) {
+function imageBlockSize(sourceRect, contentWidth, maxHeight, layout = null, maxWidth = contentWidth) {
   const normalized = normalizeImageLayout(layout);
   const aspect = sourceRect.width / sourceRect.height;
-  const baseWidth = Math.min(maxWidth, maxHeight * aspect);
+  const baseWidth = Math.min(contentWidth, maxHeight * aspect);
   const legacyMaxScale = baseWidth > 0 ? maxWidth / baseWidth : 1;
   const fixedWidth = normalized.fixedWidth && normalized.fixedHeight ? clamp(normalized.fixedWidth, 80, maxWidth) : null;
   const fixedHeight = normalized.fixedWidth && normalized.fixedHeight ? clamp(normalized.fixedHeight, 80, maxHeight) : null;
   const requestedWidth = normalized.widthPercent
-    ? maxWidth * (normalized.widthPercent / 100)
+    ? contentWidth * (normalized.widthPercent / 100)
     : baseWidth * clamp(normalized.widthScale, 0.25, legacyMaxScale);
   const width = fixedWidth || Math.min(requestedWidth, maxWidth, maxHeight * aspect);
   const height = fixedHeight || width / aspect;
-  const maxOffset = Math.max(0, maxWidth - width);
-  let offsetX = maxOffset / 2;
-
-  if (normalized.align === "left") {
-    offsetX = 0;
-  } else if (normalized.align === "right") {
-    offsetX = maxOffset;
-  }
+  const offsetX = imageOffsetForAlignment(contentWidth, width, maxWidth, normalized.align);
 
   return {
     width,
@@ -7613,17 +7618,32 @@ function imageBlockSize(sourceRect, maxWidth, maxHeight, layout = null) {
     offsetX,
     baseWidth,
     maxWidth,
+    contentWidth,
   };
+}
+
+function imageOffsetForAlignment(contentWidth, width, maxWidth, align) {
+  const remainingContentWidth = contentWidth - width;
+  if (width <= contentWidth) {
+    if (align === "left") return 0;
+    if (align === "right") return remainingContentWidth;
+    return remainingContentWidth / 2;
+  }
+
+  const safeBleed = Math.max(0, (maxWidth - contentWidth) / 2);
+  if (align === "left") return -safeBleed;
+  if (align === "right") return remainingContentWidth + safeBleed;
+  return remainingContentWidth / 2;
 }
 
 function normalizeImageLayout(layout = {}) {
   const value = layout || {};
   const align = ["left", "center", "right"].includes(value.align) ? value.align : "center";
   const rawPercent = Number(value.widthPercent);
-  const widthPercent = Number.isFinite(rawPercent) && rawPercent > 0 ? clamp(rawPercent, 25, 100) : null;
+  const widthPercent = Number.isFinite(rawPercent) && rawPercent > 0 ? clamp(rawPercent, 25, MAX_IMAGE_WIDTH_PERCENT) : null;
   const rawFixedWidth = Number(value.fixedWidth);
   const rawFixedHeight = Number(value.fixedHeight);
-  const fixedWidth = Number.isFinite(rawFixedWidth) && rawFixedWidth > 0 ? clamp(rawFixedWidth, 80, CARD_CONTENT_WIDTH) : null;
+  const fixedWidth = Number.isFinite(rawFixedWidth) && rawFixedWidth > 0 ? clamp(rawFixedWidth, 80, MAX_IMAGE_FIXED_WIDTH) : null;
   const fixedHeight = Number.isFinite(rawFixedHeight) && rawFixedHeight > 0 ? clamp(rawFixedHeight, 80, 760) : null;
   return {
     widthScale: clamp(Number(value.widthScale) || 1, 0.25, 20),
@@ -7631,6 +7651,7 @@ function normalizeImageLayout(layout = {}) {
     fixedWidth,
     fixedHeight,
     align,
+    allowExtendedHeight: value.allowExtendedHeight === true,
   };
 }
 
@@ -7638,6 +7659,11 @@ function imageMaxHeightForLayout(layout, fallbackMaxHeight, absoluteMaxHeight = 
   const normalized = normalizeImageLayout(layout);
   if (!normalized.fixedHeight) return fallbackMaxHeight;
   return clamp(normalized.fixedHeight, 80, Math.max(80, absoluteMaxHeight));
+}
+
+function imageMaxWidthForBounds(bounds) {
+  const contentWidth = bounds.right - bounds.left;
+  return Math.min(MAX_IMAGE_FIXED_WIDTH, contentWidth * (MAX_IMAGE_WIDTH_PERCENT / 100));
 }
 
 function contentBoundsForPage(settings, showIdentity) {
@@ -7737,7 +7763,15 @@ async function buildPages(settings) {
       const img = imageCache[block.id];
       if (!img) continue;
       const sourceRect = getImageSourceRect(img, data.crop);
-      const size = imageBlockSize(sourceRect, contentWidth, imageMaxHeightForLayout(data.layout, Math.min(settings.imageHeight, page.bounds.bottom - page.bounds.top), page.bounds.bottom - page.bounds.top), data.layout);
+      const normalizedLayout = normalizeImageLayout(data.layout);
+      const layoutCanGrow = normalizedLayout.allowExtendedHeight || normalizedLayout.widthPercent > 100 || normalizedLayout.widthScale > 1;
+      const availableHeight = page.bounds.bottom - page.bounds.top;
+      const maxImageHeight = imageMaxHeightForLayout(
+        data.layout,
+        layoutCanGrow ? availableHeight : Math.min(settings.imageHeight, availableHeight),
+        availableHeight,
+      );
+      const size = imageBlockSize(sourceRect, contentWidth, maxImageHeight, data.layout, imageMaxWidthForBounds(page.bounds));
       const height = size.height;
       ensureSpace(height, hasContent && previousBlockType !== "spacer" ? 24 : 0);
       page.items.push({
@@ -7750,6 +7784,7 @@ async function buildPages(settings) {
         sourceRect,
         baseWidth: size.baseWidth,
         maxWidth: size.maxWidth,
+        contentWidth: size.contentWidth,
         x: page.bounds.left + size.offsetX,
         y,
         width: size.width,
@@ -7860,7 +7895,10 @@ async function buildScrollPage(settings) {
       const img = imageCache[block.id];
       if (!img) continue;
       const sourceRect = getImageSourceRect(img, data.crop);
-      const size = imageBlockSize(sourceRect, contentWidth, imageMaxHeightForLayout(data.layout, settings.imageHeight, 760), data.layout);
+      const normalizedLayout = normalizeImageLayout(data.layout);
+      const layoutCanGrow = normalizedLayout.allowExtendedHeight || normalizedLayout.widthPercent > 100 || normalizedLayout.widthScale > 1;
+      const maxImageHeight = imageMaxHeightForLayout(data.layout, layoutCanGrow ? 760 : settings.imageHeight, 760);
+      const size = imageBlockSize(sourceRect, contentWidth, maxImageHeight, data.layout, imageMaxWidthForBounds(bounds));
       y += hasContent && previousBlockType !== "spacer" ? 24 : 0;
       page.items.push({
         type: "image",
@@ -7872,6 +7910,7 @@ async function buildScrollPage(settings) {
         sourceRect,
         baseWidth: size.baseWidth,
         maxWidth: size.maxWidth,
+        contentWidth: size.contentWidth,
         x: bounds.left + size.offsetX,
         y,
         width: size.width,
@@ -8133,6 +8172,7 @@ function collectImageHits(page, scrollPage = false) {
         actualHeight: item.height,
         baseWidth: item.baseWidth || item.width,
         maxWidth: item.maxWidth || CARD_CONTENT_WIDTH,
+        contentWidth: item.contentWidth || CARD_CONTENT_WIDTH,
       };
     })
     .filter((hit) => hit.height > 0 && hit.width > 0);
@@ -8919,11 +8959,12 @@ function createImageEditLayer(canvas) {
     box.dataset.occurrenceKey = hit.occurrenceKey || `${hit.imageId}:${hit.sourceStart}`;
     box.dataset.baseWidth = String(hit.baseWidth || hit.width);
     box.dataset.maxWidth = String(hit.maxWidth || CARD_CONTENT_WIDTH);
+    box.dataset.contentWidth = String(hit.contentWidth || CARD_CONTENT_WIDTH);
     box.dataset.actualHeight = String(hit.actualHeight || hit.height);
     box.tabIndex = 0;
     box.setAttribute("role", "group");
-    box.setAttribute("aria-label", `图片 ${state.images[hit.imageId]?.name || hit.imageId}；点击定位源码，可拖动调整顺序，Alt 加上下方向键也可移动`);
-    box.title = "点击定位左侧图片标记；悬浮后可移动、删除或调整大小";
+    box.setAttribute("aria-label", `图片 ${state.images[hit.imageId]?.name || hit.imageId}；双击放大预览，单击定位源码，可拖动调整顺序`);
+    box.title = "双击放大预览；单击定位源码；悬浮后可移动、删除或调整大小";
     if (previewEditorPin?.start === hit.sourceStart && previewEditorPin?.end === hit.sourceEnd) {
       box.classList.add("is-source-linked");
     }
@@ -8987,6 +9028,7 @@ function createImageEditLayer(canvas) {
 
     box.addEventListener("keydown", handlePreviewImageOrderKeydown);
     box.addEventListener("click", handlePreviewImageTarget);
+    box.addEventListener("dblclick", openImagePreviewFromCard);
     box.append(dragHandle, orderBar, alignBar, resize);
     layer.append(box);
   }
@@ -8999,6 +9041,39 @@ function applyImageBoxStyle(box, hit) {
   box.style.top = `${(hit.y / CANVAS_HEIGHT) * 100}%`;
   box.style.width = `${(hit.width / CANVAS_WIDTH) * 100}%`;
   box.style.height = `${(hit.height / CANVAS_HEIGHT) * 100}%`;
+}
+
+function openImagePreviewFromCard(event) {
+  if (event.target.closest("button, [data-action]")) return;
+  const box = event.currentTarget.closest(".preview-image-box");
+  const imageId = box?.dataset.imageId;
+  const image = state.images[imageId];
+  if (!image?.src || !els.imagePreviewModal || !els.imagePreviewImage) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  imagePreviewReturnFocus = box;
+  els.imagePreviewImage.src = image.src;
+  els.imagePreviewImage.alt = image.name || "图片预览";
+  els.imagePreviewTitle.textContent = image.name || "图片预览";
+  els.imagePreviewDescription.textContent = image.crop ? "原图预览 · 当前卡片已应用裁剪 · 按 Esc 关闭" : "原图尺寸预览 · 按 Esc 关闭";
+  els.workspace?.setAttribute("inert", "");
+  els.imagePreviewModal.classList.remove("hidden");
+  window.requestAnimationFrame(() => els.imagePreviewClose?.focus());
+}
+
+function closeImagePreview() {
+  if (!els.imagePreviewModal || els.imagePreviewModal.classList.contains("hidden")) return;
+  els.imagePreviewModal.classList.add("hidden");
+  els.workspace?.removeAttribute("inert");
+  els.imagePreviewImage?.removeAttribute("src");
+  imagePreviewReturnFocus?.focus?.();
+  imagePreviewReturnFocus = null;
+}
+
+function trapImagePreviewFocus(event) {
+  if (event.key !== "Tab" || els.imagePreviewModal?.classList.contains("hidden")) return;
+  trapModalFocus(event, els.imagePreviewModal);
 }
 
 function createTextHitLayer(canvas) {
@@ -9733,6 +9808,10 @@ function movePreviewImageByStep(event) {
 }
 
 function handlePreviewImageOrderKeydown(event) {
+  if (!event.altKey && event.key === "Enter") {
+    openImagePreviewFromCard(event);
+    return;
+  }
   if (imageReorderBusy || !event.altKey || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
   event.preventDefault();
   const sourceStart = Number(event.currentTarget.dataset.sourceStart);
@@ -9915,6 +9994,7 @@ function startPreviewImageResize(event) {
       visibleHeight: (Number.parseFloat(box.style.height) / 100) * CANVAS_HEIGHT,
       baseWidth: Number(box.dataset.baseWidth) || (Number.parseFloat(box.style.width) / 100) * CANVAS_WIDTH,
       maxWidth: Number(box.dataset.maxWidth) || CARD_CONTENT_WIDTH,
+      contentWidth: Number(box.dataset.contentWidth) || CARD_CONTENT_WIDTH,
     },
     canvasScaleX: CANVAS_WIDTH / frameRect.width,
     canvasScaleY: CANVAS_HEIGHT / frameRect.height,
@@ -9937,9 +10017,14 @@ function movePreviewImageResize(event) {
   const nextHeight = nextWidth * (imageEditDrag.startBox.height / imageEditDrag.startBox.width);
   const visibleRatio = imageEditDrag.startBox.visibleHeight / Math.max(1, imageEditDrag.startBox.height);
   const nextVisibleHeight = nextHeight * visibleRatio;
-  const maxOffset = Math.max(0, imageEditDrag.startBox.maxWidth - nextWidth);
   const sidePadding = cardThemeFor(state).geometry.sidePadding;
-  const nextX = nextLayout.align === "left" ? sidePadding : nextLayout.align === "right" ? sidePadding + maxOffset : sidePadding + maxOffset / 2;
+  const alignOffset = imageOffsetForAlignment(
+    imageEditDrag.startBox.contentWidth,
+    nextWidth,
+    imageEditDrag.startBox.maxWidth,
+    nextLayout.align,
+  );
+  const nextX = sidePadding + alignOffset;
   applyImageBoxStyle(imageEditDrag.box, {
     x: nextX,
     y: imageEditDrag.startBox.y,
@@ -9966,9 +10051,10 @@ function resizeImageLayout(startLayout, startBox, dx, dy) {
   return {
     ...startLayout,
     widthScale: nextWidth / startBox.baseWidth,
-    widthPercent: (nextWidth / startBox.maxWidth) * 100,
+    widthPercent: (nextWidth / startBox.contentWidth) * 100,
     fixedWidth: null,
     fixedHeight: null,
+    allowExtendedHeight: true,
   };
 }
 
@@ -10453,6 +10539,11 @@ function bindEvents() {
   els.cropModal.addEventListener("click", (event) => {
     if (event.target === els.cropModal) closeCropper();
   });
+  els.imagePreviewClose?.addEventListener("click", closeImagePreview);
+  els.imagePreviewModal?.addEventListener("click", (event) => {
+    if (event.target === els.imagePreviewModal) closeImagePreview();
+  });
+  els.imagePreviewModal?.addEventListener("keydown", trapImagePreviewFocus);
   els.ratioButtons.forEach((button) => {
     button.addEventListener("click", () => setCropAspect(button.dataset.ratio));
   });
@@ -10466,6 +10557,7 @@ function bindEvents() {
     if (event.key === "Escape" && !els.illustrationModal?.classList.contains("hidden")) closeIllustrationModal();
     if (event.key === "Escape" && !els.themeLibraryModal?.classList.contains("hidden")) closeThemeLibrary();
     if (event.key === "Escape" && !els.helpModal?.classList.contains("hidden")) closeHelp();
+    if (event.key === "Escape" && !els.imagePreviewModal?.classList.contains("hidden")) closeImagePreview();
     if (event.key === "Escape" && imageReorderDrag) cancelPreviewImageReorder();
     if (event.key === "Escape") clearPreviewEditorPin();
   });

@@ -174,6 +174,19 @@ class PreviewDirectEditingContractTests(unittest.TestCase):
         self.assertIn("applyProgrammaticContent", remove)
         self.assertNotIn("delete state.images", remove)
 
+    def test_preview_images_open_a_centered_lightbox_on_double_click(self):
+        image_layer = function_body("createImageEditLayer")
+        open_preview = function_body("openImagePreviewFromCard")
+        close_preview = function_body("closeImagePreview")
+
+        self.assertIn('addEventListener("dblclick", openImagePreviewFromCard)', image_layer)
+        self.assertIn('event.key === "Enter"', function_body("handlePreviewImageOrderKeydown"))
+        self.assertIn('id="imagePreviewModal"', HTML)
+        self.assertIn("imagePreviewModal.classList.remove", open_preview)
+        self.assertIn('setAttribute("inert", "")', open_preview)
+        self.assertIn('removeAttribute("inert")', close_preview)
+        self.assertIn(".image-preview-stage", STYLES)
+
 
 class InlineFormattingInteractionContractTests(unittest.TestCase):
     def test_bold_and_italic_buttons_toggle_existing_wrappers(self):
@@ -384,9 +397,15 @@ class CardThemeContractTests(unittest.TestCase):
         self.assertIn("totalPages", signature)
         self.assertIn("table: item.table", signature)
 
-    def test_theme_layout_keeps_images_inside_content_bounds(self):
+    def test_theme_layout_allows_safe_image_bleed_without_leaving_canvas(self):
         image_size = function_body("imageBlockSize")
         self.assertIn("Math.min(requestedWidth, maxWidth, maxHeight * aspect)", image_size)
+        self.assertIn("imageOffsetForAlignment", image_size)
+        self.assertIn("safeBleed", function_body("imageOffsetForAlignment"))
+        self.assertIn("MAX_IMAGE_FIXED_WIDTH", APP)
+        self.assertIn("imageMaxWidthForBounds(page.bounds)", function_body("buildPages"))
+        self.assertIn('max="125"', HTML)
+        self.assertIn("allowExtendedHeight: true", function_body("resizeImageLayout"))
         themes = constant_object("CARD_THEMES")
         magazine = themes[themes.index("magazine:") :]
         self.assertIn("imageHeight: 400", magazine)

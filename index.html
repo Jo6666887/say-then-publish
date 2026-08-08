@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>说了就发 | Say Then Publish</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2317202f'/%3E%3Cpath d='M18 17h28v7H18zm0 13h20v6H18zm0 12h28v6H18z' fill='%23fff'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="src/styles.css?v=20260801-cache-conflict-v2" />
+    <link rel="stylesheet" href="src/styles.css?v=20260808-image-preview" />
   </head>
   <body>
     <main class="workspace">
@@ -256,7 +256,7 @@
                   <label>
                     图片宽度
                     <span class="percent-input">
-                      <input id="imageWidthPercentInput" type="number" min="25" max="100" step="1" value="100" />
+                      <input id="imageWidthPercentInput" type="number" min="25" max="125" step="1" value="100" />
                       <b>%</b>
                     </span>
                   </label>
@@ -266,7 +266,7 @@
                   <label>
                     固定宽
                     <span class="unit-input">
-                      <input id="fixedImageWidthInput" type="number" min="80" max="780" step="1" placeholder="宽" />
+                      <input id="fixedImageWidthInput" type="number" min="80" max="828" step="1" placeholder="宽" />
                       <b>px</b>
                     </span>
                   </label>
@@ -638,6 +638,23 @@
       </div>
     </div>
 
+    <div id="imagePreviewModal" class="modal image-preview-modal hidden" role="dialog" aria-modal="true" aria-labelledby="imagePreviewTitle" aria-describedby="imagePreviewDescription">
+      <div class="image-preview-card">
+        <div class="image-preview-head">
+          <div>
+            <h3 id="imagePreviewTitle">图片预览</h3>
+            <p id="imagePreviewDescription">原图尺寸预览 · 按 Esc 关闭</p>
+          </div>
+          <button id="imagePreviewCloseBtn" class="image-preview-close" type="button" title="关闭图片预览" aria-label="关闭图片预览">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <div class="image-preview-stage">
+          <img id="imagePreviewImage" alt="" />
+        </div>
+      </div>
+    </div>
+
     <div id="importPreviewModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="importPreviewTitle">
       <div class="modal-card import-preview-card">
         <div class="modal-head">
@@ -705,6 +722,6 @@
     <script src="https://cdn.jsdelivr.net/npm/lucide@1.8.0/dist/umd/lucide.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
     <script src="src/user-profile.js"></script>
-    <script src="src/app.js?v=20260803-inline-delete-confirm"></script>
+    <script src="src/app.js?v=20260808-image-preview"></script>
   </body>
 </html>
