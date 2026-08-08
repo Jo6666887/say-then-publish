@@ -2013,6 +2013,30 @@ class ProjectStoreMergeTests(unittest.TestCase):
 
         self.assertEqual(merged["projects"], [current_project])
 
+    def test_newer_browser_revision_cannot_regress_confirmed_cloud_cursor(self):
+        current_project = {
+            "id": "project-1",
+            "title": "云端已确认",
+            "updatedAt": 200,
+            "cloudBaseUpdatedAt": 200,
+            "data": {"content": "第一版"},
+        }
+        stale_browser_revision = {
+            "id": "project-1",
+            "title": "继续编辑",
+            "updatedAt": 201,
+            "cloudBaseUpdatedAt": 0,
+            "data": {"content": "第二版"},
+        }
+
+        merged = server.merge_store(
+            {"activeId": "project-1", "projects": [current_project]},
+            {"activeId": "project-1", "projects": [stale_browser_revision]},
+        )
+
+        self.assertEqual(merged["projects"][0]["data"]["content"], "第二版")
+        self.assertEqual(merged["projects"][0]["cloudBaseUpdatedAt"], 200)
+
 
 if __name__ == "__main__":
     unittest.main()

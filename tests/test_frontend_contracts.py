@@ -76,6 +76,13 @@ class SharedProjectConflictContractTests(unittest.TestCase):
         self.assertIn("localConflictProject", reconcile)
         self.assertIn("冲突备份", conflict)
         self.assertIn("__localConflictOf", conflict)
+        self.assertIn("cloudBaseUpdatedAt: 0", conflict)
+
+    def test_deleted_original_also_removes_stale_conflict_descendants(self):
+        resolve = function_body("resolveProjectDeletionWinners")
+
+        self.assertIn("__localConflictOf", resolve)
+        self.assertIn("deletedIds.has(conflictRoot)", resolve)
 
     def test_shared_saves_require_protocol_and_server_base_revision(self):
         start = APP.index("async function saveProjectStoreToSharedServer(")

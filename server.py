@@ -642,7 +642,19 @@ def merge_store(current: dict, incoming: dict) -> dict:
         # Equal revisions are immutable. Keeping the existing complete object avoids
         # a late text-only/cache response replacing images or layout at the same time.
         if previous is None or project_timestamp(project) > project_timestamp(previous):
-            merged[project["id"]] = project
+            winner = project
+            if previous is not None:
+                # The browser can save again before the asynchronous cloud
+                # confirmation has refreshed its local snapshot. Never let that
+                # stale snapshot move the server's confirmed cloud cursor
+                # backwards; doing so makes the next linear edit look like a
+                # two-sided conflict and creates a new backup on every autosave.
+                previous_cloud_base = parse_updated_at(previous.get("cloudBaseUpdatedAt")) or 0
+                incoming_cloud_base = parse_updated_at(project.get("cloudBaseUpdatedAt")) or 0
+                if previous_cloud_base > incoming_cloud_base:
+                    winner = dict(project)
+                    winner["cloudBaseUpdatedAt"] = previous_cloud_base
+            merged[project["id"]] = winner
 
     deletions: dict[str, dict] = {}
     for deletion in [*normalized_deletions(current), *normalized_deletions(incoming)]:

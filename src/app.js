@@ -2687,7 +2687,15 @@ function resolveProjectDeletionWinners(projects, deletions) {
   });
   const deletedIds = new Set(winningDeletions.map((deletion) => deletion.id));
   return {
-    projects: (projects || []).filter((project) => !deletedIds.has(project.id)),
+    projects: (projects || []).filter((project) => {
+      if (deletedIds.has(project.id)) return false;
+      const conflictRoot = typeof project?.data?.__localConflictOf === "string"
+        ? project.data.__localConflictOf
+        : "";
+      // Once the original project has an explicit tombstone, stale browser
+      // caches must not resurrect its conflict descendants under fresh IDs.
+      return !conflictRoot || !deletedIds.has(conflictRoot);
+    }),
     deletedProjects: winningDeletions,
   };
 }
@@ -2922,6 +2930,10 @@ function localConflictProject(project, occupiedIds) {
     id,
     title: title.slice(0, 40),
     updatedAt: nextProjectTimestamp(project),
+    // This is a brand-new cloud project. It must not inherit the original
+    // project's cloud cursor, otherwise its first follow-up edit can be
+    // mistaken for a second concurrent conflict.
+    cloudBaseUpdatedAt: 0,
     data: { ...project.data, __localConflictOf: conflictRoot },
   };
 }
