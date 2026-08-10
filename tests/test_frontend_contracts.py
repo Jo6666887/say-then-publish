@@ -151,6 +151,18 @@ class SharedProjectConflictContractTests(unittest.TestCase):
         self.assertIn('state.historyFilter === "backups"', history)
         self.assertIn("compactHistoryProjects(allHistoryProjects())", history)
 
+    def test_mobile_history_is_a_dismissible_drawer_and_closes_after_selection(self):
+        history = function_body("updateProjectHistory")
+        bind = function_body("bindEvents")
+
+        self.assertIn('window.matchMedia("(max-width: 900px)").matches', history)
+        self.assertIn("setHistoryOpen(false)", history)
+        self.assertIn("event.target === els.historySidebar", bind)
+        self.assertIn("tappedMobileBackdrop", bind)
+        self.assertIn("position: fixed", STYLES)
+        self.assertIn("height: 100dvh", STYLES)
+        self.assertIn("width: min(88vw, 360px)", STYLES)
+
     def test_project_delete_requires_explicit_confirmation_before_any_tombstone(self):
         request = function_body("requestProjectDeletion")
         remove = function_body("deleteProject")

@@ -3936,7 +3936,12 @@ function updateProjectHistory() {
             </span>`
       }
     `;
-    item.querySelector(".history-open").addEventListener("click", () => openProject(project.id));
+    item.querySelector(".history-open").addEventListener("click", () => {
+      if (window.matchMedia("(max-width: 900px)").matches) {
+        setHistoryOpen(false);
+      }
+      void openProject(project.id);
+    });
     item.querySelector(".history-duplicate")?.addEventListener("click", (event) => {
       event.currentTarget.disabled = true;
       void duplicateProject(project.id);
@@ -10645,6 +10650,12 @@ function bindEvents() {
   els.replaceAll.addEventListener("click", replaceAll);
   els.historyToggle.addEventListener("click", toggleHistory);
   els.historyClose.addEventListener("click", () => setHistoryOpen(false, true));
+  els.historySidebar?.addEventListener("click", (event) => {
+    const tappedMobileBackdrop = window.matchMedia("(max-width: 900px)").matches
+      && event.target === els.historySidebar
+      && els.historySidebar.classList.contains("open");
+    if (tappedMobileBackdrop) setHistoryOpen(false, true);
+  });
   els.help?.addEventListener("click", openHelp);
   els.helpClose?.addEventListener("click", closeHelp);
   els.helpModal?.addEventListener("click", (event) => {
