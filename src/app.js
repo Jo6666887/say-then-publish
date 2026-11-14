@@ -2187,6 +2187,7 @@ function markProjectCloudBase(projectId, updatedAt) {
       localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(snapshot));
     } catch (error) {
       projectStoreLocalStorageUnavailable = true;
+      discardStaleLocalStorageProjectStore(snapshot);
       console.warn("云端基线写入 LocalStorage 失败", error);
     }
   }
@@ -2989,6 +2990,16 @@ function localConflictProject(project, occupiedIds) {
   };
 }
 
+function projectContentSignature(project) {
+  const data = { ...(project?.data || {}) };
+  delete data.__localConflictOf;
+  try {
+    return stableJsonStringify(data);
+  } catch {
+    return `${project?.id || ""}:${project?.updatedAt || 0}`;
+  }
+}
+
 function reconcileLocalProjectsWithShared(localProjects, sharedProjects) {
   const normalizedLocal = mergeProjectLists([], localProjects);
   const normalizedShared = mergeProjectLists([], sharedProjects, { preferIncomingOnEqual: true });
@@ -3001,6 +3012,16 @@ function reconcileLocalProjectsWithShared(localProjects, sharedProjects) {
   ]);
   const localOnly = [];
   const conflicts = [];
+  // Content fingerprints of everything we already have. A local revision whose
+  // document is identical to an existing project (only the timestamp moved,
+  // e.g. after a schema migration bumped updatedAt) is not a real conflict and
+  // must not spawn another "冲突备份" on every page load.
+  const knownSignatures = new Set([
+    ...normalizedShared.map(projectContentSignature),
+    ...normalizedLocal
+      .filter((project) => typeof project.data?.__localConflictOf === "string")
+      .map(projectContentSignature),
+  ]);
   for (const localProject of normalizedLocal) {
     const sharedProject = sharedById.get(localProject.id);
     if (!sharedProject) {
@@ -3011,6 +3032,9 @@ function reconcileLocalProjectsWithShared(localProjects, sharedProjects) {
       !projectRevisionMatches(localProject, sharedProject)
       && Number(localProject.updatedAt || 0) > Number(sharedProject.updatedAt || 0)
     ) {
+      const signature = projectContentSignature(localProject);
+      if (knownSignatures.has(signature)) continue;
+      knownSignatures.add(signature);
       conflicts.push(localConflictProject(localProject, occupiedIds));
     }
   }
@@ -3225,6 +3249,35 @@ function normalizeProject(project) {
   };
 }
 
+// When the snapshot no longer fits in localStorage, the previous (older) copy
+// would otherwise stay there forever. On the next page load it is read first,
+// looks "newer" than the server after normalization, and spawns conflict
+// copies again. IndexedDB and the local server already hold the real data.
+// Keep a tiny pointer instead of deleting the key: with no key at all,
+// loadProjectStore() falls back to the legacy single-project migration and
+// creates a brand-new duplicate draft from the editor state on every load.
+function discardStaleLocalStorageProjectStore(snapshot = null) {
+  const pointer = {
+    activeId: snapshot?.activeId || state.currentProjectId || null,
+    projects: [],
+    deletedProjects: Array.isArray(snapshot?.deletedProjects) ? snapshot.deletedProjects : [],
+    storedIn: "indexeddb",
+  };
+  try {
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(pointer));
+  } catch {
+    try {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify({ ...pointer, deletedProjects: [] }));
+    } catch {
+      try {
+        localStorage.removeItem(PROJECTS_STORAGE_KEY);
+      } catch {
+        // Nothing else to clean up.
+      }
+    }
+  }
+}
+
 function saveProjectStore({ scheduleDatabase = true } = {}) {
   const snapshot = projectStoreSnapshot();
   rememberActiveProject(snapshot.activeId);
@@ -3235,6 +3288,7 @@ function saveProjectStore({ scheduleDatabase = true } = {}) {
     } catch (error) {
       localStorageSaved = false;
       projectStoreLocalStorageUnavailable = true;
+      discardStaleLocalStorageProjectStore(snapshot);
       console.warn("LocalStorage 草稿写入失败，后续改用 IndexedDB", error);
     }
   }
@@ -6741,10 +6795,35 @@ async function handleEditorDrop(event) {
     : `已插入 ${imported.tags.length} 张图片；请稍候再刷新`;
 }
 
+const AVATAR_MAX_SIDE = 512;
+
+// The avatar is copied into every project snapshot (and every conflict copy),
+// so a multi-megabyte phone photo multiplies quickly and slows every load and
+// save. A card avatar is drawn at well under 200px; 512px keeps it crisp.
+async function downscaleAvatarDataUrl(dataUrl) {
+  try {
+    const image = await loadImage(dataUrl);
+    const width = image.naturalWidth || image.width;
+    const height = image.naturalHeight || image.height;
+    const scale = Math.min(1, AVATAR_MAX_SIDE / Math.max(width, height));
+    if (scale === 1 && dataUrl.length < 400_000) return dataUrl;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const png = canvas.toDataURL("image/png");
+    return png.length < 400_000 ? png : canvas.toDataURL("image/jpeg", 0.9);
+  } catch {
+    return dataUrl;
+  }
+}
+
 async function handleAvatar(event) {
   const file = event.target.files?.[0];
   if (!file) return;
-  state.avatar = await readFileAsDataURL(file);
+  state.avatar = await downscaleAvatarDataUrl(await readFileAsDataURL(file));
   state.avatarCrop = null;
   updateAvatarPreview();
   updateImageList();

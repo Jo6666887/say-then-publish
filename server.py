@@ -68,6 +68,7 @@ STORE_LOCK = threading.Lock()
 APP_SERVICE = "write-then-publish"
 APP_HEALTH_SCHEMA = 1
 CLOUD = CloudStore.from_root(ROOT)
+CLOUD.cache_dir = DATA_DIR / "asset-cache"
 
 
 @dataclass(frozen=True)
@@ -976,11 +977,11 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
-    def send_bytes(self, payload: bytes, content_type: str) -> None:
+    def send_bytes(self, payload: bytes, content_type: str, *, cache_control: str = "private, max-age=300") -> None:
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Cache-Control", "private, max-age=300")
+        self.send_header("Cache-Control", cache_control)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Security-Policy", "sandbox; default-src 'none'")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
@@ -1266,7 +1267,12 @@ class WriteThenPublishHandler(SimpleHTTPRequestHandler):
             try:
                 if len(parts) == 2 and parts[1] == "content":
                     asset, raw = backend.get_asset(asset_id)
-                    self.send_bytes(raw, asset.get("mime_type") or "application/octet-stream")
+                    # An asset id always points at the same bytes, so the browser may keep it.
+                    self.send_bytes(
+                        raw,
+                        asset.get("mime_type") or "application/octet-stream",
+                        cache_control="private, max-age=31536000, immutable",
+                    )
                     return
                 if len(parts) == 1:
                     with STORE_LOCK:

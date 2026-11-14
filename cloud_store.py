@@ -196,6 +196,11 @@ class CloudStore:
         self._tos_client = None
         self._lock = threading.RLock()
         self._asset_bytes: dict[str, bytes] = {}
+        # Asset rows are immutable per asset_id, so reads can be cached and served
+        # without waiting on the global sync lock (which may be held by a long sync).
+        self._asset_rows: dict[str, dict] = {}
+        self._cache_lock = threading.Lock()
+        self.cache_dir: Path | None = None
 
     @classmethod
     def from_root(cls, root: Path) -> "CloudStore":
@@ -529,7 +534,7 @@ class CloudStore:
                 "metadata": metadata,
             }
         )
-        self._asset_bytes[str(asset["asset_id"])] = raw
+        self._store_cached_asset(str(asset["asset_id"]), asset, raw)
         known_by_sha[sha256] = asset
         known_by_id[str(asset["asset_id"])] = asset
         all_by_id[str(asset["asset_id"])] = asset
@@ -1054,13 +1059,83 @@ class CloudStore:
             counts = self._reference_counts(local_store, assets)
             return [self._public_asset(asset, counts.get(str(asset["asset_id"]), 0)) for asset in assets]
 
+    def _disk_cache_paths(self, asset_id: str) -> tuple[Path, Path] | None:
+        if self.cache_dir is None or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", asset_id):
+            return None
+        return self.cache_dir / f"{asset_id}.bin", self.cache_dir / f"{asset_id}.json"
+
+    def _read_cached_asset(self, asset_id: str) -> tuple[dict, bytes] | None:
+        with self._cache_lock:
+            row = self._asset_rows.get(asset_id)
+            raw = self._asset_bytes.get(asset_id)
+        if row is not None and raw is not None:
+            return row, raw
+        paths = self._disk_cache_paths(asset_id)
+        if not paths or not paths[0].is_file() or not paths[1].is_file():
+            return None
+        try:
+            row = json.loads(paths[1].read_text("utf-8"))
+            raw = paths[0].read_bytes()
+        except (OSError, ValueError):
+            return None
+        expected = str(row.get("sha256") or "")
+        if expected and hashlib.sha256(raw).hexdigest() != expected:
+            return None
+        with self._cache_lock:
+            self._asset_rows[asset_id] = row
+            self._asset_bytes[asset_id] = raw
+        return row, raw
+
+    def _store_cached_asset(self, asset_id: str, row: dict, raw: bytes) -> None:
+        with self._cache_lock:
+            self._asset_rows[asset_id] = row
+            self._asset_bytes[asset_id] = raw
+        paths = self._disk_cache_paths(asset_id)
+        if not paths:
+            return
+        try:
+            paths[0].parent.mkdir(parents=True, exist_ok=True)
+            tmp = paths[0].with_suffix(".bin.tmp")
+            tmp.write_bytes(raw)
+            os.replace(tmp, paths[0])
+            tmp = paths[1].with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(row, ensure_ascii=False), "utf-8")
+            os.replace(tmp, paths[1])
+        except OSError:
+            pass
+
+    def _forget_cached_asset(self, asset_id: str) -> None:
+        with self._cache_lock:
+            self._asset_rows.pop(asset_id, None)
+            self._asset_bytes.pop(asset_id, None)
+        paths = self._disk_cache_paths(asset_id)
+        if paths:
+            for path in paths:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
     def get_asset(self, asset_id: str) -> tuple[dict, bytes]:
-        with self._lock:
-            self._require_enabled()
-            asset = self._select_asset(asset_id)
-            if not asset:
-                raise CloudStoreError("找不到该资源")
-            return asset, self._download_object(asset)
+        self._require_enabled()
+        cached = self._read_cached_asset(asset_id)
+        if cached is not None:
+            return cached
+        # Network fetch happens outside self._lock so image loads never queue
+        # behind a running project sync.
+        asset = self._select_asset(asset_id)
+        if not asset:
+            raise CloudStoreError("找不到该资源")
+        with self._cache_lock:
+            raw = self._asset_bytes.get(asset_id)
+        if raw is None:
+            try:
+                output = self._get_tos_client().get_object(bucket=self.config.tos_bucket, key=asset["object_key"])
+                raw = output.read()
+            except Exception as error:
+                raise CloudStoreError(f"TOS 读取资源失败：{asset_id}") from error
+        self._store_cached_asset(asset_id, asset, raw)
+        return asset, raw
 
     def get_asset_payload(self, asset_id: str, local_store: dict) -> dict:
         asset, raw = self.get_asset(asset_id)
@@ -1090,7 +1165,7 @@ class CloudStore:
                 pass
             raise CloudStoreError("TOS 资源清理失败，已保留待重试状态") from error
 
-        self._asset_bytes.pop(asset_id, None)
+        self._forget_cached_asset(asset_id)
         self.rest.request(
             "PATCH",
             "/rest/v1/write_then_publish_assets",
